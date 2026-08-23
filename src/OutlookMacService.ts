@@ -1,22 +1,35 @@
 import { execFile } from 'child_process';
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import type {
+    CleanUndeliverableResult,
+    DeleteDraftsResult,
+    DeleteMailOptions,
+    DeleteMailResult,
     EmailBodyResult,
     InboxEmail,
     InboxFolderInfo,
     InboxSearchFilter,
     InboxSearchMatch,
+    ListDraftsResult,
     MailFolderRef,
+    MoveEmailsResult,
+    OutlookBridge,
+    PurgeDeletedItemsResult,
+    ReplyEmailParams,
+    ReplyEmailResult,
     SavedAttachment,
+    SaveTemplateResult,
     SelectedEmail,
+    SendAllDraftsResult,
+    SendEmailParams,
+    SentRecipientGroup,
     TemplateFolderResult,
-} from './PowerShellService';
+} from './types';
 // Path parsing and quote splitting are shared with the Windows reader on purpose:
 // a folder string and a quoted thread must resolve identically on both platforms,
 // and a second implementation here is how the two contracts drift apart.
-import { mailFolderRef, splitQuotedOriginal } from './PowerShellService';
+import { mailFolderRef, splitQuotedOriginal } from './mail';
+import { getConfig, reportRun, tempFile } from './runtime';
 
 // macOS Outlook automation via AppleScript (osascript).
 //
@@ -71,7 +84,7 @@ const MAC_ROOT_TERMS: Record<number, string> = {
     4: 'outbox',
 };
 
-/** The Windows `FolderPath` shape (`\\mailbox\Inbox\Savannah. GA`), built here
+/** The Windows `FolderPath` shape (`\\mailbox\Inbox\Invoices`), built here
  *  rather than in AppleScript — escaping backslashes through a template literal
  *  and then an AppleScript literal is unreadable, and TS already knows the parts. */
 function macFolderPath(emailAccount: string, rootLabel: string, segments: string[]): string {
@@ -83,7 +96,7 @@ function macFolderPath(emailAccount: string, rootLabel: string, segments: string
  * well-known root down through any further path segments.
  *
  * Folder names are compared with `is`, which is case-insensitive in AppleScript —
- * matching the Windows walk's `-ieq` so 'mobile, al' finds 'Mobile, AL' on both.
+ * matching the Windows walk's `-ieq` so 'invoices' finds 'Invoices' on both.
  * A missing segment errors by name instead of falling back to the root: silently
  * returning the Inbox for a caller that scoped to one folder hands back the wrong
  * emails under a name that says otherwise.
@@ -129,30 +142,40 @@ const FIELD_SEP = '\u001f';
 const RECORD_SEP = '\u001e';
 const LIST_SEP = '\u001d';
 
-/** Run an AppleScript via a temp file (avoids arg-length and quoting limits). */
+/**
+ * Run an AppleScript via a temp file (avoids arg-length and quoting limits).
+ *
+ * `timeout` overrides the configured default for this one call; see `configure()`
+ * for that and for the stdout cap.
+ */
 function runOsaScript(script: string, timeout?: number): Promise<string> {
-    const scriptFile = path.join(os.tmpdir(), `sla-osa-${Date.now()}-${Math.random().toString(36).slice(2)}.applescript`);
+    const scriptFile = tempFile('osa', 'applescript');
     fs.writeFileSync(scriptFile, script, 'utf-8');
+    const {timeoutMs, maxBufferBytes} = getConfig();
+    const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'osascript',
             [scriptFile],
-            { maxBuffer: 8 * 1024 * 1024, timeout: timeout ?? 60000 },
+            {maxBuffer: maxBufferBytes, timeout: timeout ?? timeoutMs},
             (error, stdout, stderr) => {
+                const durationMs = Date.now() - startedAt;
                 try {
                     fs.unlinkSync(scriptFile);
                 } catch { /* ignore */
                 }
                 if (error) {
                     // Running from a file, osascript prefixes the script path:
-                    // "/tmp/sla-osa-1.applescript:12:34: execution error: Microsoft
-                    // Outlook got an error: … (-1728)". Keep just the human part —
-                    // these strings reach the user in per-email failure lists.
+                    // "/tmp/outlook-bridge-osa-1.applescript:12:34: execution error:
+                    // Microsoft Outlook got an error: … (-1728)". Keep just the human
+                    // part — these strings reach the user in per-email failure lists.
                     const msg = (stderr || error.message)
                         .replace(/^(?:.*?:)?\d+:\d+:\s*execution error:\s*/m, '')
                         .trim();
+                    reportRun({runner: 'osascript', script, durationMs, error: msg});
                     reject(new Error(msg));
                 } else {
+                    reportRun({runner: 'osascript', script, durationMs});
                     resolve(stdout.replace(/\n$/, ''));
                 }
             }
@@ -202,27 +225,11 @@ return acctList as string`;
     return raw.split('\n').map(s => s.trim()).filter(Boolean);
 }
 
-interface OutlookEmailParams {
-    emailAccount: string;
-    to: string;
-    cc?: string;
-    subject: string;
-    htmlBody: string;
-    attachmentPath?: string;
-    sendImmediately: boolean;
-    /**
-     * Draft mode only. True opens an Outlook compose window per email; false
-     * files the draft into the Drafts folder with no window — the only workable
-     * option for batches. Defaults to true, matching the single-email callers.
-     */
-    openDraftWindow?: boolean;
-}
-
 /**
  * Create an Outlook email as a draft window (or send it) via AppleScript.
  * Mirrors the Windows COM contract from PowerShellService.sendOutlookEmail.
  */
-export async function sendOutlookEmail(params: OutlookEmailParams): Promise<void> {
+export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
     // Same safety property as Windows: never silently send from the wrong mailbox.
     // The account lookup raises when the address doesn't resolve, so there's no
     // pre-flight getOutlookAccounts() round-trip — it cost an extra osascript
@@ -324,7 +331,7 @@ export async function readInboxEmails(
     const days = Math.max(0, Math.floor(daysBack));
     const cap = Math.max(0, Math.floor(limit));
     if (cap === 0) return [];
-    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
+    const ref = folder ? mailFolderRef(folder) : {rootId: 6, rootLabel: 'Inbox', segments: []};
     // A folder argument that trims away to nothing ("\\", "  ") would otherwise
     // read the Inbox root and look like it had scoped — the exact silent
     // mis-scoping this parameter exists to prevent. Mirrors the Windows check.
@@ -372,7 +379,7 @@ end tell`;
         .filter(Boolean)
         .map(line => {
             const [id, receivedTime] = line.split('\t');
-            return { id, receivedTime: receivedTime || '' };
+            return {id, receivedTime: receivedTime || ''};
         });
     // 'yyyy-MM-dd HH:mm' is lexicographically ordered, so plain string compare sorts it.
     index.sort((a, b) => b.receivedTime.localeCompare(a.receivedTime));
@@ -479,6 +486,7 @@ export async function saveEmailAttachments(
     _entryId: string,
     _fileNames: string[],
     _storeId?: string,
+    _destDir?: string,
 ): Promise<SavedAttachment[]> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
@@ -496,11 +504,11 @@ export async function openOutlookEmail(_entryId: string): Promise<void> {
  *
  * `storeId` is accepted for signature parity and ignored: macOS has no StoreID,
  * and `message id N` resolves against the application rather than one folder, so
- * the message is found wherever it currently sits — including a lane subfolder.
+ * the message is found wherever it currently sits — including a subfolder.
  *
  * Uses `plain text content`, matching the Windows reader's use of `.Body`: the
- * same tradeoff applies, so an HTML table's rows flatten and a tabular rate is
- * better read from its attachment.
+ * same tradeoff applies, so an HTML table's rows flatten and tabular figures are
+ * better read from an attachment.
  */
 export async function readEmailBody(
     entryId: string,
@@ -512,7 +520,7 @@ export async function readEmailBody(
     if (!/^\d+$/.test(id)) {
         throw new Error(
             `'${entryId}' is not an Outlook for Mac message id. Mac ids are small integers `
-            + `(e.g. "1263") returned by list_outlook_inbox on this machine; a Windows MAPI `
+            + `(e.g. "1263") returned by readInboxEmails on this machine; a Windows MAPI `
             + `EntryID cannot be resolved here.`,
         );
     }
@@ -565,7 +573,7 @@ end tell`;
     const [rid, subject, senderName, senderEmail, receivedTime, attJoined] = parts;
     const full = parts.slice(6).join(FIELD_SEP);
     const attachmentNames = (attJoined || '').split(LIST_SEP).filter(Boolean);
-    const { body, quoted, separator } = splitQuotedOriginal(full);
+    const {body, quoted, separator} = splitQuotedOriginal(full);
     // The quoted thread is context, never the priced content, so it is capped
     // harder than the reply itself — matching the Windows reader.
     const quotedCap = Math.min(maxChars, 4000);
@@ -590,24 +598,25 @@ export async function sendReceivedConfirmation(_emailAccount: string, _entryId: 
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
-export async function sendAllDrafts(_emailAccount: string): Promise<{
-    sent: number;
-    failed: { subject: string; error: string }[]
-}> {
+export async function sendAllDrafts(_emailAccount: string): Promise<SendAllDraftsResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
-export async function saveEmailAttachment(_entryId: string, _fileName: string, _storeId?: string): Promise<string> {
+export async function saveEmailAttachment(
+    _entryId: string,
+    _fileName: string,
+    _storeId?: string,
+    _destDir?: string,
+): Promise<string> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
-export async function saveEmailAttachmentDetailed(_entryId: string, _fileName: string, _storeId?: string): Promise<{
-    path: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-}> {
+export async function saveEmailAttachmentDetailed(
+    _entryId: string,
+    _fileName: string,
+    _storeId?: string,
+    _destDir?: string,
+): Promise<SavedAttachment> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
@@ -615,15 +624,7 @@ export async function cleanUndeliverableEmails(
     _emailAccount: string,
     _daysBack?: number,
     _dryRun?: boolean,
-): Promise<{
-    account: string;
-    scannedDays: number;
-    dryRun: boolean;
-    matchedCount: number;
-    deletedCount: number;
-    matched: unknown[];
-    failed: { subject: string; error: string }[];
-}> {
+): Promise<CleanUndeliverableResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
@@ -639,7 +640,7 @@ export async function readSentRecipientGroups(
     _emailAccount: string,
     _daysBack?: number,
     _limit?: number,
-): Promise<{ entryId: string; subject: string; sentOn: string; recipients: string[] }[]> {
+): Promise<SentRecipientGroup[]> {
     return [];
 }
 
@@ -711,12 +712,7 @@ export async function moveOutlookEmails(
     _entryIds: string[],
     _folderName: string,
     _createIfMissing?: boolean,
-): Promise<{
-    folderPath: string;
-    folderCreated: boolean;
-    moved: number;
-    failed: { entryId: string; error: string }[]
-}> {
+): Promise<MoveEmailsResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
@@ -724,28 +720,22 @@ export async function listOutlookDrafts(
     emailAccount: string,
     _limit?: number,
     _previewChars?: number,
-): Promise<{
-    account: string;
-    foldersScanned: string[];
-    count: number;
-    truncated: boolean;
-    drafts: never[];
-}> {
-    return { account: emailAccount, foldersScanned: [], count: 0, truncated: false, drafts: [] };
+): Promise<ListDraftsResult> {
+    return {account: emailAccount, foldersScanned: [], count: 0, truncated: false, drafts: []};
 }
 
 export async function deleteOutlookDrafts(
     _emailAccount: string,
     _entryIds: string[],
-): Promise<{ deleted: number; failed: { entryId: string; error: string }[] }> {
+): Promise<DeleteDraftsResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
 export async function deleteOutlookEmails(
     _emailAccount: string,
     _entryIds: string[],
-    _options?: { allowProtected?: boolean; dryRun?: boolean },
-): Promise<never> {
+    _options?: DeleteMailOptions,
+): Promise<DeleteMailResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
@@ -753,22 +743,11 @@ export async function purgeDeletedItems(
     _emailAccount: string,
     _olderThanDays?: number,
     _dryRun?: boolean,
-): Promise<never> {
+): Promise<PurgeDeletedItemsResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
-export async function replyOutlookEmail(_params: {
-    emailAccount: string;
-    entryId: string;
-    storeId?: string;
-    htmlBody?: string;
-    templateSubject?: string;
-    templateFolder?: string;
-    templateSection?: string;
-    templatePlaceholders?: Record<string, string>;
-    sendImmediately?: boolean;
-    openDraftWindow?: boolean;
-}): Promise<{ to: string; subject: string; repliedToSender: string }> {
+export async function replyOutlookEmail(_params: ReplyEmailParams): Promise<ReplyEmailResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
@@ -787,10 +766,38 @@ export async function saveTemplateEmail(
     _subject: string,
     _htmlBody: string,
     _folderName?: string,
-): Promise<{ folderPath: string; folderCreated: boolean }> {
+): Promise<SaveTemplateResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 
-export async function exportSheetAsPdf(_excelPath: string, _sheetName: string, _pdfPath: string): Promise<void> {
-    throw new Error('Excel PDF export is not yet supported on macOS.');
-}
+// Compile-time proof that this module answers the whole platform contract — the
+// same check PowerShellService carries. A stub that drifts from the Windows
+// signature fails here instead of widening the published types.
+const _conformance: OutlookBridge = {
+    getOutlookAccounts,
+    sendOutlookEmail,
+    replyOutlookEmail,
+    sendAllDrafts,
+    sendReceivedConfirmation,
+    readInboxEmails,
+    searchInboxByFilter,
+    readSelectedEmail,
+    readEmailBody,
+    openOutlookEmail,
+    listInboxFolders,
+    moveOutlookEmails,
+    listOutlookDrafts,
+    deleteOutlookDrafts,
+    deleteOutlookEmails,
+    purgeDeletedItems,
+    saveEmailAttachment,
+    saveEmailAttachmentDetailed,
+    saveEmailAttachments,
+    cleanUndeliverableEmails,
+    collectBouncedRecipients,
+    readSentRecipientGroups,
+    listOutlookSignatures,
+    readOutlookSignatureHtml,
+    readTemplateEmails,
+    saveTemplateEmail,
+};

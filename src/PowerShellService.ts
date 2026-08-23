@@ -1,10 +1,44 @@
 import { execFile } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { composeTemplateBody, findTemplateMarkers } from './outlookTemplateSections';
+import { mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from './mail';
+import { getConfig, reportRun, resolveDestDir, tempFile } from './runtime';
+import type {
+    CleanUndeliverableResult,
+    DeleteDraftsResult,
+    DeleteMailOptions,
+    DeleteMailOutcome,
+    DeleteMailResult,
+    EmailBodyResult,
+    InboxEmail,
+    InboxFolderInfo,
+    InboxSearchFilter,
+    InboxSearchMatch,
+    ListDraftsResult,
+    MailFolderRef,
+    MoveEmailsResult,
+    OutlookBridge,
+    PurgeDeletedItemsResult,
+    ReplyEmailParams,
+    ReplyEmailResult,
+    SavedAttachment,
+    SaveTemplateResult,
+    SelectedEmail,
+    SendAllDraftsResult,
+    SendEmailParams,
+    SentRecipientGroup,
+    TemplateFolderResult,
+} from './types';
 
+/**
+ * Run a generated script through Windows PowerShell.
+ *
+ * `timeout` overrides the configured default for this one call — pass it where a
+ * call has a genuinely different budget (a full-mailbox walk, a purge) rather
+ * than relying on the global. See `configure()` for both knobs.
+ */
 function runPowerShell(script: string, timeout?: number): Promise<string> {
     if (process.platform !== 'win32') {
         return Promise.reject(new Error('PowerShell and COM automation are only supported on Windows.'));
@@ -16,15 +50,21 @@ function runPowerShell(script: string, timeout?: number): Promise<string> {
     // JSON.parse. Setting the output encoding first makes non-ASCII survive as real
     // UTF-8 bytes, which Node then decodes correctly.
     const utf8Script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n${script}`;
+    const {timeoutMs, maxBufferBytes} = getConfig();
+    const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'powershell.exe',
             ['-NoProfile', '-NonInteractive', '-Command', utf8Script],
-            { maxBuffer: 1024 * 1024, timeout: timeout ?? undefined },
+            {maxBuffer: maxBufferBytes, timeout: timeout ?? timeoutMs},
             (error, stdout, stderr) => {
+                const durationMs = Date.now() - startedAt;
                 if (error) {
-                    reject(new Error(stderr || error.message));
+                    const message = stderr || error.message;
+                    reportRun({runner: 'powershell', script: utf8Script, durationMs, error: message});
+                    reject(new Error(message));
                 } else {
+                    reportRun({runner: 'powershell', script: utf8Script, durationMs});
                     resolve(stdout.trim());
                 }
             }
@@ -32,65 +72,19 @@ function runPowerShell(script: string, timeout?: number): Promise<string> {
     });
 }
 
-/** Escape a string for embedding inside a PowerShell single-quoted string. */
+/**
+ * Escape a string for embedding inside a PowerShell SINGLE-quoted literal — the
+ * only context caller-supplied text may go in. A double-quoted PowerShell string
+ * expands `$(...)` subexpressions, so text placed there would execute; where a
+ * generated script needs user text inside one, assign it to a variable with this
+ * first and concatenate (see searchInboxByFilter).
+ */
 function psEscape(s: string): string {
     return s.replace(/'/g, "''");
 }
 
-/**
- * Export a specific Excel sheet as PDF using Excel COM automation.
- * Mirrors HBLParser's ExcelHandler.ExportSheetAsPdf() including
- * the hardcoded address replacement.
- */
-export async function exportSheetAsPdf(excelPath: string, sheetName: string, pdfPath: string): Promise<void> {
-    if (process.platform !== 'win32') {
-        throw new Error('Excel COM automation is only supported on Windows.');
-    }
-    const script = `
-$excel = New-Object -ComObject Excel.Application
-$excel.Visible = $false
-$excel.ScreenUpdating = $false
-$excel.DisplayAlerts = $false
-try {
-    $wb = $excel.Workbooks.Open('${psEscape(excelPath)}')
-    $ws = $null
-    foreach ($s in $wb.Worksheets) {
-        if ($s.Name -ieq '${psEscape(sheetName)}') { $ws = $s; break }
-    }
-    if ($ws -eq $null) { throw "Sheet '${psEscape(sheetName)}' not found." }
-    $ws.PageSetup.CenterHeader = $ws.PageSetup.CenterHeader -replace 'UNIT B,718 N 30TH ST\\.', 'P. O. Box 1601'
-    $ws.ExportAsFixedFormat(0, '${psEscape(pdfPath)}')
-    $wb.Close($false)
-} finally {
-    $excel.Quit()
-    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
-    [GC]::Collect()
-}
-`;
-    await runPowerShell(script);
-}
-
-/**
- * Send (or display for review) an email through Outlook COM.
- * Mirrors HBLParser's OutlookManager + SendEmail logic.
- */
-interface OutlookEmailParams {
-    emailAccount: string;
-    to: string;
-    cc?: string;
-    subject: string;
-    htmlBody: string;
-    attachmentPath?: string;
-    sendImmediately: boolean;
-    /**
-     * Draft mode only. True pops an Outlook compose window per email; false saves
-     * straight to Drafts with no window — the only workable option for batches.
-     * Defaults to true, matching the single-email callers that rely on the window.
-     */
-    openDraftWindow?: boolean;
-}
-
-export async function sendOutlookEmail(params: OutlookEmailParams): Promise<void> {
+/** Send (or display for review) an email through Outlook COM. */
+export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
@@ -105,9 +99,8 @@ export async function sendOutlookEmail(params: OutlookEmailParams): Promise<void
         : openDraftWindow ? '$mail.Display()' : '$mail.Save()';
 
     // Write HTML body to a temp file to avoid ENAMETOOLONG on large emails
-    const ts = Date.now();
-    const bodyFile = path.join(os.tmpdir(), `sla-email-body-${ts}.html`);
-    const scriptFile = path.join(os.tmpdir(), `sla-email-script-${ts}.ps1`);
+    const bodyFile = tempFile('email-body', 'html');
+    const scriptFile = tempFile('email-script', 'ps1');
     fs.writeFileSync(bodyFile, params.htmlBody, 'utf-8');
 
     const psBodyPath = psEscape(bodyFile);
@@ -141,7 +134,7 @@ ${actionLine}
             execFile(
                 'powershell.exe',
                 ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
-                { timeout: 120000 },
+                {timeout: 120000},
                 (error, _stdout, stderr) => {
                     if (error) reject(new Error(stderr || error.message));
                     else resolve();
@@ -158,55 +151,6 @@ ${actionLine}
         } catch { /* ignore */
         }
     }
-}
-
-/**
- * Reply to an existing email: the given HTML is inserted ABOVE the quoted
- * original, so the recipient sees the message with their own email underneath
- * and the reply threads correctly in their client (unlike a fresh mail with an
- * "RE:" subject). To/subject come from the original message. Draft mode mirrors
- * sendOutlookEmail: Save() silently unless a compose window is requested.
- */
-export interface ReplyEmailParams {
-    emailAccount: string;
-    entryId: string;
-    /** StoreID from the same listing row — disambiguates across mailboxes. */
-    storeId?: string;
-    /**
-     * HTML inserted above the quoted original (a full document is reduced to its <body>
-     * content). Optional when `templateSubject` is given — the body is then resolved from
-     * the saved template server-side, so the caller never has to carry the (often large,
-     * Word-generated) template HTML.
-     */
-    htmlBody?: string;
-    /** Reply with a saved template's body, resolved by subject from the mailbox — an
-     *  alternative to htmlBody that keeps a big template out of the caller's payload. */
-    templateSubject?: string;
-    /** Folder holding the template when templateSubject is used (default 'Templates'). */
-    templateFolder?: string;
-    /**
-     * Section of the template to keep when one template holds several reply variants
-     * between [[SECTION]] markers (see outlookTemplateSections). The other sections and
-     * all markers are stripped before the reply is built.
-     */
-    templateSection?: string;
-    /** `{{PLACEHOLDER}}` → HTML substituted into the composed body. */
-    templatePlaceholders?: Record<string, string>;
-    /**
-     * Name of an Outlook signature (as listed by listOutlookSignatures) to substitute
-     * into the template's `{{SIGNATURE}}` placeholder. Resolved here rather than by the
-     * caller, so the signature HTML — images and all — never crosses the wire.
-     */
-    signatureName?: string;
-    sendImmediately?: boolean;
-    openDraftWindow?: boolean;
-}
-
-export interface ReplyEmailResult {
-    to: string;
-    subject: string;
-    /** The original email's sender — verify it's the company you meant. */
-    repliedToSender: string;
 }
 
 /**
@@ -283,14 +227,14 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
     // the Signatures folder here so the caller never carries the signature HTML either.
     let placeholders = params.templatePlaceholders;
     if (params.signatureName) {
-        const signatureHtml = readOutlookSignatureHtml(params.signatureName);
+        const signatureHtml = await readOutlookSignatureHtml(params.signatureName);
         if (signatureHtml.trim() === '') {
-            const available = listOutlookSignatures().join(', ') || '(none)';
+            const available = (await listOutlookSignatures()).join(', ') || '(none)';
             throw new Error(
                 `Outlook signature '${params.signatureName}' not found. Available signatures: ${available}.`,
             );
         }
-        placeholders = { ...placeholders, SIGNATURE: signatureInnerHtml(signatureHtml) };
+        placeholders = {...placeholders, SIGNATURE: signatureInnerHtml(signatureHtml)};
     }
     const hasPlaceholders = !!placeholders && Object.keys(placeholders).length > 0;
     if (fromTemplate || params.templateSection || hasPlaceholders) {
@@ -309,7 +253,7 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
     const actionLine = params.sendImmediately
         ? '$reply.Send()'
         : openDraftWindow ? '$reply.Display()' : '$reply.Save()';
-    const bodyFile = path.join(os.tmpdir(), `sla-reply-insert-${Date.now()}.html`);
+    const bodyFile = tempFile('reply-insert', 'html');
     fs.writeFileSync(bodyFile, insertHtml, 'utf-8');
     const getItemLine = params.storeId
         ? `$item = $ns.GetItemFromID('${psEscape(params.entryId)}', '${psEscape(params.storeId)}')`
@@ -365,16 +309,6 @@ ConvertTo-Json @{ to = $to; subject = $subject; repliedToSender = $sender }
 }
 
 /** One draft that couldn't be sent, identified by its subject for the report. */
-export interface DraftSendFailure {
-    subject: string;
-    error: string;
-}
-
-export interface SendAllDraftsResult {
-    sent: number;
-    failed: DraftSendFailure[];
-}
-
 /**
  * Resolve the Drafts folders belonging to one account into `$scan`, and define
  * `Test-DraftMatches` over them. Emitted into every drafts script so listing,
@@ -487,40 +421,15 @@ foreach ($m in $items) {
             sent: Number(parsed.sent) || 0,
             failed: failedList.map((f) => {
                 const rec = f as { subject?: unknown; error?: unknown };
-                return { subject: String(rec?.subject ?? ''), error: String(rec?.error ?? '') };
+                return {subject: String(rec?.subject ?? ''), error: String(rec?.error ?? '')};
             }),
         };
     } catch {
-        return { sent: 0, failed: [] };
+        return {sent: 0, failed: []};
     }
 }
 
 /** One mail draft belonging to an account. */
-export interface OutlookDraft {
-    entryId: string;
-    subject: string;
-    /** The To line as Outlook renders it (display names). */
-    to: string;
-    /** Recipient addresses, best-effort — an unresolved Exchange entry falls back to its name. */
-    toEmails: string[];
-    /** Short plain-text preview — enough to tell one template section from another. */
-    bodyPreview: string;
-    hasAttachments: boolean;
-    lastModified: string;
-    /** Which Drafts folder it sits in, since two can hold one account's mail. */
-    folderPath: string;
-}
-
-export interface ListDraftsResult {
-    account: string;
-    /** The Drafts folders scanned, in scan order. */
-    foldersScanned: string[];
-    /** Total matching drafts found, before `limit` was applied. */
-    count: number;
-    truncated: boolean;
-    drafts: OutlookDraft[];
-}
-
 /**
  * List the mail drafts belonging to `emailAccount`, newest first. Which drafts
  * those are is DRAFTS_SCAN_PS's rule.
@@ -616,11 +525,6 @@ ConvertTo-Json @{ account = $target; foldersScanned = @($folders); count = $tota
     };
 }
 
-export interface DeleteDraftsResult {
-    deleted: number;
-    failed: { entryId: string; error: string }[];
-}
-
 /**
  * Delete mail drafts by EntryID. Outlook's Delete() moves the item to Deleted Items
  * rather than destroying it, so a mistaken call stays recoverable from there.
@@ -638,7 +542,7 @@ export async function deleteOutlookDrafts(
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
     if (entryIds.length === 0) {
-        return { deleted: 0, failed: [] };
+        return {deleted: 0, failed: []};
     }
     const psIds = entryIds.map(id => `'${psEscape(id)}'`).join(',');
     const script = `
@@ -689,29 +593,12 @@ ConvertTo-Json @{ deleted = $deleted; failed = @($failed) } -Depth 3
         deleted: typeof parsed.deleted === 'number' ? parsed.deleted : 0,
         failed: toArray(parsed.failed).map(f => {
             const e = f as Record<string, unknown>;
-            return { entryId: String(e.entryId || ''), error: String(e.error || '') };
+            return {entryId: String(e.entryId || ''), error: String(e.error || '')};
         }),
     };
 }
 
 /** What happened to one id in a deleteOutlookEmails call. */
-export interface DeleteMailOutcome {
-    entryId: string;
-    subject: string;
-    /** The folder the item was actually in — the audit trail for what you deleted. */
-    folderPath: string;
-    status: 'deleted' | 'would-delete' | 'refused' | 'failed';
-    reason: string;
-}
-
-export interface DeleteMailResult {
-    dryRun: boolean;
-    deleted: number;
-    refused: number;
-    failed: number;
-    items: DeleteMailOutcome[];
-}
-
 /** Walks an item's parent chain, so Inbox/Sent protection covers their subfolders too. */
 const FOLDER_CHAIN_PS = `
 function Get-FolderChainIds($folder) {
@@ -743,24 +630,24 @@ function Get-FolderChainIds($folder) {
  * one subject (see saveEmailAttachmentDetailed). Three things hold the line:
  *
  *  - **Inbox and Sent Items are refused by default, INCLUDING their subfolders** —
- *    a filed lane folder is still received mail. `allowProtected` lifts that, and is
+ *    a filed subfolder is still received mail. `allowProtected` lifts that, and is
  *    the caller explicitly taking responsibility.
  *  - **`dryRun` resolves and reports without deleting**, so the exact subjects and
- *    folders can be shown to the operator before anything happens. Use it first.
+ *    folders can be shown to the user before anything happens. Use it first.
  *  - **Every outcome echoes the subject and folderPath** of the item actually
  *    resolved, so a wrong id is visible after the fact rather than silent.
  */
 export async function deleteOutlookEmails(
     emailAccount: string,
     entryIds: string[],
-    options: { allowProtected?: boolean; dryRun?: boolean } = {},
+    options: DeleteMailOptions = {},
 ): Promise<DeleteMailResult> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
-    const { allowProtected = false, dryRun = false } = options;
+    const {allowProtected = false, dryRun = false} = options;
     if (entryIds.length === 0) {
-        return { dryRun, deleted: 0, refused: 0, failed: 0, items: [] };
+        return {dryRun, deleted: 0, refused: 0, failed: 0, items: []};
     }
     const psIds = entryIds.map(id => `'${psEscape(id)}'`).join(',');
     const script = `
@@ -843,22 +730,11 @@ ConvertTo-Json @{ dryRun = ${dryRun ? '$true' : '$false'}; deleted = $deleted; r
     };
 }
 
-export interface PurgeDeletedItemsResult {
-    folderPath: string;
-    dryRun: boolean;
-    /** Items old enough to qualify. */
-    matched: number;
-    purged: number;
-    /** Items left because they were newer than `olderThanDays`. */
-    kept: number;
-    failed: number;
-}
-
 /**
  * Permanently remove items from the account's Deleted Items folder. This is the ONE
  * genuinely irreversible operation here — nothing recovers from it — which is why it
  * is folder-scoped rather than keyed on an EntryID: it can only ever destroy what the
- * operator already threw away.
+ * user already threw away.
  *
  * `olderThanDays` keeps recent items (0 = purge everything). Iterates backwards, as
  * deleting mutates the collection and a forward walk would skip every other item.
@@ -919,33 +795,9 @@ ConvertTo-Json @{ folderPath = $folder.FolderPath; matched = $matched; purged = 
 
 // ── Undeliverable / bounce cleanup types ────────────────────────────────────
 /** One bounce-back / non-delivery message found in the inbox. */
-export interface UndeliverableEmail {
-    entryId: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-    /** Which rule flagged it (NDR class, mail-daemon sender, or a bounce subject phrase). */
-    matchedReason: string;
-    /** Best-effort recipient addresses parsed from the bounce body — which sends failed. */
-    failedRecipients: string[];
-}
-
-export interface CleanUndeliverableResult {
-    account: string;
-    scannedDays: number;
-    /** True when nothing was deleted (preview run). */
-    dryRun: boolean;
-    matchedCount: number;
-    deletedCount: number;
-    matched: UndeliverableEmail[];
-    /** Matched items that could not be deleted (only populated on a delete run). */
-    failed: DraftSendFailure[];
-}
-
 // Bounce-classifier lists, defined once per script (before the item loop). Kept
-// specific — multi-word, mail-system wording — so ordinary logistics mail about a
-// container 'delivery' is never flagged.
+// specific — multi-word, mail-system wording — so ordinary mail that merely
+// mentions a 'delivery' is never flagged.
 const BOUNCE_LISTS_PS = `
 $phrases = @(
     'undeliverable',
@@ -1009,8 +861,8 @@ if ($cls -eq 43 -or $cls -eq 46) {
  * mail-daemon/postmaster rejections, and "Message blocked"-style Google/O365
  * failure notices — and, unless previewing, move each to Deleted Items (recoverable).
  *
- * Classification is deliberately conservative so ordinary logistics mail that
- * merely mentions "delivery" is never caught: an item matches only when its
+ * Classification is deliberately conservative so ordinary mail that merely
+ * mentions "delivery" is never caught: an item matches only when its
  * MessageClass is an NDR report, its sender fingerprints as a mail-delivery
  * daemon/postmaster, or its subject contains a specific bounce phrase. The item
  * body is read only after a match, so scanning a large inbox stays cheap.
@@ -1118,7 +970,7 @@ if (-not $dryRun) {
         }),
         failed: toArray(parsed.failed).map((f) => {
             const rec = f as { subject?: unknown; error?: unknown };
-            return { subject: String(rec?.subject ?? ''), error: String(rec?.error ?? '') };
+            return {subject: String(rec?.subject ?? ''), error: String(rec?.error ?? '')};
         }),
     };
 }
@@ -1183,19 +1035,12 @@ ConvertTo-Json @($found.Keys) -Depth 2
 
 // ── Sent-recipient groups ───────────────────────────────────────────────────
 /** One sent message and the full set of SMTP addresses it went to. */
-export interface SentRecipientGroup {
-    entryId: string;
-    subject: string;
-    sentOn: string;
-    recipients: string[];
-}
-
 /**
  * Read the account's Sent Items within the window, returning each mail with the
  * full SMTP address set it was sent to (To + CC + BCC), newest first. This is how
- * the "was every address for a company tried?" question gets answered: the drayage
- * rate-request flow sends one email per company addressed to all of that company's
- * addresses, so a sent message's recipient set is that company's full address set.
+ * the "was every address for this contact tried?" question gets answered: where a
+ * blast sends one email per organization addressed to all of its addresses, a sent
+ * message's recipient set IS that organization's full address set.
  */
 export async function readSentRecipientGroups(
     emailAccount: string,
@@ -1280,8 +1125,12 @@ const SIGNATURES_DIR = process.env.APPDATA
     ? path.join(process.env.APPDATA, 'Microsoft', 'Signatures')
     : '';
 
-/** Names of the user's Outlook signatures (the ".htm" files), sorted. Empty off Windows. */
-export function listOutlookSignatures(): string[] {
+/**
+ * Names of the user's Outlook signatures (the ".htm" files), sorted. Empty off
+ * Windows. Reads from disk synchronously but is declared async to match macOS,
+ * which has to ask Outlook itself — one signature for both platforms.
+ */
+export async function listOutlookSignatures(): Promise<string[]> {
     if (process.platform !== 'win32' || !SIGNATURES_DIR) return [];
     try {
         return fs.readdirSync(SIGNATURES_DIR)
@@ -1299,7 +1148,7 @@ export function listOutlookSignatures(): string[] {
  * once the refs are absolute, assigning the HTML to a mail body lets Outlook resolve
  * and embed the images on Display/Send. Returns '' if the signature can't be found.
  */
-export function readOutlookSignatureHtml(name: string): string {
+export async function readOutlookSignatureHtml(name: string): Promise<string> {
     if (process.platform !== 'win32' || !SIGNATURES_DIR) return '';
     // Only accept a bare signature name — never a path — so a crafted name can't
     // escape the Signatures folder.
@@ -1328,40 +1177,6 @@ export function readOutlookSignatureHtml(name: string): string {
 }
 
 // ── Generic inbox search ──────────────────────────────────────────────────
-export interface InboxSearchFilter {
-    /** SQL-LIKE fragment for the [Subject] clause in Items.Restrict — the
-     *  server-side prefilter that keeps a full-mailbox walk cheap, e.g.
-     *  '*pre*alert*'. Omit to restrict on date only. */
-    subjectLike?: string;
-    /** Regex re-checked client-side against each survivor's trimmed subject,
-     *  since Restrict's `like` is a blunt substring match. A normal JS
-     *  RegExp — only its `.source` crosses into the PowerShell/.NET regex
-     *  engine, which reads the same syntax; `-match` is case-insensitive
-     *  there by default regardless of the JS pattern's `i` flag. */
-    subjectPattern?: RegExp;
-    /** Drop subjects starting with Re:/Fw:/Fwd:. */
-    excludeReplies?: boolean;
-    /** Only return items carrying at least one attachment. */
-    requireAttachment?: boolean;
-}
-
-export interface InboxSearchMatch {
-    entryId: string;
-    /** Store the item lives in — pass alongside entryId so it resolves unambiguously
-     *  across mailboxes (reply_outlook_email, save_outlook_attachment). */
-    storeId: string;
-    subject: string;
-    senderName: string;
-    /** SMTP address; resolved from the Exchange DN when the sender is an EX recipient. */
-    senderEmail: string;
-    /** 'yyyy-MM-dd HH:mm'. */
-    receivedTime: string;
-    body: string;
-    /** Not saved to disk — pass the ones you want through saveEmailAttachments. */
-    attachmentNames: string[];
-    folderPath: string;
-}
-
 /**
  * Walk every folder under the Inbox (recursively) for one account and return
  * the emails matching `filter` — full body included, attachments listed by
@@ -1384,13 +1199,20 @@ export async function searchInboxByFilter(
     if (process.platform !== 'win32') return [];
     const subjectLike = filter.subjectLike ? psEscape(filter.subjectLike) : '';
     const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
+    // The subject filter reaches PowerShell as a single-quoted literal assigned to
+    // $subjLike, and the Restrict query is CONCATENATED from it. Interpolating it
+    // into the double-quoted query string directly — which is what the query needs
+    // to be, so `$cutoff` expands — would let a caller's `$(...)` execute, and
+    // would break the query outright on an apostrophe.
+    const subjectLikeDecl = `$subjLike = '${subjectLike}'`;
     const boundedRestrict = subjectLike
-        ? `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff' AND [Subject] like '${subjectLike}'")`
+        ? `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff' AND [Subject] like '" + $subjLike + "'")`
         : `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")`;
     const unboundedRestrict = subjectLike
-        ? `$folder.Items.Restrict("[Subject] like '${subjectLike}'")`
+        ? `$folder.Items.Restrict("[Subject] like '" + $subjLike + "'")`
         : `$folder.Items`;
     const script = `
+${subjectLikeDecl}
 $outlook = New-Object -ComObject Outlook.Application
 $ns = $outlook.GetNamespace('mapi')
 $ns.Logon()
@@ -1481,7 +1303,10 @@ foreach ($folder in $folders) {
 }
 ConvertTo-Json $results -Depth 3
 `;
-    const raw = await runPowerShell(script);
+    // Returns whole message bodies, so this is the call most likely to push against
+    // the stdout cap — raise `maxBufferBytes` via configure() before a scan that
+    // matches thousands of emails.
+    const raw = await runPowerShell(script, 300000);
     if (!raw || raw.trim() === '' || raw.trim() === 'null') return [];
     const parsed = JSON.parse(raw);
     const arr: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
@@ -1501,18 +1326,6 @@ ConvertTo-Json $results -Depth 3
             folderPath: String(e.folderPath || ''),
         };
     });
-}
-
-export interface SelectedEmail {
-    entryId: string;
-    storeId: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-    body: string;
-    /** Not saved to disk — pass the ones you want through saveEmailAttachments. */
-    attachmentNames: string[];
 }
 
 /**
@@ -1614,7 +1427,7 @@ export async function sendReceivedConfirmation(emailAccount: string, entryId: st
     let tmpFile: string | undefined;
     if (customHtml) {
         // Write large HTML to a temp file to avoid ENAMETOOLONG
-        tmpFile = path.join(os.tmpdir(), `sla-reply-body-${Date.now()}.html`);
+        tmpFile = tempFile('reply-body', 'html');
         fs.writeFileSync(tmpFile, customHtml, 'utf-8');
         const psPath = psEscape(tmpFile);
         insertBlock = `
@@ -1662,10 +1475,9 @@ export async function editEmailTemplate(label: string, currentHtml: string): Pro
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
-    const ts = Date.now();
-    const inputFile = path.join(os.tmpdir(), `sla-template-input-${ts}.html`);
-    const outputFile = path.join(os.tmpdir(), `sla-template-output-${ts}.html`);
-    const scriptFile = path.join(os.tmpdir(), `sla-template-script-${ts}.ps1`);
+    const inputFile = tempFile('template-input', 'html');
+    const outputFile = tempFile('template-output', 'html');
+    const scriptFile = tempFile('template-script', 'ps1');
 
     fs.writeFileSync(inputFile, currentHtml, 'utf-8');
 
@@ -1732,7 +1544,7 @@ if ($finalBody) {
         execFile(
             'powershell.exe',
             ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
-            { timeout: 0 },
+            {timeout: 0},
             (error) => {
                 if (error) reject(new Error(error.message));
                 else resolve();
@@ -1756,79 +1568,8 @@ if ($finalBody) {
 }
 
 // ── Inbox email types ───────────────────────────────────────────────────
-export interface InboxEmail {
-    entryId: string;
-    storeId: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-    bodyPreview: string;
-    attachmentNames: string[];
-    attachmentCount: number;
-    /** Outlook path of the folder each email was read from, so a caller that
-     *  scoped to a subfolder can confirm which folder actually matched.
-     *  Populated on both platforms. */
-    folderPath?: string;
-}
-
-/**
- * The Outlook folders addressable by name rather than by walking from the Inbox,
- * with their olDefaultFolders id. Sent Items is the one that earns this: "has this
- * already gone out?" is otherwise unanswerable, and no amount of Inbox scanning
- * substitutes for it.
- *
- * A well-known name always wins over a user folder of the same name — reach the
- * latter by qualifying it (`Inbox\Drafts`).
- */
-const WELL_KNOWN_FOLDERS: Record<string, number> = {
-    inbox: 6,
-    'sent items': 5,
-    sent: 5,
-    'sent mail': 5,
-    drafts: 16,
-    'deleted items': 3,
-    deleted: 3,
-    trash: 3,
-    'junk email': 23,
-    junk: 23,
-    outbox: 4,
-};
-
 /** Folders whose contents are received or already-sent mail, not working state. */
 const PROTECTED_FOLDER_IDS = new Set([6, 5]);
-
-export interface MailFolderRef {
-    /** olDefaultFolders id of the root the walk starts from. */
-    rootId: number;
-    /** That root's name, for error messages. */
-    rootLabel: string;
-    /** Path segments below the root. */
-    segments: string[];
-}
-
-/**
- * Resolve a caller's folder string to a well-known root plus the segments below it.
- *
- * Accepts every shape the operator has to hand: a bare name ("Mobile, AL"), a
- * relative path ("Mobile, AL\\Finished"), a well-known folder ("Sent Items"),
- * a path under one ("Deleted Items\\2026"), and the full FolderPath listInboxFolders
- * prints ("\\\\team@x.com\\Inbox\\Mobile, AL").
- *
- * An unrecognized first segment means Inbox-relative, which is what keeps every
- * existing caller's bare lane-folder name working unchanged.
- */
-export function mailFolderRef(folder: string): MailFolderRef {
-    const rest = folder.trim().replace(/^\\\\[^\\/]+[\\/]/, '');
-    const segments = rest.split(/[\\/]+/).map(s => s.trim()).filter(Boolean);
-    if (segments.length > 0) {
-        const head = segments[0].toLowerCase();
-        if (Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
-            return { rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1) };
-        }
-    }
-    return { rootId: 6, rootLabel: 'Inbox', segments };
-}
 
 /**
  * Emit the PowerShell that resolves `$scope` from `$store`, walking a well-known
@@ -1887,12 +1628,11 @@ if ($scope -eq $null) {
  * Does NOT download attachments; returns attachment names only.
  *
  * `folder` scopes the read to one folder under the Inbox instead of the Inbox
- * root. Without it, a lane already filed away (Inbox\\Mobile, AL) is unreachable
- * — which is the normal state of any mailbox the operator keeps tidy, and so of
- * any lane being re-run. Segments are matched as direct children; a bare name
- * that isn't a direct child falls back to the same recursive by-name search
- * moveOutlookEmails uses, so one folder string works in both tools. Only the
- * named folder is read — its own subfolders are not.
+ * root. Without it, mail already filed away (Inbox\\Invoices) is unreachable —
+ * which is the normal state of any mailbox its owner keeps tidy. Segments are
+ * matched as direct children; a bare name that isn't a direct child falls back to
+ * the same recursive by-name search moveOutlookEmails uses, so one folder string
+ * works in both. Only the named folder is read — its own subfolders are not.
  */
 export async function readInboxEmails(
     emailAccount: string,
@@ -1901,7 +1641,7 @@ export async function readInboxEmails(
     folder?: string,
 ): Promise<InboxEmail[]> {
     if (process.platform !== 'win32') return [];
-    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
+    const ref = folder ? mailFolderRef(folder) : {rootId: 6, rootLabel: 'Inbox', segments: []};
     // A folder argument that trims away to nothing ("\\", "  ") would otherwise
     // read the Inbox root and look like it had scoped — the exact silent
     // mis-scoping this parameter exists to prevent. A bare well-known name
@@ -1994,83 +1734,22 @@ ConvertTo-Json $results -Depth 3
 }
 
 // ── Full email body ─────────────────────────────────────────────────────
-export interface EmailBodyResult {
-    entryId: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-    /** The sender's own new text — everything above the quoted thread. */
-    body: string;
-    /** True when `body` hit maxChars and was cut. */
-    truncated: boolean;
-    /** Length of the sender's new text before any capping. */
-    bodyLength: number;
-    /** What the quoted thread was split on ("-----Original Message-----", …); empty when none was found. */
-    quoteSeparator: string;
-    /** Length of the quoted thread, reported even when it isn't returned. */
-    quotedLength: number;
-    /** The quoted thread — only populated when the caller asked for it. */
-    quotedOriginal: string;
-    attachmentNames: string[];
-    attachmentCount: number;
-}
-
-/**
- * Split a plain-text reply into the sender's own text and the quoted thread
- * below it.
- *
- * This matters more than it looks: the quoted original of a rate reply carries
- * *our own* rate request, weight and lane included. Handing a caller one blob
- * invites a figure from our blast to be recorded as the trucker's price, which
- * is a worse failure than the truncation this whole function exists to fix.
- *
- * Scans for the earliest of the separators Outlook and the common webmail
- * clients emit. If the split would leave no new text at all — a bottom-posted
- * reply, or a body that opens on a quote — it is abandoned and everything is
- * returned as `body`, since dropping the sender's actual words is the one
- * outcome worth avoiding.
- */
-export function splitQuotedOriginal(text: string): { body: string; quoted: string; separator: string } {
-    const lines = text.split(/\r?\n/);
-    const whole = { body: text, quoted: '', separator: '' };
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        let separator = '';
-        if (/^-{2,}\s*original message\s*-{2,}$/i.test(line)) separator = '-----Original Message-----';
-        // Outlook's HTML thread rule, which sits directly above the From:/Sent: block.
-        else if (/^_{10,}$/.test(line)) separator = 'Outlook thread rule';
-        // "On Tue, Jul 21, 2026 at 9:14 AM John Doe <j@x.com> wrote:"
-        else if (/^on\b.{5,300}\bwrote:$/i.test(line)) separator = 'On … wrote:';
-        else if (/^>/.test(lines[i])) separator = '> quoted lines';
-        // A bare header block: "From: …" followed by another header line.
-        else if (/^from:\s*\S/i.test(line) && /^(sent|date|to|subject|cc):/i.test((lines[i + 1] || '').trim())) {
-            separator = 'From:/Sent: header block';
-        }
-        if (!separator) continue;
-        const body = lines.slice(0, i).join('\n').trimEnd();
-        if (!body.trim()) return whole;
-        return { body, quoted: lines.slice(i).join('\n').trim(), separator };
-    }
-    return whole;
-}
-
 /**
  * Read one email's full plain-text body by EntryID.
  *
  * Uses `MailItem.Body`, not `HTMLBody`: Outlook's own plain-text rendering is
  * what every other reader here consumes, and the markup costs an order of
  * magnitude more for the same sentences. The tradeoff is that HTML tables
- * flatten, so a rate broken out in a table loses its row/column pairing — read
- * such a quote from the attachment where there is one.
+ * flatten, so figures broken out in a table lose their row/column pairing — read
+ * those from the attachment where there is one.
  *
  * Exists because `readInboxEmails` caps its preview at 600 chars, and a reply
- * whose first 600 chars read as a complete quote can still add an overweight
- * charge below the cut. Nothing detects that from the preview alone.
+ * whose first 600 chars read as complete can still carry a material detail below
+ * the cut. Nothing detects that from the preview alone.
  *
  * `includeQuoted` is off by default — see splitQuotedOriginal for why the
- * quoted thread is a hazard to the common (pricing) caller. `quotedLength` is
- * reported either way so a caller can tell it exists and ask again.
+ * quoted thread is a hazard to a caller reading figures out of a reply.
+ * `quotedLength` is reported either way so a caller can tell it exists and ask again.
  */
 export async function readEmailBody(
     entryId: string,
@@ -2095,7 +1774,7 @@ $item = ${getItemCall}
 if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
 $cls = 0
 try { $cls = [int]$item.Class } catch {}
-if ($cls -ne 43 -and $cls -ne 46) { throw "The item for this EntryID is not an email (Class=$cls). Re-run list_outlook_inbox for a current EntryID." }
+if ($cls -ne 43 -and $cls -ne 46) { throw "The item for this EntryID is not an email (Class=$cls). Re-run readInboxEmails for a current EntryID." }
 $bodyRaw = ''
 try { if ($item.Body) { $bodyRaw = [string]$item.Body } } catch {}
 $attNames = @()
@@ -2124,13 +1803,13 @@ ConvertTo-Json $out -Depth 3 -Compress
     if (!raw || !raw.trim()) throw new Error('Failed to read email body');
     const parsed = JSON.parse(raw.trim()) as Record<string, unknown>;
     const full = Buffer.from(String(parsed.body || ''), 'base64').toString('utf8');
-    const { body, quoted, separator } = splitQuotedOriginal(full);
+    const {body, quoted, separator} = splitQuotedOriginal(full);
     const attachmentNames = Array.isArray(parsed.attachmentNames)
         ? (parsed.attachmentNames as unknown[]).map(String)
         : typeof parsed.attachmentNames === 'string' ? [String(parsed.attachmentNames)] : [];
-    // The quoted thread is context, never the priced content, so it is capped
-    // harder than the reply itself — its useful part (our lane and weight) is at
-    // the top of it.
+    // The quoted thread is context, never the sender's own answer, so it is capped
+    // harder than the reply itself — its useful part (what was asked) is at the
+    // top of it.
     const quotedCap = Math.min(maxChars, 4000);
     return {
         entryId: String(parsed.entryId || ''),
@@ -2151,32 +1830,6 @@ ConvertTo-Json $out -Depth 3 -Compress
 
 // ── Outlook template-email folder ────────────────────────────────────────
 /** One template email stored in the mailbox's Templates folder. */
-export interface TemplateEmail {
-    entryId: string;
-    subject: string;
-    /** Full HTML body — reusable verbatim as another email's html_body. Empty when the
-     *  listing was requested without bodies (includeBody:false). */
-    htmlBody: string;
-    /** Short plain-text preview, returned instead of htmlBody when includeBody is false. */
-    bodyPreview?: string;
-    /** [[SECTION]] names when the template holds several reply variants (see
-     *  outlookTemplateSections) — returned with or without the body, so a caller can
-     *  confirm the sections it's about to ask for still exist. */
-    sections?: string[];
-    /** `{{PLACEHOLDER}}` names the template expects to have filled in. */
-    placeholders?: string[];
-    lastModified: string;
-}
-
-export interface TemplateFolderResult {
-    folderFound: boolean;
-    /** Outlook folder path when found, e.g. "\\\\mailbox\\Templates". */
-    folderPath: string;
-    templates: TemplateEmail[];
-    /** When the folder wasn't found: the mailbox's folder names, so the caller can pick or create one. */
-    availableFolders: string[];
-}
-
 /** Recursive folder-by-name search, emitted into the template-folder scripts.
  *  Case-insensitive, depth-capped so a huge mailbox tree can't hang the scan. */
 const FIND_FOLDER_PS = `
@@ -2195,7 +1848,7 @@ function Find-FolderByName($root, $name, $depth) {
 
 /**
  * Read the template emails saved in a mailbox folder (default "Templates"):
- * regular mail items the operator keeps as reusable reply bodies. Returns each
+ * regular mail items kept as reusable reply bodies. Returns each
  * item's full HTML body. When the folder doesn't exist, returns folderFound:false
  * plus the mailbox's folder names instead of throwing, so the caller can ask the
  * user whether to create it rather than fail.
@@ -2301,7 +1954,7 @@ ConvertTo-Json @{ folderFound = $true; folderPath = $folder.FolderPath; template
 `;
     const raw = await runPowerShell(script, 60000);
     if (!raw || raw.trim() === '' || raw.trim() === 'null') {
-        return { folderFound: false, folderPath: '', templates: [], availableFolders: [] };
+        return {folderFound: false, folderPath: '', templates: [], availableFolders: []};
     }
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const toArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : v == null ? [] : [v]);
@@ -2332,7 +1985,7 @@ ConvertTo-Json @{ folderFound = $true; folderPath = $folder.FolderPath; template
 /**
  * Save a new template email into a mailbox folder (default "Templates"),
  * creating the folder at the mailbox root if it doesn't exist. The item is a
- * plain unsent mail (subject + HTML body) the operator can edit in Outlook.
+ * plain unsent mail (subject + HTML body) that can be edited in Outlook.
  * Never overwrites an existing item — it always adds a new one, so check with
  * readTemplateEmails first and only call after the user has agreed to create it.
  */
@@ -2341,13 +1994,13 @@ export async function saveTemplateEmail(
     subject: string,
     htmlBody: string,
     folderName = 'Templates',
-): Promise<{ folderPath: string; folderCreated: boolean }> {
+): Promise<SaveTemplateResult> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
     // Body goes through a temp file (same reason as sendOutlookEmail): inline
     // -Command scripts hit the command-line length limit on large HTML.
-    const bodyFile = path.join(os.tmpdir(), `sla-template-body-${Date.now()}.html`);
+    const bodyFile = tempFile('template-body', 'html');
     fs.writeFileSync(bodyFile, htmlBody, 'utf-8');
     const script = `
 $ErrorActionPreference = 'Stop'
@@ -2394,16 +2047,7 @@ ConvertTo-Json @{ folderPath = $folder.FolderPath; folderCreated = $folderCreate
 
 // ── Inbox folder listing & filing ────────────────────────────────────────
 /** One folder under the account's Inbox. */
-export interface InboxFolderInfo {
-    name: string;
-    /** Outlook folder path, e.g. "\\\\mailbox\\Inbox\\Savannah. GA". */
-    folderPath: string;
-    itemCount: number;
-    /** 1 = direct child of Inbox, 2 = grandchild, … */
-    depth: number;
-}
-
-/** List the folders under an account's Inbox (the operator's filing folders). */
+/** List the folders under an account's Inbox (the user's filing folders). */
 export async function listInboxFolders(
     emailAccount: string,
     maxDepth = 2,
@@ -2451,23 +2095,16 @@ ConvertTo-Json $results -Depth 3
     });
 }
 
-export interface MoveEmailsResult {
-    folderPath: string;
-    folderCreated: boolean;
-    moved: number;
-    failed: { entryId: string; error: string }[];
-}
-
 /**
- * Move emails (by EntryID) into any folder of the account — a lane folder under the
- * Inbox, or a well-known folder by name (see WELL_KNOWN_FOLDERS).
+ * Move emails (by EntryID) into any folder of the account — a filing folder under
+ * the Inbox, or a well-known folder by name (see WELL_KNOWN_FOLDERS).
  *
  * **Moving to "Deleted Items" is how mail gets deleted reversibly**, which is why
  * this takes well-known roots at all: it means the destructive path and the filing
  * path are one tool, and the destructive one is undoable from the folder it lands in.
  *
  * `createIfMissing` builds the WHOLE missing chain, so a nested destination
- * ("Chicago, IL\\Madison, WI 53718") is one call rather than a manual mkdir first.
+ * ("Clients\\Acme\\2026") is one call rather than a manual mkdir first.
  * NOTE: moving changes an item's EntryID — the passed ids are dead afterwards.
  */
 export async function moveOutlookEmails(
@@ -2480,7 +2117,7 @@ export async function moveOutlookEmails(
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
     if (entryIds.length === 0) {
-        return { folderPath: '', folderCreated: false, moved: 0, failed: [] };
+        return {folderPath: '', folderCreated: false, moved: 0, failed: []};
     }
     const ref = mailFolderRef(folderName);
     const psIds = entryIds.map(id => `'${psEscape(id)}'`).join(',');
@@ -2523,23 +2160,20 @@ ConvertTo-Json @{ folderPath = $folder.FolderPath; folderCreated = $folderCreate
         moved: typeof parsed.moved === 'number' ? parsed.moved : 0,
         failed: toArray(parsed.failed).map(f => {
             const e = f as Record<string, unknown>;
-            return { entryId: String(e.entryId || ''), error: String(e.error || '') };
+            return {entryId: String(e.entryId || ''), error: String(e.error || '')};
         }),
     };
 }
 
-export interface SavedAttachment {
-    path: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-}
-
 /**
- * Save an email attachment to %TEMP% by entryId and filename, returning the saved
- * path together with the resolved email's subject/sender so the caller can confirm
- * the file came from the email it intended.
+ * Save an email attachment by entryId and filename, returning the saved path
+ * together with the resolved email's subject/sender so the caller can confirm the
+ * file came from the email it intended.
+ *
+ * `destDir` is created if absent. Without one the file lands in a fresh directory
+ * of its own, because attachments keep the name the sender gave them: a single
+ * shared folder means two emails carrying "invoice.pdf" silently overwrite each
+ * other. Pass `destDir` whenever you want the files somewhere you control.
  *
  * When the attachment isn't found, throws an error that names the email actually
  * resolved (from/subject/received) and the attachments it does carry. Because
@@ -2549,10 +2183,16 @@ export interface SavedAttachment {
  * exact first, then whitespace-normalized (trim + collapse runs, incl. non-breaking
  * spaces) so a trivially reformatted filename still resolves.
  */
-export async function saveEmailAttachmentDetailed(entryId: string, fileName: string, storeId?: string): Promise<SavedAttachment> {
+export async function saveEmailAttachmentDetailed(
+    entryId: string,
+    fileName: string,
+    storeId?: string,
+    destDir?: string,
+): Promise<SavedAttachment> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
+    const outDir = resolveDestDir(destDir);
     const getItemCall = storeId
         ? `$ns.GetItemFromID('${psEscape(entryId)}', '${psEscape(storeId)}')`
         : `$ns.GetItemFromID('${psEscape(entryId)}')`;
@@ -2576,11 +2216,9 @@ if ($found -eq $null) {
 if ($found -eq $null) {
     $have = @(); foreach ($a in $item.Attachments) { $have += $a.FileName }
     $haveStr = if ($have.Count -gt 0) { $have -join ', ' } else { '(none)' }
-    throw "Attachment '$target' not found. Resolved email: from=$($item.SenderEmailAddress); subject=$($item.Subject); received=$($item.ReceivedTime). Attachments present: $haveStr. If this is not the email you expected, the EntryID is likely wrong or stale - re-run list_outlook_inbox to get a current EntryID."
+    throw "Attachment '$target' not found. Resolved email: from=$($item.SenderEmailAddress); subject=$($item.Subject); received=$($item.ReceivedTime). Attachments present: $haveStr. If this is not the email you expected, the EntryID is likely wrong or stale - re-run readInboxEmails to get a current EntryID."
 }
-$tmpDir = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'sla-attachments')
-if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir | Out-Null }
-$savePath = [IO.Path]::Combine($tmpDir, $found.FileName)
+$savePath = [IO.Path]::Combine('${psEscape(outDir)}', $found.FileName)
 $found.SaveAsFile($savePath)
 $out = [PSCustomObject]@{
     path         = $savePath
@@ -2603,30 +2241,34 @@ ConvertTo-Json $out -Compress
     };
 }
 
-/**
- * Back-compat wrapper: save an attachment and return just the saved file path.
- */
-export async function saveEmailAttachment(entryId: string, fileName: string, storeId?: string): Promise<string> {
-    return (await saveEmailAttachmentDetailed(entryId, fileName, storeId)).path;
+/** Save an attachment and return just the saved file path. */
+export async function saveEmailAttachment(
+    entryId: string,
+    fileName: string,
+    storeId?: string,
+    destDir?: string,
+): Promise<string> {
+    return (await saveEmailAttachmentDetailed(entryId, fileName, storeId, destDir)).path;
 }
 
 /**
- * Save several attachments from one email to %TEMP% in a single COM round
- * trip — what a caller working through searchInboxByFilter/readSelectedEmail
- * results wants, rather than paying a PowerShell process spawn per attachment.
- * Matching and the not-found error follow saveEmailAttachmentDetailed's rules
- * exactly, applied per name; results come back in the same order as
- * `fileNames`.
+ * Save several attachments from one email in a single COM round trip — what a
+ * caller working through searchInboxByFilter/readSelectedEmail results wants,
+ * rather than paying a PowerShell process spawn per attachment. Destination,
+ * matching and the not-found error follow saveEmailAttachmentDetailed's rules
+ * exactly, applied per name; results come back in the same order as `fileNames`.
  */
 export async function saveEmailAttachments(
     entryId: string,
     fileNames: string[],
     storeId?: string,
+    destDir?: string,
 ): Promise<SavedAttachment[]> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
     if (fileNames.length === 0) return [];
+    const outDir = resolveDestDir(destDir);
     const getItemCall = storeId
         ? `$ns.GetItemFromID('${psEscape(entryId)}', '${psEscape(storeId)}')`
         : `$ns.GetItemFromID('${psEscape(entryId)}')`;
@@ -2637,8 +2279,6 @@ $ns = $outlook.GetNamespace('mapi')
 $ns.Logon()
 $item = ${getItemCall}
 if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
-$tmpDir = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'sla-attachments')
-if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir | Out-Null }
 $targets = @(${targetsList})
 $results = @()
 foreach ($target in $targets) {
@@ -2655,9 +2295,9 @@ foreach ($target in $targets) {
     if ($found -eq $null) {
         $have = @(); foreach ($a in $item.Attachments) { $have += $a.FileName }
         $haveStr = if ($have.Count -gt 0) { $have -join ', ' } else { '(none)' }
-        throw "Attachment '$target' not found. Resolved email: from=$($item.SenderEmailAddress); subject=$($item.Subject); received=$($item.ReceivedTime). Attachments present: $haveStr. If this is not the email you expected, the EntryID is likely wrong or stale - re-run list_outlook_inbox to get a current EntryID."
+        throw "Attachment '$target' not found. Resolved email: from=$($item.SenderEmailAddress); subject=$($item.Subject); received=$($item.ReceivedTime). Attachments present: $haveStr. If this is not the email you expected, the EntryID is likely wrong or stale - re-run readInboxEmails to get a current EntryID."
     }
-    $savePath = [IO.Path]::Combine($tmpDir, $found.FileName)
+    $savePath = [IO.Path]::Combine('${psEscape(outDir)}', $found.FileName)
     $found.SaveAsFile($savePath)
     $results += [PSCustomObject]@{
         path         = $savePath
@@ -2702,3 +2342,35 @@ $accounts -join '|'
     if (!result) return [];
     return result.split('|').filter(Boolean);
 }
+
+// Compile-time proof that this module answers the whole platform contract. Without
+// it a signature could drift from OutlookMacService's and only surface as a union
+// in the published .d.ts — which is exactly how it drifted before.
+const _conformance: OutlookBridge = {
+    getOutlookAccounts,
+    sendOutlookEmail,
+    replyOutlookEmail,
+    sendAllDrafts,
+    sendReceivedConfirmation,
+    readInboxEmails,
+    searchInboxByFilter,
+    readSelectedEmail,
+    readEmailBody,
+    openOutlookEmail,
+    listInboxFolders,
+    moveOutlookEmails,
+    listOutlookDrafts,
+    deleteOutlookDrafts,
+    deleteOutlookEmails,
+    purgeDeletedItems,
+    saveEmailAttachment,
+    saveEmailAttachmentDetailed,
+    saveEmailAttachments,
+    cleanUndeliverableEmails,
+    collectBouncedRecipients,
+    readSentRecipientGroups,
+    listOutlookSignatures,
+    readOutlookSignatureHtml,
+    readTemplateEmails,
+    saveTemplateEmail,
+};
