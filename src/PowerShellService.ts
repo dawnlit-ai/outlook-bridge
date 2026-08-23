@@ -1327,9 +1327,25 @@ export function readOutlookSignatureHtml(name: string): string {
     return html;
 }
 
-// ── Pre-alert types ────────────────────────────────────────────────────────
-interface PreAlertEntry {
-    hblPath: string;
+// ── Generic inbox search ──────────────────────────────────────────────────
+export interface InboxSearchFilter {
+    /** SQL-LIKE fragment for the [Subject] clause in Items.Restrict — the
+     *  server-side prefilter that keeps a full-mailbox walk cheap, e.g.
+     *  '*pre*alert*'. Omit to restrict on date only. */
+    subjectLike?: string;
+    /** Regex re-checked client-side against each survivor's trimmed subject,
+     *  since Restrict's `like` is a blunt substring match. A normal JS
+     *  RegExp — only its `.source` crosses into the PowerShell/.NET regex
+     *  engine, which reads the same syntax; `-match` is case-insensitive
+     *  there by default regardless of the JS pattern's `i` flag. */
+    subjectPattern?: RegExp;
+    /** Drop subjects starting with Re:/Fw:/Fwd:. */
+    excludeReplies?: boolean;
+    /** Only return items carrying at least one attachment. */
+    requireAttachment?: boolean;
+}
+
+export interface InboxSearchMatch {
     entryId: string;
     /** Store the item lives in — pass alongside entryId so it resolves unambiguously
      *  across mailboxes (reply_outlook_email, save_outlook_attachment). */
@@ -1338,62 +1354,42 @@ interface PreAlertEntry {
     senderName: string;
     /** SMTP address; resolved from the Exchange DN when the sender is an EX recipient. */
     senderEmail: string;
-    /** 'yyyy-MM-dd HH:mm' — lets a batch run tell today's pre-alerts from older ones. */
+    /** 'yyyy-MM-dd HH:mm'. */
     receivedTime: string;
     body: string;
-    attachmentPaths: string[];
+    /** Not saved to disk — pass the ones you want through saveEmailAttachments. */
+    attachmentNames: string[];
+    folderPath: string;
 }
 
 /**
- * PowerShell snippet that, given an Outlook mail item in $item, saves its
- * attachments to %TEMP%, fills $attachPaths, and best-guesses the HBL PDF
- * into $hblPath (empty string when none can be identified).
- */
-const HBL_EXTRACTION_SNIPPET = `
-$hblPath = ''
-$attachPaths = @()
-$firstPdf = ''
-foreach ($att in $item.Attachments) {
-    $cleanName = ($att.FileName -replace '[\\uFEFF\\u200B\\u00AD\\uFFFD]', '').Trim()
-    if ($cleanName -imatch '\\.gif$') { continue }
-    $filePath = Join-Path $env:TEMP $cleanName
-    $att.SaveAsFile($filePath)
-    $attachPaths += $filePath
-    if ($cleanName -imatch '\\.pdf$' -and $cleanName -notmatch 'CO-LOAD' -and $firstPdf -eq '') {
-        $firstPdf = $filePath
-    }
-    if ($hblPath -eq '' -and $cleanName -notmatch 'CO-LOAD' -and
-        $cleanName -match '(TLX\\s+HBL|HBL\\s+TLX|TLX\\s*-\\s*HBL|HBL\\s*-\\s*TLX)\\.pdf$') {
-        $hblPath = $filePath
-    }
-}
-if ($hblPath -eq '') {
-    foreach ($att in $item.Attachments) {
-        $cleanName = ($att.FileName -replace '[\\uFEFF\\u200B\\u00AD\\uFFFD]', '').Trim()
-        if ($cleanName -match 'CO-LOAD') { continue }
-        if ($cleanName -match '(TLX|HBL)\\.pdf$') {
-            $hblPath = Join-Path $env:TEMP $cleanName
-            break
-        }
-    }
-}
-if ($hblPath -eq '') { $hblPath = $firstPdf }
-`;
-
-/**
- * Read all pre-alert emails from Outlook inbox for the given account.
- * Saves attachments to %TEMP%, locates the HBL PDF, and returns a list.
+ * Walk every folder under the Inbox (recursively) for one account and return
+ * the emails matching `filter` — full body included, attachments listed by
+ * name but not saved.
  *
- * `daysBack` bounds the scan to items received within that many days — what a daily
- * batch run wants, since the subject filter alone walks the whole Inbox tree and
- * returns every pre-alert ever received. 0 (the app UI's default) keeps the
- * unbounded subject-filter behavior.
+ * Built for a scan that doesn't know in advance which subfolder holds what
+ * it's after; `readInboxEmails` covers the cheaper "one known folder" case.
+ *
+ * `daysBack` bounds the scan to items received within that many days — what a
+ * daily batch run wants, since a subject filter alone walks the whole Inbox
+ * tree and returns every match ever received. 0 keeps that unbounded
+ * behavior, and is only sane paired with `filter.subjectLike` so Restrict can
+ * narrow the set server-side before anything crosses COM.
  */
-export async function readAllPreAlerts(
+export async function searchInboxByFilter(
     emailAccount: string,
+    filter: InboxSearchFilter = {},
     daysBack = 0,
-): Promise<PreAlertEntry[]> {
+): Promise<InboxSearchMatch[]> {
     if (process.platform !== 'win32') return [];
+    const subjectLike = filter.subjectLike ? psEscape(filter.subjectLike) : '';
+    const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
+    const boundedRestrict = subjectLike
+        ? `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff' AND [Subject] like '${subjectLike}'")`
+        : `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")`;
+    const unboundedRestrict = subjectLike
+        ? `$folder.Items.Restrict("[Subject] like '${subjectLike}'")`
+        : `$folder.Items`;
     const script = `
 $outlook = New-Object -ComObject Outlook.Application
 $ns = $outlook.GetNamespace('mapi')
@@ -1424,10 +1420,10 @@ foreach ($folder in $folders) {
         # Bounded scan. Filter on BOTH date and subject in the Restrict so Outlook does the
         # work server-side — a date-only restrict hands back every item in the window for
         # every folder in the tree, which is thousands of COM round-trips on a busy mailbox.
-        # The stricter subject regex below still runs on whatever survives.
+        # Any stricter subject regex still runs on whatever survives.
         $cutoff = (Get-Date).AddDays(-$daysBack).ToString('MM/dd/yyyy HH:mm')
         try {
-            $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff' AND [Subject] like '*pre*alert*'")
+            $filtered = ${boundedRestrict}
             $fCount = $filtered.Count
         } catch {
             # Some stores reject the compound query; fall back to date-only.
@@ -1435,13 +1431,13 @@ foreach ($folder in $folders) {
             $fCount = $filtered.Count
         }
     } else {
-        $filtered = $folder.Items.Restrict("[Subject] like '*pre*alert*'")
+        $filtered = ${unboundedRestrict}
         $fCount = $filtered.Count
-        if ($fCount -eq 0) {
+        ${subjectLike ? `if ($fCount -eq 0) {
             $cutoff = (Get-Date).AddDays(-60).ToString('MM/dd/yyyy HH:mm')
             $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
             $fCount = $filtered.Count
-        }
+        }` : ''}
     }
     for ($i = 1; $i -le $fCount; $i++) {
         $item = $filtered.Item($i)
@@ -1450,10 +1446,11 @@ foreach ($folder in $folders) {
         $subject = $item.Subject
         if (-not $subject) { continue }
         $subject = $subject.Trim()
-        if ($subject -notmatch 'pre[-\\s.]?alert' -or $subject -imatch '^(re|fw[d]?)\\s*:') { continue }
-        if ($item.Attachments.Count -eq 0) { continue }
-${HBL_EXTRACTION_SNIPPET}
-        if ($hblPath -eq '') { continue }
+        ${subjectPatternSrc ? `if ($subject -notmatch '${subjectPatternSrc}') { continue }` : ''}
+        ${filter.excludeReplies ? `if ($subject -imatch '^(re|fw[d]?)\\s*:') { continue }` : ''}
+        ${filter.requireAttachment ? `if ($item.Attachments.Count -eq 0) { continue }` : ''}
+        $attNames = @()
+        foreach ($att in $item.Attachments) { $attNames += $att.FileName }
         $bodyRaw = if ($item.Body) { $item.Body } else { '' }
         $bodyB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bodyRaw))
         # An Exchange sender's SenderEmailAddress is an X500 DN, not an address —
@@ -1470,7 +1467,6 @@ ${HBL_EXTRACTION_SNIPPET}
         $received = ''
         try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
         $results += [PSCustomObject]@{
-            hblPath = $hblPath
             entryId = $item.EntryID
             storeId = $storeId
             subject = $item.Subject.Trim()
@@ -1478,7 +1474,8 @@ ${HBL_EXTRACTION_SNIPPET}
             senderEmail = $senderSmtp
             receivedTime = $received
             body = $bodyB64
-            attachmentPaths = $attachPaths
+            attachmentNames = $attNames
+            folderPath = $folder.FolderPath
         }
     }
 }
@@ -1491,7 +1488,6 @@ ConvertTo-Json $results -Depth 3
     return arr.map(item => {
         const e = item as Record<string, unknown>;
         return {
-            hblPath: String(e.hblPath || ''),
             entryId: String(e.entryId || ''),
             storeId: String(e.storeId || ''),
             subject: String(e.subject || ''),
@@ -1499,20 +1495,31 @@ ConvertTo-Json $results -Depth 3
             senderEmail: String(e.senderEmail || ''),
             receivedTime: String(e.receivedTime || ''),
             body: Buffer.from(String(e.body || ''), 'base64').toString('utf8'),
-            attachmentPaths: Array.isArray(e.attachmentPaths)
-                ? (e.attachmentPaths as unknown[]).map(String)
+            attachmentNames: Array.isArray(e.attachmentNames)
+                ? (e.attachmentNames as unknown[]).map(String)
                 : [],
+            folderPath: String(e.folderPath || ''),
         };
     });
 }
 
+export interface SelectedEmail {
+    entryId: string;
+    storeId: string;
+    subject: string;
+    senderName: string;
+    senderEmail: string;
+    receivedTime: string;
+    body: string;
+    /** Not saved to disk — pass the ones you want through saveEmailAttachments. */
+    attachmentNames: string[];
+}
+
 /**
- * Read the email currently selected (or open) in Outlook and return it as a
- * single pre-alert entry. Unlike readAllPreAlerts, no subject/"pre-alert"
- * filter is applied — the user has explicitly chosen the email. Saves
- * attachments to %TEMP% and best-guesses the HBL PDF.
+ * Read the email currently selected (or open) in Outlook — full body,
+ * attachments listed by name but not saved.
  */
-export async function readSelectedPreAlert(): Promise<PreAlertEntry> {
+export async function readSelectedEmail(): Promise<SelectedEmail> {
     if (process.platform !== 'win32') {
         throw new Error('Outlook COM automation is only supported on Windows.');
     }
@@ -1532,9 +1539,10 @@ if ($item -eq $null) {
         if ($insp -ne $null) { $item = $insp.CurrentItem }
     } catch {}
 }
-if ($item -eq $null) { throw 'No email is selected in Outlook. Open Outlook, select (or open) the pre-alert email, then try again.' }
+if ($item -eq $null) { throw 'No email is selected in Outlook. Open Outlook, select (or open) an email, then try again.' }
 if ($item.MessageClass -notlike 'IPM.Note*') { throw 'The selected Outlook item is not an email.' }
-${HBL_EXTRACTION_SNIPPET}
+$attNames = @()
+foreach ($att in $item.Attachments) { $attNames += $att.FileName }
 $subject = ''
 if ($item.Subject) { $subject = $item.Subject.Trim() }
 $bodyRaw = if ($item.Body) { $item.Body } else { '' }
@@ -1553,7 +1561,6 @@ if (-not $senderSmtp) {
 $received = ''
 try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
 $result = [PSCustomObject]@{
-    hblPath = $hblPath
     entryId = $item.EntryID
     storeId = $storeId
     subject = $subject
@@ -1561,7 +1568,7 @@ $result = [PSCustomObject]@{
     senderEmail = $senderSmtp
     receivedTime = $received
     body = $bodyB64
-    attachmentPaths = $attachPaths
+    attachmentNames = $attNames
 }
 ConvertTo-Json $result -Depth 3
 `;
@@ -1571,7 +1578,6 @@ ConvertTo-Json $result -Depth 3
     }
     const e = JSON.parse(raw) as Record<string, unknown>;
     return {
-        hblPath: String(e.hblPath || ''),
         entryId: String(e.entryId || ''),
         storeId: String(e.storeId || ''),
         subject: String(e.subject || ''),
@@ -1579,9 +1585,9 @@ ConvertTo-Json $result -Depth 3
         senderEmail: String(e.senderEmail || ''),
         receivedTime: String(e.receivedTime || ''),
         body: Buffer.from(String(e.body || ''), 'base64').toString('utf8'),
-        attachmentPaths: Array.isArray(e.attachmentPaths)
-            ? (e.attachmentPaths as unknown[]).map(String)
-            : e.attachmentPaths ? [String(e.attachmentPaths)] : [],
+        attachmentNames: Array.isArray(e.attachmentNames)
+            ? (e.attachmentNames as unknown[]).map(String)
+            : e.attachmentNames ? [String(e.attachmentNames)] : [],
     };
 }
 
@@ -1597,7 +1603,7 @@ export async function openOutlookEmail(entryId: string): Promise<void> {
 }
 
 /**
- * Reply-all to a pre-alert email with a "Received, thank you" message.
+ * Reply-all to an email with a "Received, thank you" message.
  * If customHtml is provided, it is inserted as the reply body instead of the default.
  */
 export async function sendReceivedConfirmation(emailAccount: string, entryId: string, customHtml?: string): Promise<void> {
@@ -2602,6 +2608,81 @@ ConvertTo-Json $out -Compress
  */
 export async function saveEmailAttachment(entryId: string, fileName: string, storeId?: string): Promise<string> {
     return (await saveEmailAttachmentDetailed(entryId, fileName, storeId)).path;
+}
+
+/**
+ * Save several attachments from one email to %TEMP% in a single COM round
+ * trip — what a caller working through searchInboxByFilter/readSelectedEmail
+ * results wants, rather than paying a PowerShell process spawn per attachment.
+ * Matching and the not-found error follow saveEmailAttachmentDetailed's rules
+ * exactly, applied per name; results come back in the same order as
+ * `fileNames`.
+ */
+export async function saveEmailAttachments(
+    entryId: string,
+    fileNames: string[],
+    storeId?: string,
+): Promise<SavedAttachment[]> {
+    if (process.platform !== 'win32') {
+        throw new Error('Outlook COM automation is only supported on Windows.');
+    }
+    if (fileNames.length === 0) return [];
+    const getItemCall = storeId
+        ? `$ns.GetItemFromID('${psEscape(entryId)}', '${psEscape(storeId)}')`
+        : `$ns.GetItemFromID('${psEscape(entryId)}')`;
+    const targetsList = fileNames.map(f => `'${psEscape(f)}'`).join(',');
+    const script = `
+$outlook = New-Object -ComObject Outlook.Application
+$ns = $outlook.GetNamespace('mapi')
+$ns.Logon()
+$item = ${getItemCall}
+if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
+$tmpDir = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'sla-attachments')
+if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir | Out-Null }
+$targets = @(${targetsList})
+$results = @()
+foreach ($target in $targets) {
+    $found = $null
+    foreach ($att in $item.Attachments) {
+        if ($att.FileName -eq $target) { $found = $att; break }
+    }
+    if ($found -eq $null) {
+        $tnorm = ($target -replace '\\s+', ' ').Trim()
+        foreach ($att in $item.Attachments) {
+            if ((($att.FileName -replace '\\s+', ' ').Trim()) -ieq $tnorm) { $found = $att; break }
+        }
+    }
+    if ($found -eq $null) {
+        $have = @(); foreach ($a in $item.Attachments) { $have += $a.FileName }
+        $haveStr = if ($have.Count -gt 0) { $have -join ', ' } else { '(none)' }
+        throw "Attachment '$target' not found. Resolved email: from=$($item.SenderEmailAddress); subject=$($item.Subject); received=$($item.ReceivedTime). Attachments present: $haveStr. If this is not the email you expected, the EntryID is likely wrong or stale - re-run list_outlook_inbox to get a current EntryID."
+    }
+    $savePath = [IO.Path]::Combine($tmpDir, $found.FileName)
+    $found.SaveAsFile($savePath)
+    $results += [PSCustomObject]@{
+        path         = $savePath
+        subject      = if ($item.Subject) { $item.Subject } else { '' }
+        senderName   = if ($item.SenderName) { $item.SenderName } else { '' }
+        senderEmail  = if ($item.SenderEmailAddress) { $item.SenderEmailAddress } else { '' }
+        receivedTime = if ($item.ReceivedTime) { $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } else { '' }
+    }
+}
+ConvertTo-Json $results -Depth 3 -Compress
+`;
+    const raw = await runPowerShell(script, 15000);
+    if (!raw || !raw.trim()) throw new Error('Failed to save attachments');
+    const parsed = JSON.parse(raw.trim());
+    const arr: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.map(item => {
+        const p = item as Record<string, unknown>;
+        return {
+            path: String(p.path || ''),
+            subject: String(p.subject || ''),
+            senderName: String(p.senderName || ''),
+            senderEmail: String(p.senderEmail || ''),
+            receivedTime: String(p.receivedTime || ''),
+        };
+    });
 }
 
 /**

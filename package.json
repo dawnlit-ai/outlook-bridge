@@ -35,14 +35,6 @@
     "build": "tsc -p .",
     "prepublishOnly": "npm run build"
   },
-  "peerDependencies": {
-    "electron": "*"
-  },
-  "peerDependenciesMeta": {
-    "electron": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "~6.0.3"

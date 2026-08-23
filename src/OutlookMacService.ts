@@ -2,12 +2,15 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { pathToFileURL } from 'url';
 import type {
     EmailBodyResult,
     InboxEmail,
     InboxFolderInfo,
+    InboxSearchFilter,
+    InboxSearchMatch,
     MailFolderRef,
+    SavedAttachment,
+    SelectedEmail,
     TemplateFolderResult,
 } from './PowerShellService';
 // Path parsing and quote splitting are shared with the Windows reader on purpose:
@@ -306,94 +309,6 @@ end tell`;
 }
 
 /**
- * In-app template editor. Windows edits templates through an Outlook draft and
- * polls until the inspector closes; New Outlook for Mac invalidates the
- * scripting object on `open`, making that flow impossible. Instead, open a
- * small always-WYSIWYG BrowserWindow with the template in a contentEditable
- * region — Save (button or Cmd+S) resolves with the edited HTML, closing
- * without saving rejects, matching the Windows contract.
- */
-export async function editEmailTemplate(label: string, currentHtml: string): Promise<string> {
-    // Lazy require: the MCP bundle stubs 'electron' with {}, and MCP tools never
-    // call this — guard so a stray call fails with a clear message, not a crash.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const electron = require('electron') as typeof import('electron');
-    if (!electron.BrowserWindow) {
-        throw new Error('Template editing requires the desktop app.');
-    }
-
-    const SAVE_TITLE = 'sla-template-save';
-    const pageHtml = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>${label.replace(/[<>&]/g, '')}</title>
-</head>
-<body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;display:flex;flex-direction:column;height:100vh;">
-<div style="display:flex;align-items:center;gap:12px;padding:10px 16px;background:#1e293b;color:#f1f5f9;flex:none;">
-    <div style="font-size:14px;font-weight:600;flex:1;">${label.replace(/[<>&]/g, '')}</div>
-    <button id="sla-cancel" style="padding:6px 14px;border:1px solid #475569;border-radius:6px;background:transparent;color:#cbd5e1;font-size:13px;cursor:pointer;">Cancel</button>
-    <button id="sla-save" style="padding:6px 18px;border:none;border-radius:6px;background:#2563eb;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">Save (&#8984;S)</button>
-</div>
-<div id="sla-editor" contenteditable="true" style="flex:1;overflow:auto;margin:16px;padding:20px;background:#fff;border:1px solid #cbd5e1;border-radius:8px;outline:none;font-size:14px;color:#0f172a;">${currentHtml}</div>
-<script>
-document.getElementById('sla-save').addEventListener('click', () => { document.title = '${SAVE_TITLE}'; });
-document.getElementById('sla-cancel').addEventListener('click', () => { window.close(); });
-document.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        document.title = '${SAVE_TITLE}';
-    }
-});
-</script>
-</body>
-</html>`;
-
-    const pageFile = path.join(os.tmpdir(), `sla-template-editor-${Date.now()}.html`);
-    fs.writeFileSync(pageFile, pageHtml, 'utf-8');
-
-    try {
-        return await new Promise<string>((resolve, reject) => {
-            const win = new electron.BrowserWindow({
-                width: 720,
-                height: 640,
-                title: label,
-                webPreferences: { nodeIntegration: false, contextIsolation: true },
-            });
-            let settled = false;
-            win.webContents.on('page-title-updated', async (e, title) => {
-                e.preventDefault();
-                if (title !== SAVE_TITLE || settled) return;
-                try {
-                    const html: string = await win.webContents.executeJavaScript(
-                        "document.getElementById('sla-editor').innerHTML"
-                    );
-                    settled = true;
-                    resolve(html);
-                } catch (err) {
-                    settled = true;
-                    reject(err instanceof Error ? err : new Error(String(err)));
-                } finally {
-                    win.destroy();
-                }
-            });
-            win.on('closed', () => {
-                if (!settled) {
-                    settled = true;
-                    reject(new Error('No template saved. Click Save (Cmd+S) before closing.'));
-                }
-            });
-            win.loadURL(pathToFileURL(pageFile).href);
-        });
-    } finally {
-        try {
-            fs.unlinkSync(pageFile);
-        } catch { /* ignore */
-        }
-    }
-}
-
-/**
  * Read recent inbox messages for the given account, newest first.
  *
  * `entryId` here is Outlook for Mac's small integer message id (e.g. "779"), not
@@ -548,26 +463,23 @@ end tell`;
 // single-item actions throw. Legacy Outlook exposes what they need (messages,
 // attachments, `reply to`), so they are implementable — just not implemented.
 
-interface PreAlertEntry {
-    hblPath: string;
-    entryId: string;
-    storeId: string;
-    subject: string;
-    senderName: string;
-    senderEmail: string;
-    receivedTime: string;
-    body: string;
-    attachmentPaths: string[];
-}
-
-export async function readAllPreAlerts(
+export async function searchInboxByFilter(
     _emailAccount: string,
+    _filter: InboxSearchFilter = {},
     _daysBack = 0,
-): Promise<PreAlertEntry[]> {
+): Promise<InboxSearchMatch[]> {
     return [];
 }
 
-export async function readSelectedPreAlert(): Promise<PreAlertEntry> {
+export async function readSelectedEmail(): Promise<SelectedEmail> {
+    throw new Error(MAC_NOT_IMPLEMENTED);
+}
+
+export async function saveEmailAttachments(
+    _entryId: string,
+    _fileNames: string[],
+    _storeId?: string,
+): Promise<SavedAttachment[]> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
 

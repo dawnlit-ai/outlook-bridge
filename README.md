@@ -1,14 +1,12 @@
 # @dawnlit/outlook-bridge
 
-Drive a real, locally installed Outlook client from Node — read the inbox, send and
-reply to mail, manage drafts, work with signatures and template emails, file and
-delete messages. No Graph API, no app registration, no cloud permissions: this
-automates the desktop client itself, the same way a person would.
+Drive a real, locally installed Outlook client from Node — read the inbox, send and reply to mail, manage drafts, work
+with signatures and template emails, file and delete messages. No Graph API, no app registration, no cloud permissions:
+this automates the desktop client itself, the same way a person would.
 
 - **Windows** — via PowerShell + Outlook's COM object model.
-- **macOS** — via AppleScript. New Outlook for Mac can compose and send, but
-  cannot read the mailbox the way classic Outlook can; functions that need
-  mailbox access will throw a clear error on that combination.
+- **macOS** — via AppleScript. New Outlook for Mac can compose and send, but cannot read the mailbox the way classic
+  Outlook can; functions that need mailbox access will throw a clear error on that combination.
 - Any other platform — every call rejects with a clear "not supported" error.
 
 ## Install
@@ -17,8 +15,8 @@ automates the desktop client itself, the same way a person would.
 npm install @dawnlit/outlook-bridge
 ```
 
-Requires Node 20+ and a real Outlook installation on the machine running it —
-this is desktop automation, not a hosted API client.
+Requires Node 20+ and a real Outlook installation on the machine running it — this is desktop automation, not a hosted
+API client.
 
 ## Usage
 
@@ -27,7 +25,7 @@ import { getOutlookAccounts, readInboxEmails, sendOutlookEmail } from '@dawnlit/
 
 const accounts = await getOutlookAccounts();
 
-const { emails } = await readInboxEmails(accounts[0]);
+const {emails} = await readInboxEmails(accounts[0]);
 
 await sendOutlookEmail({
     account: accounts[0],
@@ -42,38 +40,35 @@ await sendOutlookEmail({
 **Accounts & inbox** — `getOutlookAccounts`, `readInboxEmails`, `readEmailBody`,
 `listInboxFolders`, `moveOutlookEmails`, `openOutlookEmail`.
 
+**Search & selection** — `searchInboxByFilter` (walks every folder under the Inbox for one
+account, filtering by subject pattern/date window/reply-exclusion/attachment presence — the
+building block for "find the emails matching X" without knowing which subfolder holds them),
+`readSelectedEmail` (the email currently selected or open in Outlook).
+
 **Sending & replying** — `sendOutlookEmail`, `replyOutlookEmail`, `sendAllDrafts`,
 `sendReceivedConfirmation`.
 
 **Drafts** — `listOutlookDrafts`, `deleteOutlookDrafts`.
 
-**Attachments** — `saveEmailAttachment`, `saveEmailAttachmentDetailed`.
+**Attachments** — `saveEmailAttachment`, `saveEmailAttachmentDetailed`, `saveEmailAttachments`
+(the same, batched into one COM round trip for several attachments off one email).
 
 **Signatures & templates** — `listOutlookSignatures`, `readOutlookSignatureHtml`,
-`readTemplateEmails`, `saveTemplateEmail`, `editEmailTemplate` (desktop-only on
-macOS — see below).
+`readTemplateEmails`, `saveTemplateEmail`, `editEmailTemplate` (Windows only — opens the template in a real
+Outlook compose window and returns the saved HTML; throws on other platforms).
 
 **Bounce handling** — `cleanUndeliverableEmails`, `collectBouncedRecipients`,
 `readSentRecipientGroups`.
 
 **Mailbox cleanup** — `deleteOutlookEmails`, `purgeDeletedItems`.
 
-**Template-section parsing** — a small pure-string toolkit for templates that
-carry several reply variants between `[[SECTION]] ... [[/SECTION]]` markers
-around one shared greeting/signature, with `{{PLACEHOLDER}}` tokens filled in
-by the caller: `findTemplateMarkers`, `composeTemplateBody`, `findTokens`,
+**Template-section parsing** — a small pure-string toolkit for templates that carry several reply variants between
+`[[SECTION]] ... [[/SECTION]]` markers around one shared greeting/signature, with `{{PLACEHOLDER}}` tokens filled in by
+the caller: `findTemplateMarkers`, `composeTemplateBody`, `findTokens`,
 `findUnfilledTokens`, `replaceToken`, `removeTokenLine`.
 
 Every exported type (`InboxEmail`, `ReplyEmailParams`, `MailFolderRef`, etc.)
 is exported alongside its function.
-
-## Electron
-
-`editEmailTemplate` on macOS opens an in-app WYSIWYG editor window, and does
-so by lazily `require('electron')` — so it only works when this package runs
-inside an Electron app, and only on that one function. `electron` is declared
-as an **optional** peer dependency: every other export is plain Node
-(`child_process`, `fs`, `os`) and works in any Node process, Electron or not.
 
 ## License
 

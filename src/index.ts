@@ -5,8 +5,8 @@ export {
     getOutlookAccounts,
     sendOutlookEmail,
     sendAllDrafts,
-    readAllPreAlerts,
-    readSelectedPreAlert,
+    searchInboxByFilter,
+    readSelectedEmail,
     readInboxEmails,
     readEmailBody,
     openOutlookEmail,
@@ -14,6 +14,7 @@ export {
     editEmailTemplate,
     saveEmailAttachment,
     saveEmailAttachmentDetailed,
+    saveEmailAttachments,
     cleanUndeliverableEmails,
     collectBouncedRecipients,
     readSentRecipientGroups,
@@ -32,6 +33,9 @@ export {
 
 export type {
     InboxEmail,
+    InboxSearchFilter,
+    InboxSearchMatch,
+    SelectedEmail,
     EmailBodyResult,
     SavedAttachment,
     SendAllDraftsResult,

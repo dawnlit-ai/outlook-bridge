@@ -11,16 +11,16 @@ export const {
     getOutlookAccounts,
     sendOutlookEmail,
     sendAllDrafts,
-    readAllPreAlerts,
-    readSelectedPreAlert,
+    searchInboxByFilter,
+    readSelectedEmail,
     readInboxEmails,
     readEmailBody,
     openOutlookEmail,
     sendReceivedConfirmation,
-    editEmailTemplate,
     exportSheetAsPdf,
     saveEmailAttachment,
     saveEmailAttachmentDetailed,
+    saveEmailAttachments,
     cleanUndeliverableEmails,
     collectBouncedRecipients,
     readSentRecipientGroups,
@@ -35,6 +35,11 @@ export const {
     purgeDeletedItems,
 } = impl;
 
+// Template editing drives a real Outlook compose window (COM inspector), which
+// only Windows supports — macOS gets no fallback here since it isn't Outlook
+// automation; callers needing an editor on macOS supply their own.
+export { editEmailTemplate } from './PowerShellService';
+
 // Windows reads signatures synchronously from disk, macOS asynchronously from
 // Outlook itself — expose both behind an async signature.
 export async function listOutlookSignatures(): Promise<string[]> {
@@ -47,6 +52,9 @@ export async function readOutlookSignatureHtml(name: string): Promise<string> {
 
 export type {
     InboxEmail,
+    InboxSearchFilter,
+    InboxSearchMatch,
+    SelectedEmail,
     EmailBodyResult,
     SavedAttachment,
     SendAllDraftsResult,
