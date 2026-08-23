@@ -594,10 +594,6 @@ end tell`;
     };
 }
 
-export async function sendReceivedConfirmation(_emailAccount: string, _entryId: string, _customHtml?: string): Promise<void> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
-}
-
 export async function sendAllDrafts(_emailAccount: string): Promise<SendAllDraftsResult> {
     throw new Error(MAC_NOT_IMPLEMENTED);
 }
@@ -778,7 +774,6 @@ const _conformance: OutlookBridge = {
     sendOutlookEmail,
     replyOutlookEmail,
     sendAllDrafts,
-    sendReceivedConfirmation,
     readInboxEmails,
     searchInboxByFilter,
     readSelectedEmail,

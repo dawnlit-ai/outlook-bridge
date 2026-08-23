@@ -23,7 +23,6 @@ export const {
     sendOutlookEmail,
     replyOutlookEmail,
     sendAllDrafts,
-    sendReceivedConfirmation,
     readInboxEmails,
     searchInboxByFilter,
     readSelectedEmail,

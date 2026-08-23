@@ -61,6 +61,12 @@ export interface ReplyEmailParams {
      * than by the caller, so the signature HTML — images and all — never crosses the wire.
      */
     signatureName?: string;
+    /**
+     * Answer every recipient of the original (Reply All) rather than just its
+     * sender. Off by default: widening a reply is the kind of mistake that can't
+     * be taken back, so it has to be asked for.
+     */
+    replyAll?: boolean;
     sendImmediately?: boolean;
     openDraftWindow?: boolean;
 }
@@ -358,8 +364,6 @@ export interface OutlookBridge {
     replyOutlookEmail(params: ReplyEmailParams): Promise<ReplyEmailResult>;
 
     sendAllDrafts(emailAccount: string): Promise<SendAllDraftsResult>;
-
-    sendReceivedConfirmation(emailAccount: string, entryId: string, customHtml?: string): Promise<void>;
 
     readInboxEmails(
         emailAccount: string,

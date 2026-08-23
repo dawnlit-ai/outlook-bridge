@@ -72,8 +72,8 @@ account, filtering by subject pattern/date window/reply-exclusion/attachment pre
 building block for "find the emails matching X" without knowing which subfolder holds them),
 `readSelectedEmail` (the email currently selected or open in Outlook).
 
-**Sending & replying** — `sendOutlookEmail`, `replyOutlookEmail`, `sendAllDrafts`,
-`sendReceivedConfirmation`.
+**Sending & replying** — `sendOutlookEmail`, `replyOutlookEmail` (answers the sender; pass `replyAll: true` to answer
+every recipient), `sendAllDrafts`.
 
 **Drafts** — `listOutlookDrafts`, `deleteOutlookDrafts`.
 

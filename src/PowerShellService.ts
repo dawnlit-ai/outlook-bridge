@@ -258,13 +258,14 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
     const getItemLine = params.storeId
         ? `$item = $ns.GetItemFromID('${psEscape(params.entryId)}', '${psEscape(params.storeId)}')`
         : `$item = $ns.GetItemFromID('${psEscape(params.entryId)}')`;
+    const replyMethod = params.replyAll ? 'ReplyAll' : 'Reply';
     const script = `
 $ErrorActionPreference = 'Stop'
 $outlook = New-Object -ComObject Outlook.Application
 $ns = $outlook.GetNamespace('mapi')
 $ns.Logon()
 ${getItemLine}
-$reply = $item.Reply()
+$reply = $item.${replyMethod}()
 
 # Fail rather than fall back to the default account, like sendOutlookEmail.
 $account = $null
@@ -1416,58 +1417,6 @@ export async function openOutlookEmail(entryId: string): Promise<void> {
 }
 
 /**
- * Reply-all to an email with a "Received, thank you" message.
- * If customHtml is provided, it is inserted as the reply body instead of the default.
- */
-export async function sendReceivedConfirmation(emailAccount: string, entryId: string, customHtml?: string): Promise<void> {
-    if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
-    }
-    let insertBlock: string;
-    let tmpFile: string | undefined;
-    if (customHtml) {
-        // Write large HTML to a temp file to avoid ENAMETOOLONG
-        tmpFile = tempFile('reply-body', 'html');
-        fs.writeFileSync(tmpFile, customHtml, 'utf-8');
-        const psPath = psEscape(tmpFile);
-        insertBlock = `
-$insertHtml = [IO.File]::ReadAllText('${psPath}', [Text.Encoding]::UTF8)
-$reply.HTMLBody = $reply.HTMLBody.Insert($idx, $insertHtml)
-`;
-    } else {
-        insertBlock = '';
-    }
-    const script = `
-$outlook = New-Object -ComObject Outlook.Application
-$ns = $outlook.GetNamespace('mapi')
-$item = $ns.GetItemFromID('${psEscape(entryId)}')
-$reply = $item.ReplyAll()
-
-# Set sending account
-$account = $null
-foreach ($a in $outlook.Session.Accounts) {
-    if ($a.SmtpAddress -ieq '${psEscape(emailAccount)}') { $account = $a; break }
-}
-# Direct assignment ($reply.SendUsingAccount = $account) is a silent no-op under
-# PowerShell's COM binding; set the property through IDispatch reflection instead.
-if ($account -ne $null) { [void]$reply.GetType().InvokeMember('SendUsingAccount', [Reflection.BindingFlags]::SetProperty, $null, $reply, @($account)) }
-
-$keyWord = 'WordSection1>'
-$idx = $reply.HTMLBody.IndexOf($keyWord) + $keyWord.Length
-${insertBlock}
-$reply.Display()
-`;
-    try {
-        await runPowerShell(script);
-    } finally {
-        if (tmpFile) try {
-            fs.unlinkSync(tmpFile);
-        } catch { /* ignore */
-        }
-    }
-}
-
-/**
  * Open an Outlook draft pre-filled with the current reply template HTML.
  * Polls until the user closes the draft window, then returns the edited HTML body.
  */
@@ -2351,7 +2300,6 @@ const _conformance: OutlookBridge = {
     sendOutlookEmail,
     replyOutlookEmail,
     sendAllDrafts,
-    sendReceivedConfirmation,
     readInboxEmails,
     searchInboxByFilter,
     readSelectedEmail,
