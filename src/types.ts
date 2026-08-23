@@ -476,3 +476,30 @@ export interface OutlookBridge {
         folderName?: string,
     ): Promise<SaveTemplateResult>;
 }
+
+// ── Capability discovery ─────────────────────────────────────────────────
+/**
+ * Every operation whose availability can be asked about — the platform contract
+ * plus `editEmailTemplate`, which sits outside `OutlookBridge` because only
+ * Windows has it at all.
+ */
+export type BridgeCapability = keyof OutlookBridge | 'editEmailTemplate';
+
+/**
+ * Which operations actually work on this machine.
+ *
+ * The alternative was matching on an error message, which is how a consumer had
+ * to do it before: half the macOS surface throws NOT_IMPLEMENTED, and the only
+ * way to know in advance was to try. A UI can now grey out the buttons it can't
+ * back rather than discovering the gap when the user clicks one.
+ *
+ * `false` also covers the softer gap — `searchInboxByFilter`,
+ * `collectBouncedRecipients` and `readSentRecipientGroups` return an empty list
+ * on macOS rather than throwing, so an empty result there means "can't", not
+ * "none found". That distinction is invisible in the return value and is the
+ * reason this map reports on them at all.
+ *
+ * Derived from `keyof OutlookBridge`, so adding a function to the contract
+ * breaks both platform maps at compile time instead of quietly defaulting.
+ */
+export type CapabilityMap = Readonly<Record<BridgeCapability, boolean>>;

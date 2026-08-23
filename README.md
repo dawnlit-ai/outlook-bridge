@@ -4,11 +4,11 @@ Drive a real, locally installed Outlook client from Node — read the inbox, sen
 with signatures and template emails, file and delete messages. No Graph API, no app registration, no cloud permissions:
 this automates the desktop client itself, the same way a person would.
 
-- **Windows** — via PowerShell + Outlook's COM object model.
+- **Windows** — via PowerShell + Outlook's COM object model. Everything is supported here.
 - **macOS** — via AppleScript. New Outlook for Mac can compose and send, but cannot read the mailbox the way classic
-  Outlook can; functions that need mailbox access will throw a clear error on that combination. A number of functions
-  are not yet ported and throw `not implemented for Outlook on macOS yet`.
-- Any other platform — every call rejects with a clear "not supported" error.
+  Outlook can; functions that need mailbox access fail loudly on that combination. About half the surface is not yet
+  ported — ask `capabilities()` rather than guessing (see [What works where](#what-works-where)).
+- Any other platform — `capabilities()` reports everything false and every call rejects with `UNSUPPORTED_PLATFORM`.
 
 ## Install
 
@@ -40,20 +40,68 @@ await sendOutlookEmail({
 Every function is exposed under one signature regardless of platform — the dispatcher pins both implementations to the
 same `OutlookBridge` interface, so nothing here returns a per-platform union you have to narrow.
 
-## Configuration
+## What works where
 
-Each call generates a script and shells out to an interpreter. `configure()` covers the three things that leaves
-otherwise out of your reach — how long a run may take, how much it may print, and what the script actually said.
+Half the macOS surface isn't ported. Ask before you call, rather than finding out from an exception:
 
 ```ts
-import { configure } from '@dawnlit/outlook-bridge';
+import { createOutlookBridge } from '@dawnlit/outlook-bridge';
 
-configure({
+const bridge = createOutlookBridge();
+
+if (bridge.supports('searchInboxByFilter')) { /* … */ }
+
+bridge.capabilities(); // { readInboxEmails: true, replyOutlookEmail: false, … }
+```
+
+`false` covers two cases, and the difference matters. Most unsupported operations throw `NOT_IMPLEMENTED`. But
+`searchInboxByFilter`, `collectBouncedRecipients` and `readSentRecipientGroups` return an **empty list** on macOS —
+the same shape Windows produces when there genuinely is nothing — so on those three an empty result means "can't",
+not "none found". The map is the only way to tell them apart.
+
+The map is derived from `keyof OutlookBridge`, so a function added to the contract fails both platform maps at
+compile time rather than quietly defaulting to supported.
+
+## Configuration
+
+Each call generates a script and shells out to an interpreter. That leaves four things otherwise out of your reach:
+how long a run may take, how much it may print, how to call it off, and what the script actually said.
+
+`createOutlookBridge()` gives you those on an instance no other caller in the process can disturb:
+
+```ts
+import { createOutlookBridge } from '@dawnlit/outlook-bridge';
+
+const bridge = createOutlookBridge({
     timeoutMs: 120_000,               // default per-run ceiling; 0 disables
     maxBufferBytes: 32 * 1024 * 1024, // raise before a scan that returns thousands of bodies
     tempDir: '/var/tmp/outlook',      // scratch scripts and default attachment destination
     debug: (e) => log(e.script),      // every generated script, its duration, and any error
 });
+
+await bridge.readInboxEmails(account);
+```
+
+`bridge.withOptions({ … })` derives a bridge with some settings changed — how one call gets its own budget, or its
+own cancellation:
+
+```ts
+const controller = new AbortController();
+cancelButton.onclick = () => controller.abort();
+
+await bridge.withOptions({ signal: controller.signal }).searchInboxByFilter(account, filter);
+// → rejects with an AbortedError (code 'ABORTED'), interpreter killed
+```
+
+The same functions are also exported directly, running against a process-wide config that `configure()` sets. That is
+the simpler thing for a program that owns its process; prefer `createOutlookBridge` in anything sharing a process
+with code you do not own.
+
+```ts
+import { configure, readInboxEmails } from '@dawnlit/outlook-bridge';
+
+configure({ timeoutMs: 60_000 });
+await readInboxEmails(account);
 ```
 
 `OUTLOOK_BRIDGE_DEBUG=1` in the environment turns on script logging to stderr without a code change.
@@ -61,6 +109,50 @@ configure({
 Calls that carry a genuinely different budget (a full-mailbox walk, a purge) keep their own timeout and ignore
 `timeoutMs`. `searchInboxByFilter` is the one most likely to push against `maxBufferBytes`, since it returns whole
 message bodies.
+
+## Errors
+
+Every deliberate failure is an `OutlookError` carrying a stable `code`. **The codes are the API; the messages are
+not** — branch on `code`, never on message text.
+
+```ts
+import { OutlookError } from '@dawnlit/outlook-bridge';
+
+try {
+    await bridge.replyOutlookEmail(params);
+} catch (error) {
+    if (!(error instanceof OutlookError)) throw error; // a real bug
+    switch (error.code) {
+        case 'ACCOUNT_NOT_FOUND': return promptForAccount(error.account);
+        case 'NOT_IMPLEMENTED':   return degrade(error.operation);
+        case 'ABORTED':           return;
+        case 'SCRIPT_FAILED':     return report(error.script, error.stderr);
+    }
+}
+```
+
+| code | class | meaning |
+| --- | --- | --- |
+| `UNSUPPORTED_PLATFORM` | `UnsupportedPlatformError` | No Outlook automation exists on this OS. |
+| `NOT_IMPLEMENTED` | `NotImplementedError` | The platform could, but the port is not written. Carries `operation`. |
+| `ACCOUNT_NOT_FOUND` | `AccountNotFoundError` | No configured account matches. Carries `account`. |
+| `NOT_FOUND` | `NotFoundError` | A folder, template, signature or item did not resolve. Carries `kind`. |
+| `INVALID_REQUEST` | `InvalidRequestError` | The arguments cannot produce a call; nothing was attempted. |
+| `SCRIPT_FAILED` | `ScriptError` | The interpreter ran and failed. Carries `script`, `stderr`, `runner`, `durationMs`. |
+| `TIMEOUT` | `TimeoutError` | The run exceeded its budget and was killed. Carries `timeoutMs`. |
+| `ABORTED` | `AbortedError` | The caller's `AbortSignal` fired. |
+
+`ScriptError` carries the generated script verbatim — the thing you actually want when one fires, and otherwise
+reachable only if you wired up a `debug` hook in advance.
+
+## Module format
+
+Published as CommonJS. ESM consumers can use named imports normally (`import { sendOutlookEmail } from …`); Node
+resolves them off the CJS build.
+
+There is deliberately no dual ESM/CJS build. This package identifies its errors with `instanceof`, and a dual-format
+package can load two copies of itself into one process — at which point `error instanceof OutlookError` returns
+`false` for errors the package itself threw. One format avoids that failure entirely.
 
 ## API
 
@@ -100,8 +192,12 @@ the caller: `findTemplateMarkers`, `composeTemplateBody`, `findTokens`,
 might type into a well-known root plus segments), `splitQuotedOriginal` (separate a reply's own text from the thread
 quoted below it), `WELL_KNOWN_FOLDERS`.
 
-Every exported type (`InboxEmail`, `ReplyEmailParams`, `MailFolderRef`, `OutlookBridge`, etc.) is exported alongside its
-function.
+**Instances, capabilities and errors** — `createOutlookBridge` (a bridge with its own settings; see
+[Configuration](#configuration)), `capabilities` / `supports`, and the `OutlookError` family
+(see [Errors](#errors)).
+
+Every exported type (`InboxEmail`, `ReplyEmailParams`, `MailFolderRef`, `OutlookBridge`, `CapabilityMap`,
+`OutlookErrorCode`, etc.) is exported alongside its function.
 
 ## Development
 
@@ -110,8 +206,13 @@ npm run build   # tsc → dist/
 npm test        # build, then node:test over the platform-independent parts
 ```
 
-The tests cover the pure logic — folder-string parsing, quote splitting, template composition, scratch-file handling —
+The tests cover the parts that need no Outlook session — folder-string parsing, quote splitting, template
+composition, scratch-file handling, the error taxonomy and its run classifier, capability maps, and config scoping —
 so they run anywhere, with or without Outlook installed.
+
+What they cannot cover is the automation itself: driving a real Outlook client is the whole point of the package, and
+the COM and AppleScript paths need a machine with that client on it. Changes to a generated script are verified by
+running them against a real Outlook, not in CI.
 
 ## License
 

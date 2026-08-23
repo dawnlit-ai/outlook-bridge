@@ -2,9 +2,10 @@
 // PowerShell / AppleScript runs.
 //
 // Every call in this package works by generating a script and shelling out to an
-// interpreter, which leaves a consumer three things they cannot otherwise reach:
-// how long a run may take, how much it may print, and what the script actually
-// said when it failed. Those are the three settings here.
+// interpreter, which leaves a consumer four things they cannot otherwise reach:
+// how long a run may take, how much it may print, how to call it off, and what
+// the script actually said when it failed. Those are the settings here.
+import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -36,18 +37,28 @@ export interface BridgeOptions {
     /** Directory for generated scripts and for saved attachments when the caller
      *  names no destination. Defaults to the OS temp directory. */
     tempDir?: string;
+    /**
+     * Cancels in-flight runs: the interpreter is killed and the call rejects with
+     * an `AbortedError`. A timeout only caps a run's length — this is how a UI
+     * with a Cancel button, or a shutting-down process, calls one off early.
+     *
+     * Most useful scoped to the calls you want to cancel rather than set process
+     * wide: `bridge.withOptions({ signal }).searchInboxByFilter(...)`.
+     */
+    signal?: AbortSignal;
     /** `true` logs every generated script to stderr; a function receives each run
      *  instead. Defaults to on when OUTLOOK_BRIDGE_DEBUG is set to a non-empty,
      *  non-'0' value. */
     debug?: boolean | ((event: BridgeDebugEvent) => void);
 }
 
-type ResolvedConfig = Required<Pick<BridgeOptions, 'timeoutMs' | 'maxBufferBytes' | 'tempDir'>>
-    & Pick<BridgeOptions, 'debug'>;
+export type ResolvedConfig = Required<Pick<BridgeOptions, 'timeoutMs' | 'maxBufferBytes' | 'tempDir'>>
+    & Pick<BridgeOptions, 'debug' | 'signal'>;
 
 const envDebug = process.env.OUTLOOK_BRIDGE_DEBUG;
 
-const config: ResolvedConfig = {
+/** The process-wide defaults, as mutated by `configure()`. */
+const globalConfig: ResolvedConfig = {
     timeoutMs: 120_000,
     maxBufferBytes: 8 * 1024 * 1024,
     tempDir: os.tmpdir(),
@@ -55,24 +66,59 @@ const config: ResolvedConfig = {
 };
 
 /**
- * Override the defaults above for this process. Merges, so naming one option
- * leaves the rest alone. Call before the first automation call.
+ * Per-instance config, scoped to an async call tree.
+ *
+ * `createOutlookBridge()` hands each instance its own settings, but the platform
+ * services are 3,000 lines of module-level functions that read `getConfig()`
+ * directly. Threading a config parameter through all of them would touch every
+ * line for no behavioural gain; an AsyncLocalStorage lets an instance wrap its
+ * calls instead, and the store follows across every `await` inside one. Two
+ * bridges with different timeouts can then run concurrently in one process,
+ * which is the thing a second consumer actually needs and the global could never
+ * give them.
  */
-export function configure(options: BridgeOptions): void {
-    if (options.timeoutMs !== undefined) config.timeoutMs = Math.max(0, options.timeoutMs);
-    if (options.maxBufferBytes !== undefined) config.maxBufferBytes = Math.max(1, options.maxBufferBytes);
-    if (options.tempDir !== undefined) config.tempDir = options.tempDir;
-    if (options.debug !== undefined) config.debug = options.debug;
+const scoped = new AsyncLocalStorage<ResolvedConfig>();
+
+/** Merge caller options over a base, ignoring the keys they left out. */
+export function mergeOptions(base: ResolvedConfig, options: BridgeOptions = {}): ResolvedConfig {
+    const next: ResolvedConfig = {...base};
+    if (options.timeoutMs !== undefined) next.timeoutMs = Math.max(0, options.timeoutMs);
+    if (options.maxBufferBytes !== undefined) next.maxBufferBytes = Math.max(1, options.maxBufferBytes);
+    if (options.tempDir !== undefined) next.tempDir = options.tempDir;
+    if (options.signal !== undefined) next.signal = options.signal;
+    if (options.debug !== undefined) next.debug = options.debug;
+    return next;
 }
 
-/** The settings currently in force. */
+/**
+ * Override the process-wide defaults. Merges, so naming one option leaves the
+ * rest alone. Call before the first automation call.
+ *
+ * Affects every caller in the process. Prefer `createOutlookBridge(options)` in
+ * anything that shares a process with code you don't own.
+ */
+export function configure(options: BridgeOptions): void {
+    Object.assign(globalConfig, mergeOptions(globalConfig, options));
+}
+
+/** The settings in force for the current call — the enclosing scope's, else global. */
 export function getConfig(): Readonly<ResolvedConfig> {
-    return config;
+    return scoped.getStore() ?? globalConfig;
+}
+
+/** The process-wide defaults, ignoring any active scope. */
+export function getGlobalConfig(): Readonly<ResolvedConfig> {
+    return globalConfig;
+}
+
+/** Run `fn` with `config` in force for it and everything it awaits. */
+export function withConfig<T>(config: ResolvedConfig, fn: () => T): T {
+    return scoped.run(config, fn);
 }
 
 /** Report one finished script run to the configured debug hook. */
 export function reportRun(event: BridgeDebugEvent): void {
-    const {debug} = config;
+    const {debug} = getConfig();
     if (!debug) return;
     if (typeof debug === 'function') {
         debug(event);
@@ -91,7 +137,7 @@ export function reportRun(event: BridgeDebugEvent): void {
  */
 export function tempFile(kind: string, extension: string): string {
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    return path.join(config.tempDir, `outlook-bridge-${kind}-${unique}.${extension}`);
+    return path.join(getConfig().tempDir, `outlook-bridge-${kind}-${unique}.${extension}`);
 }
 
 /**
@@ -103,7 +149,7 @@ export function tempFile(kind: string, extension: string): string {
  * unrelated programs using this package on the same machine.
  */
 export function makeAttachmentDir(): string {
-    return fs.mkdtempSync(path.join(config.tempDir, 'outlook-bridge-attachments-'));
+    return fs.mkdtempSync(path.join(getConfig().tempDir, 'outlook-bridge-attachments-'));
 }
 
 /** Resolve a caller-supplied destination, creating it when absent. */

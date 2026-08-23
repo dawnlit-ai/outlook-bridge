@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import fs from 'fs';
 import type {
+    CapabilityMap,
     CleanUndeliverableResult,
     DeleteDraftsResult,
     DeleteMailOptions,
@@ -30,6 +31,7 @@ import type {
 // and a second implementation here is how the two contracts drift apart.
 import { mailFolderRef, splitQuotedOriginal } from './mail';
 import { getConfig, reportRun, tempFile } from './runtime';
+import { classifyRunFailure, InvalidRequestError, NotFoundError, NotImplementedError } from './errors';
 
 // macOS Outlook automation via AppleScript (osascript).
 //
@@ -45,9 +47,6 @@ import { getConfig, reportRun, tempFile } from './runtime';
 // when they do nothing (always confirm with a count), and a new outgoing message
 // lands in Temporary Items — `open` only displays it, so a windowless draft has to
 // be moved into the Drafts folder explicitly.
-
-const MAC_NOT_IMPLEMENTED =
-    'This feature is not implemented for Outlook on macOS yet.';
 
 /**
  * Resolve the account whose SMTP address matches, or raise. Emitted into a
@@ -105,9 +104,9 @@ function mailScopeSnippet(ref: MailFolderRef, folderLabel = ''): string {
     const term = MAC_ROOT_TERMS[ref.rootId];
     if (!term) {
         const asked = folderLabel ? ` (asked for '${folderLabel}')` : '';
-        throw new Error(
-            `Outlook for Mac has no '${ref.rootLabel}' folder in its AppleScript dictionary${asked}. `
-            + `Readable roots: Inbox, Sent Items, Drafts, Deleted Items, Outbox.`,
+        throw new NotImplementedError(
+            `folder root '${ref.rootLabel}'${asked}`,
+            'macOS — readable roots are Inbox, Sent Items, Drafts, Deleted Items, Outbox',
         );
     }
     const walk = ref.segments.map(seg => `
@@ -151,13 +150,14 @@ const LIST_SEP = '\u001d';
 function runOsaScript(script: string, timeout?: number): Promise<string> {
     const scriptFile = tempFile('osa', 'applescript');
     fs.writeFileSync(scriptFile, script, 'utf-8');
-    const {timeoutMs, maxBufferBytes} = getConfig();
+    const {timeoutMs, maxBufferBytes, signal} = getConfig();
+    const effectiveTimeout = timeout ?? timeoutMs;
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'osascript',
             [scriptFile],
-            {maxBuffer: maxBufferBytes, timeout: timeout ?? timeoutMs},
+            {maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal},
             (error, stdout, stderr) => {
                 const durationMs = Date.now() - startedAt;
                 try {
@@ -172,8 +172,17 @@ function runOsaScript(script: string, timeout?: number): Promise<string> {
                     const msg = (stderr || error.message)
                         .replace(/^(?:.*?:)?\d+:\d+:\s*execution error:\s*/m, '')
                         .trim();
-                    reportRun({runner: 'osascript', script, durationMs, error: msg});
-                    reject(new Error(msg));
+                    const failure = classifyRunFailure({
+                        runner: 'osascript',
+                        script,
+                        stderr: msg,
+                        durationMs,
+                        nodeError: error,
+                        timeoutMs: effectiveTimeout,
+                        signal,
+                    });
+                    reportRun({runner: 'osascript', script, durationMs, error: failure.message});
+                    reject(failure);
                 } else {
                     reportRun({runner: 'osascript', script, durationMs});
                     resolve(stdout.replace(/\n$/, ''));
@@ -337,7 +346,7 @@ export async function readInboxEmails(
     // mis-scoping this parameter exists to prevent. Mirrors the Windows check.
     if (folder && folder.trim() && ref.segments.length === 0 && ref.rootId === 6
         && folder.trim().toLowerCase() !== 'inbox') {
-        throw new Error(`Folder '${folder}' does not name a folder under the Inbox.`);
+        throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
     }
     const resolveScope = mailScopeSnippet(ref, folder || '');
     const folderPath = macFolderPath(emailAccount, ref.rootLabel, ref.segments);
@@ -479,7 +488,7 @@ export async function searchInboxByFilter(
 }
 
 export async function readSelectedEmail(): Promise<SelectedEmail> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('readSelectedEmail', 'macOS');
 }
 
 export async function saveEmailAttachments(
@@ -488,11 +497,11 @@ export async function saveEmailAttachments(
     _storeId?: string,
     _destDir?: string,
 ): Promise<SavedAttachment[]> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('saveEmailAttachments', 'macOS');
 }
 
 export async function openOutlookEmail(_entryId: string): Promise<void> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('openOutlookEmail', 'macOS');
 }
 
 /**
@@ -518,7 +527,7 @@ export async function readEmailBody(
 ): Promise<EmailBodyResult> {
     const id = String(entryId ?? '').trim();
     if (!/^\d+$/.test(id)) {
-        throw new Error(
+        throw new InvalidRequestError(
             `'${entryId}' is not an Outlook for Mac message id. Mac ids are small integers `
             + `(e.g. "1263") returned by readInboxEmails on this machine; a Windows MAPI `
             + `EntryID cannot be resolved here.`,
@@ -595,7 +604,7 @@ end tell`;
 }
 
 export async function sendAllDrafts(_emailAccount: string): Promise<SendAllDraftsResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('sendAllDrafts', 'macOS');
 }
 
 export async function saveEmailAttachment(
@@ -604,7 +613,7 @@ export async function saveEmailAttachment(
     _storeId?: string,
     _destDir?: string,
 ): Promise<string> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('saveEmailAttachment', 'macOS');
 }
 
 export async function saveEmailAttachmentDetailed(
@@ -613,7 +622,7 @@ export async function saveEmailAttachmentDetailed(
     _storeId?: string,
     _destDir?: string,
 ): Promise<SavedAttachment> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('saveEmailAttachmentDetailed', 'macOS');
 }
 
 export async function cleanUndeliverableEmails(
@@ -621,7 +630,7 @@ export async function cleanUndeliverableEmails(
     _daysBack?: number,
     _dryRun?: boolean,
 ): Promise<CleanUndeliverableResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('cleanUndeliverableEmails', 'macOS');
 }
 
 export async function collectBouncedRecipients(
@@ -709,7 +718,7 @@ export async function moveOutlookEmails(
     _folderName: string,
     _createIfMissing?: boolean,
 ): Promise<MoveEmailsResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('moveOutlookEmails', 'macOS');
 }
 
 export async function listOutlookDrafts(
@@ -724,7 +733,7 @@ export async function deleteOutlookDrafts(
     _emailAccount: string,
     _entryIds: string[],
 ): Promise<DeleteDraftsResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('deleteOutlookDrafts', 'macOS');
 }
 
 export async function deleteOutlookEmails(
@@ -732,7 +741,7 @@ export async function deleteOutlookEmails(
     _entryIds: string[],
     _options?: DeleteMailOptions,
 ): Promise<DeleteMailResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('deleteOutlookEmails', 'macOS');
 }
 
 export async function purgeDeletedItems(
@@ -740,11 +749,11 @@ export async function purgeDeletedItems(
     _olderThanDays?: number,
     _dryRun?: boolean,
 ): Promise<PurgeDeletedItemsResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('purgeDeletedItems', 'macOS');
 }
 
 export async function replyOutlookEmail(_params: ReplyEmailParams): Promise<ReplyEmailResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('replyOutlookEmail', 'macOS');
 }
 
 export async function readTemplateEmails(
@@ -754,7 +763,7 @@ export async function readTemplateEmails(
     _includeBody?: boolean,
     _subject?: string,
 ): Promise<TemplateFolderResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('readTemplateEmails', 'macOS');
 }
 
 export async function saveTemplateEmail(
@@ -763,7 +772,7 @@ export async function saveTemplateEmail(
     _htmlBody: string,
     _folderName?: string,
 ): Promise<SaveTemplateResult> {
-    throw new Error(MAC_NOT_IMPLEMENTED);
+    throw new NotImplementedError('saveTemplateEmail', 'macOS');
 }
 
 // Compile-time proof that this module answers the whole platform contract — the
@@ -795,4 +804,42 @@ const _conformance: OutlookBridge = {
     readOutlookSignatureHtml,
     readTemplateEmails,
     saveTemplateEmail,
+};
+
+/**
+ * What is actually ported to macOS today.
+ *
+ * `false` means one of two things, and the difference matters to a caller:
+ * most of these throw NOT_IMPLEMENTED, but searchInboxByFilter,
+ * collectBouncedRecipients and readSentRecipientGroups return an empty list
+ * instead — a shape the Windows contract also produces when there genuinely is
+ * nothing, which is exactly why they need announcing here.
+ */
+export const capabilities: CapabilityMap = {
+    getOutlookAccounts: true,
+    sendOutlookEmail: true,
+    replyOutlookEmail: false,
+    sendAllDrafts: false,
+    readInboxEmails: true,
+    searchInboxByFilter: false,
+    readSelectedEmail: false,
+    readEmailBody: true,
+    openOutlookEmail: false,
+    listInboxFolders: true,
+    moveOutlookEmails: false,
+    listOutlookDrafts: true,
+    deleteOutlookDrafts: false,
+    deleteOutlookEmails: false,
+    purgeDeletedItems: false,
+    saveEmailAttachment: false,
+    saveEmailAttachmentDetailed: false,
+    saveEmailAttachments: false,
+    cleanUndeliverableEmails: false,
+    collectBouncedRecipients: false,
+    readSentRecipientGroups: false,
+    listOutlookSignatures: true,
+    readOutlookSignatureHtml: true,
+    readTemplateEmails: false,
+    saveTemplateEmail: false,
+    editEmailTemplate: false,
 };

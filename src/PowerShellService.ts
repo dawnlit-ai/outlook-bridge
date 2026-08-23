@@ -5,7 +5,9 @@ import { pathToFileURL } from 'url';
 import { composeTemplateBody, findTemplateMarkers } from './outlookTemplateSections';
 import { mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from './mail';
 import { getConfig, reportRun, resolveDestDir, tempFile } from './runtime';
+import { classifyRunFailure, InvalidRequestError, NotFoundError, UnsupportedPlatformError, } from './errors';
 import type {
+    CapabilityMap,
     CleanUndeliverableResult,
     DeleteDraftsResult,
     DeleteMailOptions,
@@ -41,7 +43,10 @@ import type {
  */
 function runPowerShell(script: string, timeout?: number): Promise<string> {
     if (process.platform !== 'win32') {
-        return Promise.reject(new Error('PowerShell and COM automation are only supported on Windows.'));
+        return Promise.reject(new UnsupportedPlatformError(
+            process.platform,
+            'PowerShell and COM automation are only supported on Windows.',
+        ));
     }
     // Force UTF-8 on stdout. Windows PowerShell 5.1 otherwise encodes output in the
     // OEM/ANSI console code page, whose "best-fit" mapping silently rewrites non-ASCII
@@ -50,19 +55,28 @@ function runPowerShell(script: string, timeout?: number): Promise<string> {
     // JSON.parse. Setting the output encoding first makes non-ASCII survive as real
     // UTF-8 bytes, which Node then decodes correctly.
     const utf8Script = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n${script}`;
-    const {timeoutMs, maxBufferBytes} = getConfig();
+    const {timeoutMs, maxBufferBytes, signal} = getConfig();
+    const effectiveTimeout = timeout ?? timeoutMs;
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'powershell.exe',
             ['-NoProfile', '-NonInteractive', '-Command', utf8Script],
-            {maxBuffer: maxBufferBytes, timeout: timeout ?? timeoutMs},
+            {maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal},
             (error, stdout, stderr) => {
                 const durationMs = Date.now() - startedAt;
                 if (error) {
-                    const message = stderr || error.message;
-                    reportRun({runner: 'powershell', script: utf8Script, durationMs, error: message});
-                    reject(new Error(message));
+                    const failure = classifyRunFailure({
+                        runner: 'powershell',
+                        script: utf8Script,
+                        stderr: (stderr || error.message).trim(),
+                        durationMs,
+                        nodeError: error,
+                        timeoutMs: effectiveTimeout,
+                        signal,
+                    });
+                    reportRun({runner: 'powershell', script: utf8Script, durationMs, error: failure.message});
+                    reject(failure);
                 } else {
                     reportRun({runner: 'powershell', script: utf8Script, durationMs});
                     resolve(stdout.trim());
@@ -86,7 +100,7 @@ function psEscape(s: string): string {
 /** Send (or display for review) an email through Outlook COM. */
 export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const attachLine = params.attachmentPath
         ? `$mail.Attachments.Add('${psEscape(params.attachmentPath)}') | Out-Null`
@@ -172,7 +186,7 @@ async function resolveTemplateHtmlBySubject(
     const result = await readTemplateEmails(emailAccount, folderName, 50, true, subject);
     if (!result.folderFound) {
         const folders = result.availableFolders.join(', ') || '(none)';
-        throw new Error(`Template folder '${folderName}' not found in ${emailAccount}. Available folders: ${folders}.`);
+        throw new NotFoundError('folder', `Template folder '${folderName}' not found in ${emailAccount}. Available folders: ${folders}.`);
     }
     const want = subject.trim().toLowerCase();
     const match = result.templates.find(t => t.subject.trim().toLowerCase() === want);
@@ -182,10 +196,10 @@ async function resolveTemplateHtmlBySubject(
         // safe here, and keeps the error as useful as it was before the filter.
         const all = await readTemplateEmails(emailAccount, folderName, 50, false);
         const names = all.templates.map(t => t.subject).filter(Boolean).join(', ') || '(none)';
-        throw new Error(`Template '${subject}' not found in '${folderName}'. Available templates: ${names}.`);
+        throw new NotFoundError('template', `Template '${subject}' not found in '${folderName}'. Available templates: ${names}.`);
     }
     if (!match.htmlBody || match.htmlBody.trim() === '') {
-        throw new Error(`Template '${subject}' has an empty HTML body.`);
+        throw new NotFoundError('template', `Template '${subject}' has an empty HTML body.`);
     }
     return match.htmlBody;
 }
@@ -201,7 +215,7 @@ function signatureInnerHtml(html: string): string {
 
 export async function replyOutlookEmail(params: ReplyEmailParams): Promise<ReplyEmailResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     // Resolve the reply body: either the caller passed htmlBody, or it named a saved
     // template (templateSubject) that we fetch here — so a large template body is
@@ -217,7 +231,7 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
         fromTemplate = true;
     }
     if (!htmlBody || htmlBody.trim() === '') {
-        throw new Error('replyOutlookEmail needs either htmlBody or a resolvable templateSubject.');
+        throw new InvalidRequestError('replyOutlookEmail needs either htmlBody or a resolvable templateSubject.');
     }
     // One template can hold several reply variants between [[SECTION]] markers: keep the
     // requested one, drop the rest, fill any {{PLACEHOLDER}}. Composing also runs (with no
@@ -230,7 +244,8 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
         const signatureHtml = await readOutlookSignatureHtml(params.signatureName);
         if (signatureHtml.trim() === '') {
             const available = (await listOutlookSignatures()).join(', ') || '(none)';
-            throw new Error(
+            throw new NotFoundError(
+                'signature',
                 `Outlook signature '${params.signatureName}' not found. Available signatures: ${available}.`,
             );
         }
@@ -378,7 +393,7 @@ function Test-DraftMatches($item, $includeNull) {
  */
 export async function sendAllDrafts(emailAccount: string): Promise<SendAllDraftsResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const script = `
 $ErrorActionPreference = 'Stop'
@@ -446,7 +461,7 @@ export async function listOutlookDrafts(
     previewChars = 300,
 ): Promise<ListDraftsResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const script = `
 $ErrorActionPreference = 'Stop'
@@ -540,7 +555,7 @@ export async function deleteOutlookDrafts(
     entryIds: string[],
 ): Promise<DeleteDraftsResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     if (entryIds.length === 0) {
         return {deleted: 0, failed: []};
@@ -644,7 +659,7 @@ export async function deleteOutlookEmails(
     options: DeleteMailOptions = {},
 ): Promise<DeleteMailResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const {allowProtected = false, dryRun = false} = options;
     if (entryIds.length === 0) {
@@ -746,7 +761,7 @@ export async function purgeDeletedItems(
     dryRun = false,
 ): Promise<PurgeDeletedItemsResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const script = `
 $ErrorActionPreference = 'Stop'
@@ -878,7 +893,7 @@ export async function cleanUndeliverableEmails(
     dryRun = true,
 ): Promise<CleanUndeliverableResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const days = Math.max(1, Math.min(365, Math.floor(daysBack)));
     const script = `
@@ -1335,7 +1350,7 @@ ConvertTo-Json $results -Depth 3
  */
 export async function readSelectedEmail(): Promise<SelectedEmail> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const script = `
 $outlook = New-Object -ComObject Outlook.Application
@@ -1388,7 +1403,7 @@ ConvertTo-Json $result -Depth 3
 `;
     const raw = await runPowerShell(script, 30000);
     if (!raw || raw.trim() === '' || raw.trim() === 'null') {
-        throw new Error('Failed to read the selected Outlook email.');
+        throw new NotFoundError('email', 'Failed to read the selected Outlook email.');
     }
     const e = JSON.parse(raw) as Record<string, unknown>;
     return {
@@ -1410,7 +1425,7 @@ ConvertTo-Json $result -Depth 3
  */
 export async function openOutlookEmail(entryId: string): Promise<void> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const script = `(New-Object -ComObject Outlook.Application).GetNamespace('mapi').GetItemFromID('${psEscape(entryId)}').Display()`;
     await runPowerShell(script);
@@ -1422,7 +1437,7 @@ export async function openOutlookEmail(entryId: string): Promise<void> {
  */
 export async function editEmailTemplate(label: string, currentHtml: string): Promise<string> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const inputFile = tempFile('template-input', 'html');
     const outputFile = tempFile('template-output', 'html');
@@ -1512,7 +1527,7 @@ if ($finalBody) {
         fs.unlinkSync(outputFile);
         return result;
     } catch {
-        throw new Error('No template saved. Did you save (Ctrl+S) before closing?');
+        throw new NotFoundError('template', 'No template saved. Did you save (Ctrl+S) before closing?');
     }
 }
 
@@ -1597,7 +1612,7 @@ export async function readInboxEmails(
     // ("Sent Items") legitimately has no segments, so it is not that case.
     if (folder && folder.trim() && ref.segments.length === 0 && ref.rootId === 6
         && !Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, folder.trim().toLowerCase())) {
-        throw new Error(`Folder '${folder}' does not name a folder under the Inbox.`);
+        throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
     }
     const resolveScope = mailScopeScript(ref, folder || '');
     // Which timestamp the folder's items actually carry (see the note in the script).
@@ -1707,7 +1722,7 @@ export async function readEmailBody(
     includeQuoted: boolean = false,
 ): Promise<EmailBodyResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const getItemCall = storeId
         ? `$ns.GetItemFromID('${psEscape(entryId)}', '${psEscape(storeId)}')`
@@ -1749,7 +1764,7 @@ $out = [PSCustomObject]@{
 ConvertTo-Json $out -Depth 3 -Compress
 `;
     const raw = await runPowerShell(script, 20000);
-    if (!raw || !raw.trim()) throw new Error('Failed to read email body');
+    if (!raw || !raw.trim()) throw new NotFoundError('email', 'Failed to read email body.');
     const parsed = JSON.parse(raw.trim()) as Record<string, unknown>;
     const full = Buffer.from(String(parsed.body || ''), 'base64').toString('utf8');
     const {body, quoted, separator} = splitQuotedOriginal(full);
@@ -1810,7 +1825,7 @@ export async function readTemplateEmails(
     subject = '',
 ): Promise<TemplateFolderResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const cap = Math.max(1, Math.min(50, Math.floor(limit)));
     const wanted = (subject || '').trim();
@@ -1945,7 +1960,7 @@ export async function saveTemplateEmail(
     folderName = 'Templates',
 ): Promise<SaveTemplateResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     // Body goes through a temp file (same reason as sendOutlookEmail): inline
     // -Command scripts hit the command-line length limit on large HTML.
@@ -2063,7 +2078,7 @@ export async function moveOutlookEmails(
     createIfMissing = false,
 ): Promise<MoveEmailsResult> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     if (entryIds.length === 0) {
         return {folderPath: '', folderCreated: false, moved: 0, failed: []};
@@ -2139,7 +2154,7 @@ export async function saveEmailAttachmentDetailed(
     destDir?: string,
 ): Promise<SavedAttachment> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     const outDir = resolveDestDir(destDir);
     const getItemCall = storeId
@@ -2179,7 +2194,7 @@ $out = [PSCustomObject]@{
 ConvertTo-Json $out -Compress
 `;
     const raw = await runPowerShell(script, 15000);
-    if (!raw || !raw.trim()) throw new Error('Failed to save attachment');
+    if (!raw || !raw.trim()) throw new NotFoundError('attachment', 'Failed to save attachment.');
     const parsed = JSON.parse(raw.trim());
     return {
         path: String(parsed.path || ''),
@@ -2214,7 +2229,7 @@ export async function saveEmailAttachments(
     destDir?: string,
 ): Promise<SavedAttachment[]> {
     if (process.platform !== 'win32') {
-        throw new Error('Outlook COM automation is only supported on Windows.');
+        throw new UnsupportedPlatformError(process.platform, 'Outlook COM automation is only supported on Windows.');
     }
     if (fileNames.length === 0) return [];
     const outDir = resolveDestDir(destDir);
@@ -2259,7 +2274,7 @@ foreach ($target in $targets) {
 ConvertTo-Json $results -Depth 3 -Compress
 `;
     const raw = await runPowerShell(script, 15000);
-    if (!raw || !raw.trim()) throw new Error('Failed to save attachments');
+    if (!raw || !raw.trim()) throw new NotFoundError('attachment', 'Failed to save attachments.');
     const parsed = JSON.parse(raw.trim());
     const arr: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
     return arr.map(item => {
@@ -2321,4 +2336,37 @@ const _conformance: OutlookBridge = {
     readOutlookSignatureHtml,
     readTemplateEmails,
     saveTemplateEmail,
+};
+
+/**
+ * Windows drives the full COM object model, so every operation is available —
+ * this is the reference implementation the macOS map is measured against.
+ */
+export const capabilities: CapabilityMap = {
+    getOutlookAccounts: true,
+    sendOutlookEmail: true,
+    replyOutlookEmail: true,
+    sendAllDrafts: true,
+    readInboxEmails: true,
+    searchInboxByFilter: true,
+    readSelectedEmail: true,
+    readEmailBody: true,
+    openOutlookEmail: true,
+    listInboxFolders: true,
+    moveOutlookEmails: true,
+    listOutlookDrafts: true,
+    deleteOutlookDrafts: true,
+    deleteOutlookEmails: true,
+    purgeDeletedItems: true,
+    saveEmailAttachment: true,
+    saveEmailAttachmentDetailed: true,
+    saveEmailAttachments: true,
+    cleanUndeliverableEmails: true,
+    collectBouncedRecipients: true,
+    readSentRecipientGroups: true,
+    listOutlookSignatures: true,
+    readOutlookSignatureHtml: true,
+    readTemplateEmails: true,
+    saveTemplateEmail: true,
+    editEmailTemplate: true,
 };
