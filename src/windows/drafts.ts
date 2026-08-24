@@ -102,13 +102,13 @@ foreach ($m in $items) {
             sent: num(parsed.sent),
             failed: toArray(parsed.failed).map(f => {
                 const e = record(f);
-                return {subject: str(e.subject), error: str(e.error)};
+                return { subject: str(e.subject), error: str(e.error) };
             }),
         };
     } catch (error) {
         // A malformed report is not worth failing a send that already happened;
         // a run that never got that far has already rejected above.
-        if (error instanceof SyntaxError) return {sent: 0, failed: []};
+        if (error instanceof SyntaxError) return { sent: 0, failed: [] };
         throw error;
     }
 }
@@ -211,7 +211,7 @@ export async function deleteOutlookDrafts(
     entryIds: string[],
 ): Promise<DeleteDraftsResult> {
     requireWindows();
-    if (entryIds.length === 0) return {deleted: 0, failed: []};
+    if (entryIds.length === 0) return { deleted: 0, failed: [] };
     const script = `${draftsScript(emailAccount)}
 # Index this account's Drafts folders by EntryID, so a resolved item can be PROVED
 # to live in one of them before it is deleted.
@@ -251,7 +251,7 @@ ConvertTo-Json @{ deleted = $deleted; failed = @($failed) } -Depth 3
         deleted: num(parsed.deleted),
         failed: toArray(parsed.failed).map(f => {
             const e = record(f);
-            return {entryId: str(e.entryId), error: str(e.error)};
+            return { entryId: str(e.entryId), error: str(e.error) };
         }),
     };
 }

@@ -148,10 +148,10 @@ export function partitionMessageIds(entryIds: readonly string[]): {
         try {
             valid.push(macMessageId(entryId));
         } catch (error) {
-            invalid.push({entryId: String(entryId), error: (error as Error).message});
+            invalid.push({ entryId: String(entryId), error: (error as Error).message });
         }
     }
-    return {valid, invalid};
+    return { valid, invalid };
 }
 
 /**

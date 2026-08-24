@@ -43,7 +43,7 @@ export async function readInboxEmails(
     folder?: string,
 ): Promise<InboxEmail[]> {
     if (process.platform !== 'win32') return [];
-    const ref = folder ? mailFolderRef(folder) : {rootId: 6, rootLabel: 'Inbox', segments: []};
+    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
     // A folder argument that trims away to nothing ("\\", "  ") would otherwise
     // read the Inbox root and look like it had scoped — the exact silent
     // mis-scoping this parameter exists to prevent. A bare well-known name
@@ -166,7 +166,7 @@ ConvertTo-Json $out -Depth 3 -Compress
     const raw = await runPowerShell(script, 20000);
     if (!raw || !raw.trim()) throw new NotFoundError('email', 'Failed to read email body.');
     const parsed = parseObject(raw);
-    const {body, quoted, separator} = splitQuotedOriginal(decodeBody(parsed.body));
+    const { body, quoted, separator } = splitQuotedOriginal(decodeBody(parsed.body));
     const attachmentNames = toArray(parsed.attachmentNames).map(str);
     // The quoted thread is context, never the sender's own answer, so it is capped
     // harder than the reply itself — its useful part (what was asked) is at the

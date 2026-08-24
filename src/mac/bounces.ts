@@ -122,11 +122,11 @@ async function collectBounces(
     accountAddress: string,
 ): Promise<UndeliverableEmail[]> {
     const matched = indexed
-        .map(message => ({message, reason: bounceReason(message)}))
+        .map(message => ({ message, reason: bounceReason(message) }))
         .filter(entry => entry.reason !== '');
     if (matched.length === 0) return [];
     const bodies = await readBodies(matched.map(entry => entry.message.id));
-    return matched.map(({message, reason}) => ({
+    return matched.map(({ message, reason }) => ({
         entryId: message.id,
         subject: message.subject,
         senderName: message.senderName,
@@ -187,7 +187,7 @@ end tell`;
         deletedCount = intField(splitFields(records[0] || ''), 0);
         for (const record of records.slice(1)) {
             const parts = splitFields(record);
-            failed.push({subject: field(parts, 0), error: field(parts, 1)});
+            failed.push({ subject: field(parts, 0), error: field(parts, 1) });
         }
     }
 
@@ -273,7 +273,7 @@ end tell`;
 
     const indexed = splitRecords(await runOsaScript(indexScript, 300000)).map(record => {
         const parts = splitFields(record);
-        return {id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2)};
+        return { id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2) };
     });
     indexed.sort((a, b) => b.sentOn.localeCompare(a.sentOn));
     const chosen = indexed.slice(0, cap);
@@ -311,7 +311,7 @@ end tell`;
     for (const row of chosen) {
         const recipients = recipientsById.get(row.id) || [];
         if (recipients.length === 0) continue;
-        groups.push({entryId: row.id, subject: row.subject, sentOn: row.sentOn, recipients});
+        groups.push({ entryId: row.id, subject: row.subject, sentOn: row.sentOn, recipients });
     }
     return groups;
 }

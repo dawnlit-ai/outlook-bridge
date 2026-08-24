@@ -94,13 +94,13 @@ export async function moveOutlookEmails(
     createIfMissing = false,
 ): Promise<MoveEmailsResult> {
     if (entryIds.length === 0) {
-        return {folderPath: '', folderCreated: false, moved: 0, failed: []};
+        return { folderPath: '', folderCreated: false, moved: 0, failed: [] };
     }
     const ref = mailFolderRef(folderName);
-    const {valid, invalid} = partitionMessageIds(entryIds);
+    const { valid, invalid } = partitionMessageIds(entryIds);
     const folderPath = macFolderPath(emailAccount, ref.rootLabel, ref.segments);
     if (valid.length === 0) {
-        return {folderPath, folderCreated: false, moved: 0, failed: invalid};
+        return { folderPath, folderCreated: false, moved: 0, failed: invalid };
     }
     const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
@@ -138,7 +138,7 @@ end tell`;
             ...invalid,
             ...records.slice(1).map(record => {
                 const parts = splitFields(record);
-                return {entryId: field(parts, 0), error: field(parts, 1)};
+                return { entryId: field(parts, 0), error: field(parts, 1) };
             }),
         ],
     };

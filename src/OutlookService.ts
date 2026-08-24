@@ -40,7 +40,7 @@ const unsupportedBridge = {
 
 // The platform decision, made once. Everything below reads `impl` and
 // `implCapabilities` without asking which OS this is.
-const {bridge: impl, capabilities: implCapabilities} =
+const { bridge: impl, capabilities: implCapabilities } =
     process.platform === 'win32' ? windowsBridge
         : process.platform === 'darwin' ? macBridge
             : unsupportedBridge;
@@ -97,7 +97,7 @@ function build(config: ResolvedConfig): OutlookBridgeInstance {
         capabilities,
         supports,
         withOptions: (options: BridgeOptions) => build(mergeOptions(config, options)),
-        options: Object.freeze({...config}),
+        options: Object.freeze({ ...config }),
     } as OutlookBridgeInstance;
 
     const source = impl as unknown as Record<string, AnyFn>;

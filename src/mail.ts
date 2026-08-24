@@ -84,10 +84,10 @@ export function mailFolderRef(folder: string): MailFolderRef {
     if (segments.length > 0) {
         const head = segments[0].toLowerCase();
         if (Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
-            return {rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1)};
+            return { rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1) };
         }
     }
-    return {rootId: 6, rootLabel: 'Inbox', segments};
+    return { rootId: 6, rootLabel: 'Inbox', segments };
 }
 
 /**
@@ -107,7 +107,7 @@ export function mailFolderRef(folder: string): MailFolderRef {
  */
 export function splitQuotedOriginal(text: string): { body: string; quoted: string; separator: string } {
     const lines = text.split(/\r?\n/);
-    const whole = {body: text, quoted: '', separator: ''};
+    const whole = { body: text, quoted: '', separator: '' };
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         let separator = '';
@@ -124,7 +124,7 @@ export function splitQuotedOriginal(text: string): { body: string; quoted: strin
         if (!separator) continue;
         const body = lines.slice(0, i).join('\n').trimEnd();
         if (!body.trim()) return whole;
-        return {body, quoted: lines.slice(i).join('\n').trim(), separator};
+        return { body, quoted: lines.slice(i).join('\n').trim(), separator };
     }
     return whole;
 }

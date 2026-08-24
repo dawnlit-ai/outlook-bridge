@@ -59,7 +59,7 @@ export async function moveOutlookEmails(
 ): Promise<MoveEmailsResult> {
     requireWindows();
     if (entryIds.length === 0) {
-        return {folderPath: '', folderCreated: false, moved: 0, failed: []};
+        return { folderPath: '', folderCreated: false, moved: 0, failed: [] };
     }
     const ref = mailFolderRef(folderName);
     const script = `${accountScript(emailAccount)}
@@ -87,7 +87,7 @@ ConvertTo-Json @{ folderPath = $folder.FolderPath; folderCreated = $folderCreate
         moved: num(parsed.moved),
         failed: toArray(parsed.failed).map(f => {
             const e = record(f);
-            return {entryId: str(e.entryId), error: str(e.error)};
+            return { entryId: str(e.entryId), error: str(e.error) };
         }),
     };
 }

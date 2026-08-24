@@ -147,7 +147,7 @@ end tell`;
         sent: intField(splitFields(records[0] || ''), 0),
         failed: records.slice(1).map(record => {
             const parts = splitFields(record);
-            return {subject: field(parts, 0), error: field(parts, 1)};
+            return { subject: field(parts, 0), error: field(parts, 1) };
         }),
     };
 }
@@ -166,9 +166,9 @@ export async function deleteOutlookDrafts(
     emailAccount: string,
     entryIds: string[],
 ): Promise<DeleteDraftsResult> {
-    if (entryIds.length === 0) return {deleted: 0, failed: []};
-    const {valid, invalid} = partitionMessageIds(entryIds);
-    if (valid.length === 0) return {deleted: 0, failed: invalid};
+    if (entryIds.length === 0) return { deleted: 0, failed: [] };
+    const { valid, invalid } = partitionMessageIds(entryIds);
+    if (valid.length === 0) return { deleted: 0, failed: invalid };
     const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set draftsFolder to drafts of targetAcct
@@ -214,7 +214,7 @@ end tell`;
             ...invalid,
             ...records.slice(1).map(record => {
                 const parts = splitFields(record);
-                return {entryId: field(parts, 0), error: field(parts, 1)};
+                return { entryId: field(parts, 0), error: field(parts, 1) };
             }),
         ],
     };

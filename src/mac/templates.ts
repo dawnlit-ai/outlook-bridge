@@ -127,7 +127,7 @@ end tell`;
         .filter(item => !wanted || item.subject.toLowerCase() === wanted)
         .slice(0, cap);
     if (chosen.length === 0) {
-        return {folderFound: true, folderPath, templates: [], availableFolders: []};
+        return { folderFound: true, folderPath, templates: [], availableFolders: [] };
     }
 
     // Pass 2 — the bodies, for the chosen templates only.
@@ -175,7 +175,7 @@ end tell`;
             lastModified: item.lastModified,
         };
     });
-    return {folderFound: true, folderPath, templates, availableFolders: []};
+    return { folderFound: true, folderPath, templates, availableFolders: [] };
 }
 
 /**

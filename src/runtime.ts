@@ -81,7 +81,7 @@ const scoped = new AsyncLocalStorage<ResolvedConfig>();
 
 /** Merge caller options over a base, ignoring the keys they left out. */
 export function mergeOptions(base: ResolvedConfig, options: BridgeOptions = {}): ResolvedConfig {
-    const next: ResolvedConfig = {...base};
+    const next: ResolvedConfig = { ...base };
     if (options.timeoutMs !== undefined) next.timeoutMs = Math.max(0, options.timeoutMs);
     if (options.maxBufferBytes !== undefined) next.maxBufferBytes = Math.max(1, options.maxBufferBytes);
     if (options.tempDir !== undefined) next.tempDir = options.tempDir;
@@ -118,7 +118,7 @@ export function withConfig<T>(config: ResolvedConfig, fn: () => T): T {
 
 /** Report one finished script run to the configured debug hook. */
 export function reportRun(event: BridgeDebugEvent): void {
-    const {debug} = getConfig();
+    const { debug } = getConfig();
     if (!debug) return;
     if (typeof debug === 'function') {
         debug(event);
@@ -155,6 +155,6 @@ export function makeAttachmentDir(): string {
 /** Resolve a caller-supplied destination, creating it when absent. */
 export function resolveDestDir(destDir?: string): string {
     if (!destDir) return makeAttachmentDir();
-    fs.mkdirSync(destDir, {recursive: true});
+    fs.mkdirSync(destDir, { recursive: true });
     return destDir;
 }

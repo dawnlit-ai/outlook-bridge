@@ -110,7 +110,7 @@ export function findTemplateMarkers(body: string): TemplateMarkers {
         const name = m[1].toUpperCase();
         if (!placeholders.includes(name)) placeholders.push(name);
     }
-    return {sections: opened.filter(n => closed.has(n)), placeholders};
+    return { sections: opened.filter(n => closed.has(n)), placeholders };
 }
 
 /**
@@ -153,7 +153,7 @@ function enclosingBlock(html: string, start: number, end: number, tags: string[]
         while ((m = openRe.exec(html)) !== null) {
             if (m.index >= start) break;
             if (!best || m.index > best.idx) {
-                best = {idx: m.index, contentStart: m.index + m[0].length, tag};
+                best = { idx: m.index, contentStart: m.index + m[0].length, tag };
             }
         }
     }
@@ -163,7 +163,7 @@ function enclosingBlock(html: string, start: number, end: number, tags: string[]
     const close = closeRe.exec(html);
     if (!close) return null;
     return {
-        block: {start: best.idx, end: close.index + close[0].length},
+        block: { start: best.idx, end: close.index + close[0].length },
         contentStart: best.contentStart,
         contentEnd: close.index,
     };
@@ -176,14 +176,14 @@ function enclosingBlock(html: string, start: number, end: number, tags: string[]
  */
 function markerSpan(html: string, start: number, end: number): Span {
     const found = enclosingBlock(html, start, end);
-    if (!found || found.contentStart > start || found.contentEnd < end) return {start, end};
+    if (!found || found.contentStart > start || found.contentEnd < end) return { start, end };
     const rest = html.slice(found.contentStart, start) + html.slice(end, found.contentEnd);
-    return stripToText(rest).trim() === '' ? found.block : {start, end};
+    return stripToText(rest).trim() === '' ? found.block : { start, end };
 }
 
 function locate(html: string, token: string): Span | null {
     const m = markerRegex(token).exec(html);
-    return m ? {start: m.index, end: m.index + m[0].length} : null;
+    return m ? { start: m.index, end: m.index + m[0].length } : null;
 }
 
 // ── Single-token fill ───────────────────────────────────────────────
@@ -282,7 +282,7 @@ export interface ComposeOptions {
 export function composeTemplateBody(html: string, options: ComposeOptions = {}): string {
     const label = options.label ? `Template '${options.label}'` : 'The template';
     const wanted = (options.section || '').trim().toUpperCase();
-    const {sections, placeholders: available} = findTemplateMarkers(html);
+    const { sections, placeholders: available } = findTemplateMarkers(html);
 
     if (wanted && !sections.includes(wanted)) {
         throw new InvalidRequestError(
@@ -312,7 +312,7 @@ export function composeTemplateBody(html: string, options: ComposeOptions = {}):
         if (name === wanted) {
             cuts.push(openSpan, closeSpan);   // keep the content, shed the markers
         } else {
-            cuts.push({start: openSpan.start, end: closeSpan.end});
+            cuts.push({ start: openSpan.start, end: closeSpan.end });
         }
     }
     let out = html;

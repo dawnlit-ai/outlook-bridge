@@ -136,7 +136,7 @@ export async function saveEmailAttachments(
     // fails without having written half its files.
     const picks = fileNames.map(fileName => {
         const index = requireAttachmentIndex(email, fileName);
-        return {index, name: email.attachmentNames[index]};
+        return { index, name: email.attachmentNames[index] };
     });
     const outDir = resolveDestDir(destDir);
     await saveByIndex(id, picks, outDir);

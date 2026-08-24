@@ -130,7 +130,7 @@ export class ScriptError extends OutlookError {
         durationMs: number;
         cause?: unknown;
     }) {
-        super('SCRIPT_FAILED', init.stderr || `${init.runner} failed with no output.`, {cause: init.cause});
+        super('SCRIPT_FAILED', init.stderr || `${init.runner} failed with no output.`, { cause: init.cause });
         this.runner = init.runner;
         this.script = init.script;
         this.stderr = init.stderr;
@@ -157,7 +157,7 @@ export class AbortedError extends OutlookError {
     readonly runner: 'powershell' | 'osascript';
 
     constructor(runner: 'powershell' | 'osascript', reason?: unknown) {
-        super('ABORTED', `${runner} run was aborted by the caller.`, {cause: reason});
+        super('ABORTED', `${runner} run was aborted by the caller.`, { cause: reason });
         this.runner = runner;
     }
 }
@@ -191,15 +191,15 @@ export function classifyRunFailure(init: {
     timeoutMs?: number;
     signal?: AbortSignal;
 }): OutlookError {
-    const {runner, script, stderr, durationMs, nodeError, timeoutMs, signal} = init;
+    const { runner, script, stderr, durationMs, nodeError, timeoutMs, signal } = init;
 
     if (signal?.aborted || nodeError?.name === 'AbortError' || nodeError?.code === 'ABORT_ERR') {
         return new AbortedError(runner, signal?.reason);
     }
     if (nodeError?.killed && timeoutMs) {
-        return new TimeoutError({runner, timeoutMs, script});
+        return new TimeoutError({ runner, timeoutMs, script });
     }
     const match = ACCOUNT_NOT_FOUND_RE.exec(stderr);
     if (match) return new AccountNotFoundError(match[1]);
-    return new ScriptError({runner, script, stderr, durationMs, cause: nodeError ?? undefined});
+    return new ScriptError({ runner, script, stderr, durationMs, cause: nodeError ?? undefined });
 }

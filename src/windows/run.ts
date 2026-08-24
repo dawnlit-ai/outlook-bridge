@@ -105,14 +105,14 @@ export async function runPowerShellFile(script: string, timeout?: number): Promi
 
 /** The one place a PowerShell child is spawned, timed, classified and reported. */
 function spawnPowerShell(args: string[], script: string, timeout?: number): Promise<string> {
-    const {timeoutMs, maxBufferBytes, signal} = getConfig();
+    const { timeoutMs, maxBufferBytes, signal } = getConfig();
     const effectiveTimeout = timeout ?? timeoutMs;
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'powershell.exe',
             args,
-            {maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal},
+            { maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal },
             (error, stdout, stderr) => {
                 const durationMs = Date.now() - startedAt;
                 if (error) {
@@ -125,10 +125,10 @@ function spawnPowerShell(args: string[], script: string, timeout?: number): Prom
                         timeoutMs: effectiveTimeout,
                         signal,
                     });
-                    reportRun({runner: RUNNER, script, durationMs, error: failure.message});
+                    reportRun({ runner: RUNNER, script, durationMs, error: failure.message });
                     reject(failure);
                 } else {
-                    reportRun({runner: RUNNER, script, durationMs});
+                    reportRun({ runner: RUNNER, script, durationMs });
                     resolve(stdout.trim());
                 }
             },

@@ -43,7 +43,7 @@ export async function readInboxEmails(
     const days = Math.max(0, Math.floor(daysBack));
     const cap = Math.max(0, Math.floor(limit));
     if (cap === 0) return [];
-    const ref = folder ? mailFolderRef(folder) : {rootId: 6, rootLabel: 'Inbox', segments: []};
+    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
     // A folder argument that trims away to nothing ("\\", "  ") would otherwise
     // read the Inbox root and look like it had scoped — the exact silent
     // mis-scoping this parameter exists to prevent. Mirrors the Windows check.
@@ -88,7 +88,7 @@ end tell`;
         .filter(Boolean)
         .map(line => {
             const [id, receivedTime] = line.split('\t');
-            return {id, receivedTime: receivedTime || ''};
+            return { id, receivedTime: receivedTime || '' };
         });
     // 'yyyy-MM-dd HH:mm' is lexicographically ordered, so plain string compare sorts it.
     index.sort((a, b) => b.receivedTime.localeCompare(a.receivedTime));
@@ -179,7 +179,7 @@ end tell`;
     // The body is emitted LAST so a stray separator in earlier fields can't shift it.
     const parts = summaryFields(await runOsaScript(script, 60000));
     const attachmentNames = splitList(field(parts, MessageDetail.attachmentNames));
-    const {body, quoted, separator} = splitQuotedOriginal(field(parts, MessageDetail.body));
+    const { body, quoted, separator } = splitQuotedOriginal(field(parts, MessageDetail.body));
     // The quoted thread is context, never the priced content, so it is capped
     // harder than the reply itself — matching the Windows reader.
     const quotedCap = Math.min(maxChars, 4000);

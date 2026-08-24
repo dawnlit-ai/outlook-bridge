@@ -25,8 +25,8 @@ function composeAction(
     sendImmediately: boolean | undefined,
     openDraftWindow: boolean | undefined,
 ): { prelude: string; action: string } {
-    if (sendImmediately) return {prelude: '', action: `    send ${variable}`};
-    if (openDraftWindow !== false) return {prelude: '', action: `    open ${variable}`};
+    if (sendImmediately) return { prelude: '', action: `    send ${variable}` };
+    if (openDraftWindow !== false) return { prelude: '', action: `    open ${variable}` };
     return {
         prelude: `    set draftsFolder to drafts of targetAcct
     set draftsBefore to count of messages of draftsFolder`,
@@ -55,7 +55,7 @@ export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
         ? `    make new attachment at newMsg with properties {file:POSIX file "${asEscape(params.attachmentPath)}"}`
         : '';
 
-    const {prelude, action} = composeAction('newMsg', params.sendImmediately, params.openDraftWindow);
+    const { prelude, action } = composeAction('newMsg', params.sendImmediately, params.openDraftWindow);
     const script = `
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(params.emailAccount)}
@@ -92,7 +92,7 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
         readOutlookSignatureHtml,
         listOutlookSignatures,
     });
-    const {prelude, action} = composeAction('theReply', params.sendImmediately, params.openDraftWindow);
+    const { prelude, action } = composeAction('theReply', params.sendImmediately, params.openDraftWindow);
     const replyAll = params.replyAll ? 'reply to all true' : 'without reply to all';
     const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(params.emailAccount)}

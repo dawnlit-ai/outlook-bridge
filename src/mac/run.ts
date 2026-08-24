@@ -28,14 +28,14 @@ export function runOsaScript(source: string, timeout?: number): Promise<string> 
     const script = AS_HANDLERS + source;
     const scriptFile = tempFile('osa', 'applescript');
     fs.writeFileSync(scriptFile, script, 'utf-8');
-    const {timeoutMs, maxBufferBytes, signal} = getConfig();
+    const { timeoutMs, maxBufferBytes, signal } = getConfig();
     const effectiveTimeout = timeout ?? timeoutMs;
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
         execFile(
             'osascript',
             [scriptFile],
-            {maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal},
+            { maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal },
             (error, stdout, stderr) => {
                 const durationMs = Date.now() - startedAt;
                 try {
@@ -59,10 +59,10 @@ export function runOsaScript(source: string, timeout?: number): Promise<string> 
                         timeoutMs: effectiveTimeout,
                         signal,
                     });
-                    reportRun({runner: RUNNER, script, durationMs, error: failure.message});
+                    reportRun({ runner: RUNNER, script, durationMs, error: failure.message });
                     reject(failure);
                 } else {
-                    reportRun({runner: RUNNER, script, durationMs});
+                    reportRun({ runner: RUNNER, script, durationMs });
                     resolve(stdout.replace(/\n$/, ''));
                 }
             },

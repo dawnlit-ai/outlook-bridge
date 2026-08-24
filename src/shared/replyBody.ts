@@ -122,7 +122,7 @@ export async function composeReplyHtml(
                 `Outlook signature '${params.signatureName}' not found. Available signatures: ${available}.`,
             );
         }
-        placeholders = {...placeholders, SIGNATURE: innerBodyHtml(signatureHtml)};
+        placeholders = { ...placeholders, SIGNATURE: innerBodyHtml(signatureHtml) };
     }
 
     const hasPlaceholders = !!placeholders && Object.keys(placeholders).length > 0;

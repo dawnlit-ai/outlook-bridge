@@ -71,11 +71,11 @@ export async function deleteOutlookEmails(
     entryIds: string[],
     options: DeleteMailOptions = {},
 ): Promise<DeleteMailResult> {
-    const {allowProtected = false, dryRun = false} = options;
+    const { allowProtected = false, dryRun = false } = options;
     if (entryIds.length === 0) {
-        return {dryRun, deleted: 0, refused: 0, failed: 0, items: []};
+        return { dryRun, deleted: 0, refused: 0, failed: 0, items: [] };
     }
-    const {valid, invalid} = partitionMessageIds(entryIds);
+    const { valid, invalid } = partitionMessageIds(entryIds);
     const items: DeleteMailOutcome[] = invalid.map(bad => ({
         entryId: bad.entryId,
         subject: '',
@@ -202,12 +202,12 @@ end tell`;
 
     const rows = splitRecords(await runOsaScript(indexScript, 300000)).map(record => {
         const parts = splitFields(record);
-        return {id: field(parts, 0), keep: boolField(parts, 1)};
+        return { id: field(parts, 0), keep: boolField(parts, 1) };
     });
     const doomed = rows.filter(row => !row.keep);
     const kept = rows.length - doomed.length;
     if (dryRun || doomed.length === 0) {
-        return {folderPath, dryRun, matched: doomed.length, purged: 0, kept, failed: 0};
+        return { folderPath, dryRun, matched: doomed.length, purged: 0, kept, failed: 0 };
     }
 
     const purgeScript = `tell application "Microsoft Outlook"

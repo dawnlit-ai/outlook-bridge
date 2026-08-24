@@ -52,9 +52,9 @@ export async function deleteOutlookEmails(
     options: DeleteMailOptions = {},
 ): Promise<DeleteMailResult> {
     requireWindows();
-    const {allowProtected = false, dryRun = false} = options;
+    const { allowProtected = false, dryRun = false } = options;
     if (entryIds.length === 0) {
-        return {dryRun, deleted: 0, refused: 0, failed: 0, items: []};
+        return { dryRun, deleted: 0, refused: 0, failed: 0, items: [] };
     }
     const script = `${accountScript(emailAccount)}
 ${DELIVERY_STORE_PS}

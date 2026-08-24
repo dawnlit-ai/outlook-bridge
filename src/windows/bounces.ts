@@ -166,7 +166,7 @@ if (-not $dryRun) {
         }),
         failed: toArray(parsed.failed).map(f => {
             const e = record(f);
-            return {subject: str(e.subject), error: str(e.error)};
+            return { subject: str(e.subject), error: str(e.error) };
         }),
     };
 }
