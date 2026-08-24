@@ -10,6 +10,7 @@ import {
     BOUNCE_SUBJECT_PHRASES,
     NDR_MESSAGE_CLASS_PREFIX,
 } from '../shared/bounceRules';
+import { clamp } from '../mail';
 import type { CleanUndeliverableResult, SentRecipientGroup } from '../types';
 
 /**
@@ -70,11 +71,6 @@ if ($cls -eq 43 -or $cls -eq 46) {
 }
 `;
 
-/** Both scans clamp the window the same way; a year is as far back as either goes. */
-function scanWindow(daysBack: number): number {
-    return Math.max(1, Math.min(365, Math.floor(daysBack)));
-}
-
 /**
  * Scan an account's inbox for bounce-back / non-delivery messages — Outlook NDRs,
  * mail-daemon/postmaster rejections, and "Message blocked"-style Google/O365
@@ -95,7 +91,7 @@ export async function cleanUndeliverableEmails(
     dryRun = true,
 ): Promise<CleanUndeliverableResult> {
     requireWindows();
-    const days = scanWindow(daysBack);
+    const days = clamp(daysBack, 1, 365);
     const script = `${accountScript(emailAccount)}
 $dryRun = ${psBool(dryRun)}
 ${namedStoreScript(emailAccount)}
@@ -190,7 +186,7 @@ export async function collectBouncedRecipients(
     scanDeleted = true,
 ): Promise<string[]> {
     if (process.platform !== 'win32') return [];
-    const days = scanWindow(daysBack);
+    const days = clamp(daysBack, 1, 365);
     // 6 = Inbox, 3 = Deleted Items.
     const folderIds = scanDeleted ? '@(6, 3)' : '@(6)';
     const script = `${accountScript(emailAccount)}
@@ -232,8 +228,8 @@ export async function readSentRecipientGroups(
     limit = 3000,
 ): Promise<SentRecipientGroup[]> {
     if (process.platform !== 'win32') return [];
-    const days = scanWindow(daysBack);
-    const cap = Math.max(1, Math.min(10000, Math.floor(limit)));
+    const days = clamp(daysBack, 1, 365);
+    const cap = clamp(limit, 1, 10000);
     const script = `${accountScript(emailAccount)}
 $sent = $account.DeliveryStore.GetDefaultFolder(5)  # olFolderSentMail
 $cutoff = (Get-Date).AddDays(-${days}).ToString('MM/dd/yyyy HH:mm')

@@ -20,28 +20,15 @@
 import { getOutlookAccounts } from './accounts';
 import { replyOutlookEmail, sendOutlookEmail } from './send';
 import { deleteOutlookDrafts, listOutlookDrafts, sendAllDrafts } from './drafts';
-import {
-    openOutlookEmail,
-    readEmailBody,
-    readInboxEmails,
-    readSelectedEmail,
-    searchInboxByFilter,
-} from './read';
+import { openOutlookEmail, readEmailBody, readInboxEmails, readSelectedEmail, searchInboxByFilter, } from './read';
 import { listInboxFolders, moveOutlookEmails } from './folders';
 import { deleteOutlookEmails, purgeDeletedItems } from './cleanup';
-import {
-    cleanUndeliverableEmails,
-    collectBouncedRecipients,
-    readSentRecipientGroups,
-} from './bounces';
-import {
-    saveEmailAttachment,
-    saveEmailAttachmentDetailed,
-    saveEmailAttachments,
-} from './attachments';
+import { cleanUndeliverableEmails, collectBouncedRecipients, readSentRecipientGroups, } from './bounces';
+import { saveEmailAttachment, saveEmailAttachmentDetailed, saveEmailAttachments, } from './attachments';
 import { listOutlookSignatures, readOutlookSignatureHtml } from './signatures';
 import { editEmailTemplate, readTemplateEmails, saveTemplateEmail } from './templates';
-import type { CapabilityMap, OutlookBridge } from '../types';
+import { capabilityMap } from '../shared/capabilities';
+import type { BridgeCapability, CapabilityMap, OutlookBridge } from '../types';
 
 /**
  * The whole contract in one object — and the compile-time proof that this
@@ -81,34 +68,21 @@ const bridge: OutlookBridge = {
 };
 
 export { bridge };
-export {
-    getOutlookAccounts,
-    sendOutlookEmail,
-    replyOutlookEmail,
-    sendAllDrafts,
-    readInboxEmails,
-    searchInboxByFilter,
-    readSelectedEmail,
-    readEmailBody,
-    openOutlookEmail,
-    listInboxFolders,
-    moveOutlookEmails,
-    listOutlookDrafts,
-    deleteOutlookDrafts,
-    deleteOutlookEmails,
-    purgeDeletedItems,
-    saveEmailAttachment,
-    saveEmailAttachmentDetailed,
-    saveEmailAttachments,
-    cleanUndeliverableEmails,
-    collectBouncedRecipients,
-    readSentRecipientGroups,
-    listOutlookSignatures,
-    readOutlookSignatureHtml,
-    readTemplateEmails,
-    saveTemplateEmail,
-    editEmailTemplate,
-};
+
+// Re-exported one module at a time rather than by name: every feature module
+// here exports exactly its bridge functions and nothing else, so the name list
+// this replaces was a copy of the `bridge` literal above with no way to drift
+// from it usefully.
+export * from './accounts';
+export * from './send';
+export * from './drafts';
+export * from './read';
+export * from './folders';
+export * from './cleanup';
+export * from './bounces';
+export * from './attachments';
+export * from './signatures';
+export * from './templates';
 
 /**
  * What is ported to macOS.
@@ -116,7 +90,8 @@ export {
  * The whole contract is, now — the gaps this map existed to announce (replies,
  * drafts, attachments, deletion, templates, bounce handling and the Inbox-tree
  * search) are implemented against the AppleScript dictionary rather than
- * throwing NOT_IMPLEMENTED.
+ * throwing NOT_IMPLEMENTED, so `NOT_PORTED` is empty and stays the place to
+ * name one if that ever stops being true.
  *
  * Two differences survive that no capability flag can express, and a caller
  * moving between platforms has to know them:
@@ -127,31 +102,6 @@ export {
  *    AppleScript counterpart to COM's server-side `Items.Restrict`, so a
  *    `daysBack` of 0 over a large mailbox tree costs considerably more here.
  */
-export const capabilities: CapabilityMap = {
-    getOutlookAccounts: true,
-    sendOutlookEmail: true,
-    replyOutlookEmail: true,
-    sendAllDrafts: true,
-    readInboxEmails: true,
-    searchInboxByFilter: true,
-    readSelectedEmail: true,
-    readEmailBody: true,
-    openOutlookEmail: true,
-    listInboxFolders: true,
-    moveOutlookEmails: true,
-    listOutlookDrafts: true,
-    deleteOutlookDrafts: true,
-    deleteOutlookEmails: true,
-    purgeDeletedItems: true,
-    saveEmailAttachment: true,
-    saveEmailAttachmentDetailed: true,
-    saveEmailAttachments: true,
-    cleanUndeliverableEmails: true,
-    collectBouncedRecipients: true,
-    readSentRecipientGroups: true,
-    listOutlookSignatures: true,
-    readOutlookSignatureHtml: true,
-    readTemplateEmails: true,
-    saveTemplateEmail: true,
-    editEmailTemplate: true,
-};
+const NOT_PORTED: readonly BridgeCapability[] = [];
+
+export const capabilities: CapabilityMap = capabilityMap(bridge, NOT_PORTED);

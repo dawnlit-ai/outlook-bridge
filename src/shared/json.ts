@@ -35,10 +35,6 @@ export function num(value: unknown): number {
     return typeof value === 'number' ? value : 0;
 }
 
-export function bool(value: unknown): boolean {
-    return Boolean(value);
-}
-
 export function strList(value: unknown): string[] {
     return toArray(value).map(str).filter(Boolean);
 }

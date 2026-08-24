@@ -137,24 +137,16 @@ export async function composeReplyHtml(
 }
 
 /**
- * Put `insertHtml` at the top of a reply's HTML, above the quoted thread.
+ * Where the new text goes in an Outlook-built reply.
  *
  * Outlook builds the reply body as a Word document whose own (empty) paragraph
  * sits inside `WordSection1`; inserting straight after that div's opening tag is
  * what puts the new text where the user's cursor would have been. A reply
- * Outlook did not build that way falls back to just inside `<body>`, and a
- * fragment with neither gets the text prepended.
+ * Outlook did not build that way falls back to just inside `<body>`.
+ *
+ * The insertion itself cannot live here — the reply HTML never leaves Outlook,
+ * so each platform splices it in its own language (`windows/send.ts`, and the
+ * `insertAboveQuoted` handler in `mac/run.ts`). The anchor both of them look for
+ * is the one part they must agree on, so it is stated once, here.
  */
-export function insertAboveQuoted(replyHtml: string, insertHtml: string): string {
-    const wordSection = replyHtml.indexOf('WordSection1>');
-    if (wordSection >= 0) {
-        const at = wordSection + 'WordSection1>'.length;
-        return replyHtml.slice(0, at) + insertHtml + replyHtml.slice(at);
-    }
-    const body = /<body[^>]*>/i.exec(replyHtml);
-    if (body) {
-        const at = body.index + body[0].length;
-        return replyHtml.slice(0, at) + insertHtml + replyHtml.slice(at);
-    }
-    return insertHtml + replyHtml;
-}
+export const WORD_SECTION_ANCHOR = 'WordSection1>';

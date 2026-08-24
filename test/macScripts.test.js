@@ -56,8 +56,15 @@ async function scriptsFrom(operation, responses = []) {
     return captured;
 }
 
-/** Compile (never run) a script, returning osacompile's complaint or ''. */
-function compileError(source) {
+/**
+ * Compile (never run) a script, returning osacompile's complaint or ''.
+ *
+ * The shared handlers are prepended because `runOsaScript` prepends them — what
+ * osascript compiles is the pair, so compiling the operation body alone would
+ * leave a `my someHandler(...)` typo to be found by a live run instead.
+ */
+function compileError(body) {
+    const source = macRun.AS_HANDLERS + body;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-osa-'));
     const input = path.join(dir, 'generated.applescript');
     try {
@@ -154,7 +161,8 @@ const CASES = {
     },
     saveEmailAttachments: {
         run: () => mac.saveEmailAttachments('1263', ['invoice.pdf'], undefined, undefined),
-        responses: [row('Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf')],
+        // The shared message-detail row leads with the message id (MessageDetail.id).
+        responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf')],
     },
     cleanUndeliverableEmails: {
         run: () => mac.cleanUndeliverableEmails(ACCOUNT, 30, false),

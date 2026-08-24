@@ -13,41 +13,46 @@ import * as windowsBridge from './windows';
 import * as macBridge from './mac';
 import type { BridgeOptions, ResolvedConfig } from './runtime';
 import { getGlobalConfig, mergeOptions, withConfig } from './runtime';
+import { UnsupportedPlatformError } from './errors';
 import type { BridgeCapability, CapabilityMap, OutlookBridge } from './types';
 
-const impl: OutlookBridge = process.platform === 'darwin' ? macBridge.bridge : windowsBridge.bridge;
-
-/** Every operation name, taken from the Windows map — the complete one. */
-const ALL_CAPABILITIES = Object.keys(windowsBridge.capabilities) as BridgeCapability[];
-
-function noCapabilities(): CapabilityMap {
-    return Object.freeze(
-        Object.fromEntries(ALL_CAPABILITIES.map(name => [name, false])),
-    ) as CapabilityMap;
-}
+/** Every operation name, taken from the Windows bridge — the complete one. */
+const ALL_CAPABILITIES = Object.keys(windowsBridge.bridge) as BridgeCapability[];
 
 /**
- * What this machine can actually do.
+ * The backend for an OS with no Outlook automation at all.
  *
- * Resolved from the real `process.platform` rather than from which module the
- * dispatcher picked: off Windows and macOS entirely, `impl` is still the
- * PowerShell implementation (whose calls reject with UNSUPPORTED_PLATFORM), and
- * reporting its all-true map there would be a lie.
+ * A third implementation rather than a fallback to the PowerShell one: making
+ * Windows the default for Linux and everything else meant the dispatcher held a
+ * bridge whose capability map had to be second-guessed afterwards, and whose
+ * functions each had to remember to refuse. Answering "not here" is itself an
+ * implementation of the contract, so it is written as one, once.
  */
-function platformCapabilities(): CapabilityMap {
-    if (process.platform === 'win32') return windowsBridge.capabilities;
-    if (process.platform === 'darwin') return macBridge.capabilities;
-    return noCapabilities();
-}
+const unsupportedBridge = {
+    bridge: Object.fromEntries(ALL_CAPABILITIES.map(name => [
+        name,
+        () => Promise.reject(new UnsupportedPlatformError(process.platform)),
+    ])) as unknown as OutlookBridge,
+    capabilities: Object.freeze(
+        Object.fromEntries(ALL_CAPABILITIES.map(name => [name, false])),
+    ) as CapabilityMap,
+};
+
+// The platform decision, made once. Everything below reads `impl` and
+// `implCapabilities` without asking which OS this is.
+const {bridge: impl, capabilities: implCapabilities} =
+    process.platform === 'win32' ? windowsBridge
+        : process.platform === 'darwin' ? macBridge
+            : unsupportedBridge;
 
 /** Which operations work on this machine. See `CapabilityMap`. */
 export function capabilities(): CapabilityMap {
-    return platformCapabilities();
+    return implCapabilities;
 }
 
 /** Whether one operation works here — `capabilities()` for a single name. */
 export function supports(operation: BridgeCapability): boolean {
-    return platformCapabilities()[operation] === true;
+    return implCapabilities[operation] === true;
 }
 
 /**
@@ -95,15 +100,10 @@ function build(config: ResolvedConfig): OutlookBridgeInstance {
         options: Object.freeze({...config}),
     } as OutlookBridgeInstance;
 
-    const source = impl as unknown as Record<string, unknown>;
+    const source = impl as unknown as Record<string, AnyFn>;
     for (const name of ALL_CAPABILITIES) {
-        const fn = source[name] as AnyFn | undefined;
+        const fn = source[name];
         (instance as unknown as Record<string, unknown>)[name] = (...args: never[]) => {
-            if (typeof fn !== 'function') {
-                return Promise.reject(
-                    new Error(`'${name}' is unavailable on platform '${process.platform}'.`),
-                );
-            }
             // Errors thrown synchronously (an argument check ahead of the first
             // await) become rejections here, so a caller has one failure channel.
             try {

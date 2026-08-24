@@ -1,12 +1,19 @@
 // Deleting mail, and emptying what was already deleted.
-import { AS_HANDLERS, AS_LIST_SEP, asRow, field, runOsaScript, splitFields, splitList, splitRecords } from './run';
+import {
+    asEscape,
+    asRow,
+    boolField,
+    field,
+    intField,
+    runOsaScript,
+    splitFields,
+    splitList,
+    splitRecords,
+    summaryFields
+} from './run';
 import { accountLookupSnippet, macFolderPath, partitionMessageIds } from './scripts';
-import type {
-    DeleteMailOptions,
-    DeleteMailOutcome,
-    DeleteMailResult,
-    PurgeDeletedItemsResult,
-} from '../types';
+import { PROTECTED_MAIL_REASON } from '../mail';
+import type { DeleteMailOptions, DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult, } from '../types';
 
 /**
  * Walk a folder's `container` chain to the top, as the list `chainNames`
@@ -77,8 +84,7 @@ export async function deleteOutlookEmails(
         reason: bad.error,
     }));
     if (valid.length > 0) {
-        const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+        const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set inboxName to (name of (inbox of targetAcct)) as string
     set sentName to (name of (sent items of targetAcct)) as string
@@ -110,7 +116,7 @@ ${folderChainSnippet('            ')}
             'subj',
             'pathText',
             '"refused"',
-            '"received or sent mail (Inbox/Sent Items or a subfolder) - pass allow_protected to override"',
+            `"${asEscape(PROTECTED_MAIL_REASON)}"`,
         ])}
             else if ${dryRun} then
                 set out to out & ${asRow(['(theId as string)', 'subj', 'pathText', '"would-delete"', '""'])}
@@ -173,8 +179,7 @@ export async function purgeDeletedItems(
 ): Promise<PurgeDeletedItemsResult> {
     const days = Math.max(0, Math.floor(olderThanDays));
     const folderPath = macFolderPath(emailAccount, 'Deleted Items', []);
-    const indexScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const indexScript = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set trashFolder to deleted items of targetAcct
     set idList to id of every message of trashFolder
@@ -197,7 +202,7 @@ end tell`;
 
     const rows = splitRecords(await runOsaScript(indexScript, 300000)).map(record => {
         const parts = splitFields(record);
-        return {id: field(parts, 0), keep: field(parts, 1).trim() === 'true'};
+        return {id: field(parts, 0), keep: boolField(parts, 1)};
     });
     const doomed = rows.filter(row => !row.keep);
     const kept = rows.length - doomed.length;
@@ -205,8 +210,7 @@ end tell`;
         return {folderPath, dryRun, matched: doomed.length, purged: 0, kept, failed: 0};
     }
 
-    const purgeScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const purgeScript = `tell application "Microsoft Outlook"
     set purgedCount to 0
     set failedCount to 0
     repeat with theId in {${doomed.map(row => row.id).join(', ')}}
@@ -225,13 +229,13 @@ tell application "Microsoft Outlook"
     return ${asRow(['(purgedCount as string)', '(failedCount as string)'])}
 end tell`;
 
-    const summary = splitFields(splitRecords(await runOsaScript(purgeScript, 600000))[0] || '');
+    const summary = summaryFields(await runOsaScript(purgeScript, 600000));
     return {
         folderPath,
         dryRun,
         matched: doomed.length,
-        purged: Number.parseInt(field(summary, 0) || '0', 10) || 0,
+        purged: intField(summary, 0),
         kept,
-        failed: Number.parseInt(field(summary, 1) || '0', 10) || 0,
+        failed: intField(summary, 1),
     };
 }

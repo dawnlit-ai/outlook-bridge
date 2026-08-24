@@ -1,17 +1,11 @@
 // Reading mail: one folder, one item, a whole Inbox tree, or whatever is
 // selected in the running Outlook.
-import { psEscape, requireWindows, runPowerShell } from './run';
+import { psBool, psEscape, requireWindows, runPowerShell } from './run';
 import { accountScript, getItemScript, mailScopeScript, namedStoreScript, SENDER_SMTP_PS } from './scripts';
 import { parseArray, parseObject, record, str, toArray } from '../shared/json';
-import { mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from '../mail';
+import { isOutgoingRoot, mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from '../mail';
 import { NotFoundError } from '../errors';
-import type {
-    EmailBodyResult,
-    InboxEmail,
-    InboxSearchFilter,
-    InboxSearchMatch,
-    SelectedEmail,
-} from '../types';
+import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
 
 /**
  * An arbitrary email body crosses the PowerShell boundary base64'd: it carries
@@ -21,6 +15,14 @@ import type {
 function decodeBody(value: unknown): string {
     return Buffer.from(str(value), 'base64').toString('utf8');
 }
+
+// Outgoing roots keep their timestamp under a different COM property; anything
+// else carries ReceivedTime.
+const OUTGOING_DATE_PROPS: Record<number, string> = {
+    [WELL_KNOWN_FOLDERS['sent items']]: 'SentOn',
+    [WELL_KNOWN_FOLDERS.outbox]: 'SentOn',
+    [WELL_KNOWN_FOLDERS.drafts]: 'LastModificationTime',
+};
 
 /**
  * Read recent emails from the Outlook inbox for the given account.
@@ -51,10 +53,8 @@ export async function readInboxEmails(
         throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
     }
     // Which timestamp the folder's items actually carry (see the note in the script).
-    const dateProp = ref.rootId === 5 || ref.rootId === 4 ? 'SentOn'
-        : ref.rootId === 16 ? 'LastModificationTime'
-            : 'ReceivedTime';
-    const isOutgoing = ref.rootId === 5 || ref.rootId === 4 || ref.rootId === 16 ? '$true' : '$false';
+    const dateProp = OUTGOING_DATE_PROPS[ref.rootId] ?? 'ReceivedTime';
+    const isOutgoing = psBool(isOutgoingRoot(ref.rootId));
     const script = `${accountScript(emailAccount)}
 ${namedStoreScript(emailAccount)}
 ${mailScopeScript(ref, folder || '')}

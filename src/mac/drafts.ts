@@ -5,16 +5,7 @@
 // `drafts of targetAcct` is already account-scoped, so a draft found there
 // belongs to this account by construction. That is the same rule the Windows
 // scan reaches by a longer route, not a weaker one.
-import {
-    AS_HANDLERS,
-    AS_LIST_SEP,
-    asRow,
-    field,
-    runOsaScript,
-    splitFields,
-    splitList,
-    splitRecords,
-} from './run';
+import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords, } from './run';
 import { accountLookupSnippet, macFolderPath, partitionMessageIds } from './scripts';
 import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult } from '../types';
 
@@ -36,8 +27,7 @@ export async function listOutlookDrafts(
 ): Promise<ListDraftsResult> {
     const cap = Math.max(1, Math.floor(limit));
     const preview = Math.max(1, Math.floor(previewChars));
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set draftsFolder to drafts of targetAcct
     set out to ""
@@ -80,18 +70,20 @@ ${accountLookupSnippet(emailAccount)}
             set modAt to my isoDate(modification date of theMsg)
         end try
         set out to out & ${asRow([
-    '(id of theMsg as string)',
-    'subj',
-    'my joinList(toNames, ", ")',
-    'my sanitizeList(toAddrs)',
-    'bodyText',
-    '(attCount as string)',
-    'modAt',
-])}
+        '(id of theMsg as string)',
+        'subj',
+        'my joinList(toNames, ", ")',
+        'my sanitizeList(toAddrs)',
+        'bodyText',
+        '(attCount as string)',
+        'modAt',
+    ])}
     end repeat
     return out
 end tell`;
 
+    // One string for every row, rather than rebuilt per draft.
+    const folderPath = draftsPath(emailAccount);
     const drafts = splitRecords(await runOsaScript(script, 120000)).map(record => {
         const parts = splitFields(record);
         return {
@@ -100,16 +92,16 @@ end tell`;
             to: field(parts, 2),
             toEmails: splitList(field(parts, 3)),
             bodyPreview: field(parts, 4).replace(/\s+/g, ' ').trim(),
-            hasAttachments: (Number.parseInt(field(parts, 5) || '0', 10) || 0) > 0,
+            hasAttachments: intField(parts, 5) > 0,
             lastModified: field(parts, 6),
-            folderPath: draftsPath(emailAccount),
+            folderPath,
         };
     });
     // 'yyyy-MM-dd HH:mm' is lexicographically ordered, so a string compare sorts it.
     drafts.sort((a, b) => b.lastModified.localeCompare(a.lastModified));
     return {
         account: emailAccount,
-        foldersScanned: [draftsPath(emailAccount)],
+        foldersScanned: [folderPath],
         count: drafts.length,
         truncated: drafts.length > cap,
         drafts: drafts.slice(0, cap),
@@ -124,8 +116,7 @@ end tell`;
  * — the same trap the Windows implementation avoids by snapshotting item refs.
  */
 export async function sendAllDrafts(emailAccount: string): Promise<SendAllDraftsResult> {
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set draftsFolder to drafts of targetAcct
     set wanted to id of every message of draftsFolder
@@ -153,7 +144,7 @@ end tell`;
 
     const records = splitRecords(await runOsaScript(script, 300000));
     return {
-        sent: Number.parseInt(field(splitFields(records[0] || ''), 0) || '0', 10) || 0,
+        sent: intField(splitFields(records[0] || ''), 0),
         failed: records.slice(1).map(record => {
             const parts = splitFields(record);
             return {subject: field(parts, 0), error: field(parts, 1)};
@@ -178,8 +169,7 @@ export async function deleteOutlookDrafts(
     if (entryIds.length === 0) return {deleted: 0, failed: []};
     const {valid, invalid} = partitionMessageIds(entryIds);
     if (valid.length === 0) return {deleted: 0, failed: invalid};
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set draftsFolder to drafts of targetAcct
     set draftsName to (name of draftsFolder) as string
@@ -219,7 +209,7 @@ end tell`;
 
     const records = splitRecords(await runOsaScript(script, 300000));
     return {
-        deleted: Number.parseInt(field(splitFields(records[0] || ''), 0) || '0', 10) || 0,
+        deleted: intField(splitFields(records[0] || ''), 0),
         failed: [
             ...invalid,
             ...records.slice(1).map(record => {

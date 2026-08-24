@@ -14,9 +14,11 @@ const RUNNER = 'powershell' as const;
 /**
  * Refuse before generating anything when this isn't Windows.
  *
- * Called at the top of each operation rather than only inside the runner, so a
+ * Called at the top of each operation as well as inside the two runners, so a
  * call that would have written temp files or made preparatory reads doesn't do
- * any of that first.
+ * any of that first. The runners hold the only copy of the check itself — three
+ * near-identical guards worded three different ways is how "not supported" came
+ * to mean two different sentences.
  */
 export function requireWindows(): void {
     if (process.platform !== 'win32') {
@@ -66,12 +68,7 @@ const UTF8_PRELUDE = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n
  * than relying on the global. See `configure()` for both knobs.
  */
 export function runPowerShell(script: string, timeout?: number): Promise<string> {
-    if (process.platform !== 'win32') {
-        return Promise.reject(new UnsupportedPlatformError(
-            process.platform,
-            'PowerShell and COM automation are only supported on Windows.',
-        ));
-    }
+    requireWindows();
     const utf8Script = UTF8_PRELUDE + script;
     return spawnPowerShell(
         ['-NoProfile', '-NonInteractive', '-Command', utf8Script],
@@ -89,12 +86,7 @@ export function runPowerShell(script: string, timeout?: number): Promise<string>
  * the file is an implementation detail, not a second error contract.
  */
 export async function runPowerShellFile(script: string, timeout?: number): Promise<string> {
-    if (process.platform !== 'win32') {
-        throw new UnsupportedPlatformError(
-            process.platform,
-            'PowerShell and COM automation are only supported on Windows.',
-        );
-    }
+    requireWindows();
     const scriptFile = tempFile('script', 'ps1');
     fs.writeFileSync(scriptFile, UTF8_PRELUDE + script, 'utf-8');
     try {

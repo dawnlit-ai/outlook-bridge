@@ -6,16 +6,26 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import { getConfig, reportRun, tempFile } from '../runtime';
 import { classifyRunFailure } from '../errors';
+import { WORD_SECTION_ANCHOR } from '../shared/replyBody';
 
 const RUNNER = 'osascript' as const;
 
 /**
  * Run an AppleScript via a temp file (avoids arg-length and quoting limits).
  *
+ * `AS_HANDLERS` is prepended here rather than by each caller — the Windows runner
+ * already owns its UTF-8 prelude the same way. It matters more on this side: a
+ * script missing a handler fails at COMPILE time for the WHOLE script, with a
+ * message pointing nowhere near the omission, so "remember to paste the handlers"
+ * was a footgun every new script had to survive.
+ *
  * `timeout` overrides the configured default for this one call; see `configure()`
  * for that and for the stdout cap.
  */
-export function runOsaScript(script: string, timeout?: number): Promise<string> {
+export function runOsaScript(source: string, timeout?: number): Promise<string> {
+    // The full text is what osascript compiled, so it is also what the error's
+    // line numbers refer to and what the debug hook and ScriptError must carry.
+    const script = AS_HANDLERS + source;
     const scriptFile = tempFile('osa', 'applescript');
     fs.writeFileSync(scriptFile, script, 'utf-8');
     const {timeoutMs, maxBufferBytes, signal} = getConfig();
@@ -66,11 +76,6 @@ export function asEscape(s: string): string {
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
         .replace(/\r\n|\r|\n/g, '\\n');
-}
-
-/** An AppleScript list literal of quoted strings. */
-export function asList(values: readonly string[]): string {
-    return `{${values.map(v => `"${asEscape(v)}"`).join(', ')}}`;
 }
 
 /** AppleScript's boolean literals. */
@@ -181,7 +186,7 @@ on insertAboveQuoted(c, ins)
     -- user's cursor would have been. Anything else falls back to just inside <body>.
     -- 'at' is a reserved AppleScript parameter name, so the cut point cannot be
     -- called that however naturally it reads.
-    set cutPoint to my tagEnd(c, "WordSection1>")
+    set cutPoint to my tagEnd(c, "${WORD_SECTION_ANCHOR}")
     if cutPoint is 0 then set cutPoint to my tagEnd(c, "<body")
     if cutPoint is 0 then return ins & c
     if cutPoint is (length of c) then return c & ins
@@ -219,4 +224,27 @@ export function splitList(value: string | undefined): string[] {
 /** A field by position — a missing field reads as ''. */
 export function field(fields: readonly string[], index: number): string {
     return fields[index] ?? '';
+}
+
+/**
+ * The fields of a script's ONE summary record — the shape every mutation here
+ * returns (counts first, then any per-item failures as further records).
+ */
+export function summaryFields(raw: string): string[] {
+    return splitFields(splitRecords(raw)[0] ?? '');
+}
+
+/** A numeric field, defaulting to `fallback` when absent or unparsable. */
+export function intField(fields: readonly string[], index: number, fallback = 0): number {
+    const parsed = Number.parseInt(field(fields, index), 10);
+    return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+/**
+ * A boolean field. AppleScript renders booleans as the bare words `true`/`false`,
+ * so this is the counterpart of `shared/json.ts`'s coercions for the framed
+ * output — the Windows side gets those free from ConvertFrom-Json.
+ */
+export function boolField(fields: readonly string[], index: number): boolean {
+    return field(fields, index).trim() === 'true';
 }

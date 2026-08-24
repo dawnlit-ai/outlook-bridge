@@ -1,21 +1,17 @@
 // Listing the folders under an Inbox, and filing mail into one.
 import {
-    AS_HANDLERS,
     AS_LIST_SEP,
     asRow,
+    boolField,
     field,
+    intField,
     runOsaScript,
     splitFields,
     splitList,
     splitRecords,
 } from './run';
-import {
-    accountLookupSnippet,
-    macFolderPath,
-    mailScopeSnippet,
-    partitionMessageIds,
-} from './scripts';
-import { mailFolderRef } from '../mail';
+import { accountLookupSnippet, macFolderPath, mailScopeSnippet, partitionMessageIds, } from './scripts';
+import { clamp, mailFolderRef } from '../mail';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
 
 /**
@@ -30,9 +26,8 @@ export async function listInboxFolders(
     emailAccount: string,
     maxDepth = 2,
 ): Promise<InboxFolderInfo[]> {
-    const depth = Math.max(1, Math.min(4, Math.floor(maxDepth)));
-    const script = `${AS_HANDLERS}
-on walkFolders(theFolder, level, maxLevel, prefix)
+    const depth = clamp(maxDepth, 1, 4);
+    const script = `on walkFolders(theFolder, level, maxLevel, prefix)
     set out to ""
     tell application "Microsoft Outlook"
         set subs to mail folders of theFolder
@@ -69,8 +64,8 @@ return my walkFolders(inb, 1, ${depth}, "")`;
         return {
             name: field(parts, 0),
             folderPath: macFolderPath(emailAccount, 'Inbox', segments),
-            itemCount: Number.parseInt(field(parts, 2) || '0', 10) || 0,
-            depth: Number.parseInt(field(parts, 3) || '1', 10) || 1,
+            itemCount: intField(parts, 2),
+            depth: intField(parts, 3, 1),
         };
     });
 }
@@ -107,8 +102,7 @@ export async function moveOutlookEmails(
     if (valid.length === 0) {
         return {folderPath, folderCreated: false, moved: 0, failed: invalid};
     }
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
 ${mailScopeSnippet(ref, folderName, createIfMissing)}
     set countBefore to count of messages of scopeFolder
@@ -138,8 +132,8 @@ end tell`;
     const summary = splitFields(records[0] || '');
     return {
         folderPath,
-        folderCreated: field(summary, 1).trim() === 'true',
-        moved: Number.parseInt(field(summary, 0) || '0', 10) || 0,
+        folderCreated: boolField(summary, 1),
+        moved: intField(summary, 0),
         failed: [
             ...invalid,
             ...records.slice(1).map(record => {

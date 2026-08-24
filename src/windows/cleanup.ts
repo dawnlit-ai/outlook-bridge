@@ -1,13 +1,9 @@
 // Deleting mail, and emptying what was already deleted.
-import { psBool, psList, requireWindows, runPowerShell } from './run';
+import { psBool, psEscape, psList, requireWindows, runPowerShell } from './run';
 import { accountScript, DELIVERY_STORE_PS } from './scripts';
 import { num, parseObject, record, str, toArray } from '../shared/json';
-import type {
-    DeleteMailOptions,
-    DeleteMailOutcome,
-    DeleteMailResult,
-    PurgeDeletedItemsResult,
-} from '../types';
+import { PROTECTED_MAIL_REASON } from '../mail';
+import type { DeleteMailOptions, DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult, } from '../types';
 
 /** Folders whose contents are received or already-sent mail, not working state. */
 const PROTECTED_FOLDER_IDS = [6, 5];
@@ -92,7 +88,7 @@ foreach ($id in @(${psList(entryIds)})) {
 
         if ($isProtected -and -not ${psBool(allowProtected)}) {
             $refused++
-            $items += [pscustomobject]@{ entryId = $id; subject = $subject; folderPath = $folderPath; status = 'refused'; reason = 'received or sent mail (Inbox/Sent Items or a subfolder) - pass allow_protected to override' }
+            $items += [pscustomobject]@{ entryId = $id; subject = $subject; folderPath = $folderPath; status = 'refused'; reason = '${psEscape(PROTECTED_MAIL_REASON)}' }
         } elseif (${psBool(dryRun)}) {
             $items += [pscustomobject]@{ entryId = $id; subject = $subject; folderPath = $folderPath; status = 'would-delete'; reason = '' }
         } else {
@@ -148,9 +144,12 @@ $matched = 0
 $purged = 0
 $kept = 0
 $failed = 0
-for ($i = $folder.Items.Count; $i -ge 1; $i--) {
+# Bound once: every $folder.Items is a COM property get that materialises a
+# fresh collection object, and this loop runs once per message in Deleted Items.
+$folderItems = $folder.Items
+for ($i = $folderItems.Count; $i -ge 1; $i--) {
     $it = $null
-    try { $it = $folder.Items.Item($i) } catch { continue }
+    try { $it = $folderItems.Item($i) } catch { continue }
     $stamp = $null
     foreach ($p in @('ReceivedTime','LastModificationTime','CreationTime')) {
         try { $stamp = $it.$p; if ($stamp -ne $null) { break } } catch {}

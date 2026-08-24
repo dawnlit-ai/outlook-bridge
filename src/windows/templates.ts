@@ -1,9 +1,18 @@
 // Template emails: ordinary mail items kept in a mailbox folder and reused as
 // reply bodies, plus the compose-window editor for one.
-import { psBool, psEscape, readScriptOutput, requireWindows, runPowerShell, runPowerShellFile, scriptInput } from './run';
+import {
+    psBool,
+    psEscape,
+    readScriptOutput,
+    requireWindows,
+    runPowerShell,
+    runPowerShellFile,
+    scriptInput
+} from './run';
 import { accountScript, FIND_FOLDER_PS } from './scripts';
 import { parseObject, record, str, toArray } from '../shared/json';
 import { findTemplateMarkers } from '../outlookTemplateSections';
+import { clamp } from '../mail';
 import { NotFoundError } from '../errors';
 import { tempFile } from '../runtime';
 import type { SaveTemplateResult, TemplateFolderResult } from '../types';
@@ -22,7 +31,7 @@ export async function readTemplateEmails(
     subject = '',
 ): Promise<TemplateFolderResult> {
     requireWindows();
-    const cap = Math.max(1, Math.min(50, Math.floor(limit)));
+    const cap = clamp(limit, 1, 50);
     const wanted = (subject || '').trim();
     const script = `${accountScript(emailAccount)}
 $root = $account.DeliveryStore.GetRootFolder()
@@ -223,8 +232,9 @@ while ($true) {
 $savedBody = ''
 try {
     $drafts = $ns.GetDefaultFolder(16)
-    for ($i = $drafts.Items.Count; $i -ge 1; $i--) {
-        $it = $drafts.Items.Item($i)
+    $draftItems = $drafts.Items
+    for ($i = $draftItems.Count; $i -ge 1; $i--) {
+        $it = $draftItems.Item($i)
         if ($it.Subject -eq $subject) {
             if (-not $savedBody) { try { $savedBody = $it.HTMLBody } catch {} }
             try { $it.Delete() } catch {}

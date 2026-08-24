@@ -4,8 +4,14 @@
 // names, the matching happens in TypeScript against shared/attachmentMatch, and
 // only then does the second run save what matched. That keeps one definition of
 // "does this filename match" and one wording for the error, shared with Windows.
-import { AS_HANDLERS, AS_LIST_SEP, asEscape, asRow, field, runOsaScript, splitFields, splitList, splitRecords } from './run';
-import { macMessageId, messageLookupSnippet } from './scripts';
+import { asEscape, asRow, field, runOsaScript, splitList, summaryFields } from './run';
+import {
+    macMessageId,
+    MessageDetail,
+    messageDetailFields,
+    messageDetailSnippet,
+    messageLookupSnippet
+} from './scripts';
 import { attachmentNotFoundMessage, findAttachmentIndex } from '../shared/attachmentMatch';
 import { resolveDestDir } from '../runtime';
 import { NotFoundError } from '../errors';
@@ -22,51 +28,18 @@ interface ResolvedEmail {
 
 /** Read the email's identity and the names of the attachments it carries. */
 async function resolveEmail(id: string): Promise<ResolvedEmail> {
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
-    set subj to ""
-    try
-        set subj to (subject of theMsg) as string
-    end try
-    set sndName to ""
-    set sndAddr to ""
-    try
-        set snd to sender of theMsg
-        try
-            set sndAddr to (address of snd) as string
-        end try
-        try
-            set sndName to (name of snd) as string
-        end try
-    end try
-    set recvd to ""
-    try
-        set recvd to my isoDate(time received of theMsg)
-    on error
-        try
-            set recvd to my isoDate(time sent of theMsg)
-        end try
-    end try
-    set attNames to {}
-    try
-        set attNames to name of every attachment of theMsg
-    end try
-    return ${asRow([
-        'subj',
-        'sndName',
-        'sndAddr',
-        'recvd',
-        'my sanitizeList(attNames)',
-    ])}
+${messageDetailSnippet()}
+    return ${asRow(messageDetailFields())}
 end tell`;
-    const parts = splitFields(splitRecords(await runOsaScript(script, 30000))[0] || '');
+    const parts = summaryFields(await runOsaScript(script, 30000));
     return {
-        subject: field(parts, 0),
-        senderName: field(parts, 1),
-        senderEmail: field(parts, 2),
-        receivedTime: field(parts, 3),
-        attachmentNames: splitList(field(parts, 4)),
+        subject: field(parts, MessageDetail.subject),
+        senderName: field(parts, MessageDetail.senderName),
+        senderEmail: field(parts, MessageDetail.senderEmail),
+        receivedTime: field(parts, MessageDetail.receivedTime),
+        attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
     };
 }
 

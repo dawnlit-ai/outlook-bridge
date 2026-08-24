@@ -486,18 +486,19 @@ export type BridgeCapability = keyof OutlookBridge;
 /**
  * Which operations actually work on this machine.
  *
- * The alternative was matching on an error message, which is how a consumer had
- * to do it before: half the macOS surface throws NOT_IMPLEMENTED, and the only
- * way to know in advance was to try. A UI can now grey out the buttons it can't
- * back rather than discovering the gap when the user clicks one.
+ * The alternative was matching on an error message: a consumer had no way to
+ * learn a gap existed except by calling into it. A UI can now grey out the
+ * buttons it can't back rather than discovering the gap when the user clicks one.
  *
- * `false` also covers the softer gap — `searchInboxByFilter`,
- * `collectBouncedRecipients` and `readSentRecipientGroups` return an empty list
- * on macOS rather than throwing, so an empty result there means "can't", not
- * "none found". That distinction is invisible in the return value and is the
- * reason this map reports on them at all.
+ * Windows and macOS both answer the whole contract today, so every flag is
+ * `true` on either; the map earns its place on the third case — any other OS,
+ * where all of them are `false` and every call rejects with
+ * `UNSUPPORTED_PLATFORM`. `false` is also how a platform would announce the
+ * softer gap, an operation that answers emptily rather than throwing, so an
+ * empty result there means "can't" rather than "none found".
  *
- * Derived from `keyof OutlookBridge`, so adding a function to the contract
- * breaks both platform maps at compile time instead of quietly defaulting.
+ * Each platform derives its map from its bridge object minus an explicit
+ * not-ported list (see `shared/capabilities.ts`), and the key type is
+ * `keyof OutlookBridge`, so a new function in the contract cannot be missed.
  */
 export type CapabilityMap = Readonly<Record<BridgeCapability, boolean>>;

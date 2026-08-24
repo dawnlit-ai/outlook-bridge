@@ -6,37 +6,23 @@
 // attachments, sender — only for the messages that survived. Reading
 // per-message in a loop costs an event per property and is unusably slow on a
 // real mailbox, which is the whole reason for the shape.
-import {
-    AS_HANDLERS,
-    AS_LIST_SEP,
-    asRow,
-    field,
-    FIELD_SEP,
-    runOsaScript,
-    splitFields,
-    splitList,
-    splitRecords,
-} from './run';
+import { AS_LIST_SEP, asRow, field, runOsaScript, splitFields, splitList, splitRecords, summaryFields, } from './run';
 import {
     accountLookupSnippet,
     dateProperty,
     firstRecipientSnippet,
-    isOutgoingRoot,
     macFolderPath,
     macMessageId,
     mailScopeSnippet,
+    MessageDetail,
+    messageDetailFields,
+    messageDetailSnippet,
     messageLookupSnippet,
     senderSnippet,
 } from './scripts';
-import { mailFolderRef, splitQuotedOriginal } from '../mail';
+import { isOutgoingRoot, mailFolderRef, splitQuotedOriginal } from '../mail';
 import { NotFoundError } from '../errors';
-import type {
-    EmailBodyResult,
-    InboxEmail,
-    InboxSearchFilter,
-    InboxSearchMatch,
-    SelectedEmail,
-} from '../types';
+import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
 
 /** How much of a body readInboxEmails previews, matching the Windows reader. */
 const PREVIEW_CHARS = 600;
@@ -71,8 +57,7 @@ export async function readInboxEmails(
 
     // Pass 1 — index the folder. Folder order isn't documented, so sort here
     // rather than trusting Outlook to hand back newest-first.
-    const indexScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const indexScript = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
 ${resolveScope}
     set cutoff to (current date) - (${days} * days)
@@ -111,8 +96,7 @@ end tell`;
     if (chosen.length === 0) return [];
 
     // Pass 2 — the expensive reads, only for messages we keep.
-    const detailScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const detailScript = `tell application "Microsoft Outlook"
     set wanted to {${chosen.map(c => c.id).join(', ')}}
     set out to ""
     repeat with k from 1 to (count of wanted)
@@ -186,54 +170,25 @@ export async function readEmailBody(
     includeQuoted: boolean = false,
 ): Promise<EmailBodyResult> {
     const id = macMessageId(entryId);
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
-    set subj to ""
-    try
-        set subj to (subject of theMsg) as string
-    end try
-${senderSnippet()}
-    set recvd to ""
-    try
-        set recvd to my isoDate(time received of theMsg)
-    on error
-        try
-            set recvd to my isoDate(time sent of theMsg)
-        end try
-    end try
-    set attNames to {}
-    try
-        set attNames to name of every attachment of theMsg
-    end try
-    set bodyText to ""
-    try
-        set bodyText to (plain text content of theMsg) as string
-    end try
-    return ${asRow([
-        '(id of theMsg as string)',
-        'subj',
-        'sndName',
-        'sndAddr',
-        'recvd',
-        'my sanitizeList(attNames)',
-        'bodyText',
-    ])}
+${messageDetailSnippet(true)}
+    return ${asRow(messageDetailFields(true))}
 end tell`;
 
     // The body is emitted LAST so a stray separator in earlier fields can't shift it.
-    const parts = splitFields(splitRecords(await runOsaScript(script, 60000))[0] || '');
-    const attachmentNames = splitList(field(parts, 5));
-    const {body, quoted, separator} = splitQuotedOriginal(field(parts, 6));
+    const parts = summaryFields(await runOsaScript(script, 60000));
+    const attachmentNames = splitList(field(parts, MessageDetail.attachmentNames));
+    const {body, quoted, separator} = splitQuotedOriginal(field(parts, MessageDetail.body));
     // The quoted thread is context, never the priced content, so it is capped
     // harder than the reply itself — matching the Windows reader.
     const quotedCap = Math.min(maxChars, 4000);
     return {
-        entryId: field(parts, 0) || id,
-        subject: field(parts, 1).trim(),
-        senderName: field(parts, 2),
-        senderEmail: field(parts, 3),
-        receivedTime: field(parts, 4),
+        entryId: field(parts, MessageDetail.id) || id,
+        subject: field(parts, MessageDetail.subject).trim(),
+        senderName: field(parts, MessageDetail.senderName),
+        senderEmail: field(parts, MessageDetail.senderEmail),
+        receivedTime: field(parts, MessageDetail.receivedTime),
         body: body.length > maxChars ? body.slice(0, maxChars) : body,
         truncated: body.length > maxChars,
         bodyLength: body.length,
@@ -284,8 +239,7 @@ export async function searchInboxByFilter(
 ): Promise<InboxSearchMatch[]> {
     const days = Math.max(0, Math.floor(daysBack));
     // Pass 1 — index every folder under the Inbox: path, id, subject, received.
-    const indexScript = `${AS_HANDLERS}
-on scanFolder(theFolder, prefix, cutoff, useCutoff)
+    const indexScript = `on scanFolder(theFolder, prefix, cutoff, useCutoff)
     set out to ""
     tell application "Microsoft Outlook"
         set idList to id of every message of theFolder
@@ -365,8 +319,7 @@ return my scanFolder(rootInbox, rootName, cutoff, ${days > 0 ? 'true' : 'false'}
     if (candidates.length === 0) return [];
 
     // Pass 2 — bodies, senders and attachment names for the survivors only.
-    const detailScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const detailScript = `tell application "Microsoft Outlook"
     set wanted to {${candidates.map(c => c.id).join(', ')}}
     set out to ""
     repeat with k from 1 to (count of wanted)
@@ -396,14 +349,19 @@ ${senderSnippet('theMsg', '            ')}
     return out
 end tell`;
 
-    const details = new Map<string, { senderName: string; senderEmail: string; attachmentNames: string[]; body: string }>();
+    const details = new Map<string, {
+        senderName: string;
+        senderEmail: string;
+        attachmentNames: string[];
+        body: string
+    }>();
     for (const record of splitRecords(await runOsaScript(detailScript, 300000))) {
         const parts = splitFields(record);
         details.set(field(parts, 0), {
             senderName: field(parts, 1),
             senderEmail: field(parts, 2),
             attachmentNames: splitList(field(parts, 3)),
-            body: parts.slice(4).join(FIELD_SEP),
+            body: field(parts, 4),
         });
     }
 
@@ -437,44 +395,15 @@ end tell`;
  * (an explorer selection and an open item), so there is no second lookup here.
  */
 export async function readSelectedEmail(): Promise<SelectedEmail> {
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
     set sel to {}
     try
         set sel to current messages
     end try
     if (count of sel) is 0 then error "No email is selected in Outlook. Open Outlook, select (or open) an email, then try again."
     set theMsg to item 1 of sel
-    set subj to ""
-    try
-        set subj to (subject of theMsg) as string
-    end try
-${senderSnippet()}
-    set recvd to ""
-    try
-        set recvd to my isoDate(time received of theMsg)
-    on error
-        try
-            set recvd to my isoDate(time sent of theMsg)
-        end try
-    end try
-    set attNames to {}
-    try
-        set attNames to name of every attachment of theMsg
-    end try
-    set bodyText to ""
-    try
-        set bodyText to (plain text content of theMsg) as string
-    end try
-    return ${asRow([
-        '(id of theMsg as string)',
-        'subj',
-        'sndName',
-        'sndAddr',
-        'recvd',
-        'my sanitizeList(attNames)',
-        'bodyText',
-    ])}
+${messageDetailSnippet(true)}
+    return ${asRow(messageDetailFields(true))}
 end tell`;
     const records = splitRecords(await runOsaScript(script, 30000));
     if (records.length === 0) {
@@ -482,14 +411,14 @@ end tell`;
     }
     const parts = splitFields(records[0]);
     return {
-        entryId: field(parts, 0),
+        entryId: field(parts, MessageDetail.id),
         storeId: '', // macOS AppleScript has no StoreID equivalent
-        subject: field(parts, 1).trim(),
-        senderName: field(parts, 2),
-        senderEmail: field(parts, 3),
-        receivedTime: field(parts, 4),
-        body: parts.slice(6).join(FIELD_SEP),
-        attachmentNames: splitList(field(parts, 5)),
+        subject: field(parts, MessageDetail.subject).trim(),
+        senderName: field(parts, MessageDetail.senderName),
+        senderEmail: field(parts, MessageDetail.senderEmail),
+        receivedTime: field(parts, MessageDetail.receivedTime),
+        body: field(parts, MessageDetail.body),
+        attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
     };
 }
 

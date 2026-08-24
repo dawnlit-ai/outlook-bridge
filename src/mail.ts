@@ -6,6 +6,18 @@
 import type { MailFolderRef } from './types';
 
 /**
+ * Clamp a caller's count to the range an operation actually accepts.
+ *
+ * These bounds ARE the argument contract — how far back a scan reaches, how many
+ * rows come back, how deep a folder walk goes — so they are stated here rather
+ * than once per platform, which is how the two came to disagree about what a
+ * `daysBack` of 0 means.
+ */
+export function clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+/**
  * The Outlook folders addressable by name rather than by walking from the Inbox,
  * with their olDefaultFolders id. Sent Items is the one that earns this: "has this
  * already gone out?" is otherwise unanswerable, and no amount of Inbox scanning
@@ -27,6 +39,33 @@ export const WELL_KNOWN_FOLDERS: Record<string, number> = {
     junk: 23,
     outbox: 4,
 };
+
+/**
+ * Why `deleteOutlookEmails` refuses a message, worded once for both platforms.
+ *
+ * It reaches the caller verbatim in a per-email `reason`, so the two generated
+ * scripts must not word it independently — the same reasoning that put the
+ * attachment "not found" sentence in `shared/attachmentMatch.ts`. It also names
+ * the option a consumer of THIS package actually passes: the text used to say
+ * `allow_protected`, which is the tool-layer spelling and not a name this
+ * package exposes.
+ */
+export const PROTECTED_MAIL_REASON =
+    'received or sent mail (Inbox/Sent Items or a subfolder) - pass allowProtected to override';
+
+/**
+ * Roots whose items are OUTGOING mail.
+ *
+ * Outgoing mail carries a sent timestamp where received mail carries a received
+ * one, and both platforms have to pick the same folders out on that basis —
+ * which is why it lives beside `WELL_KNOWN_FOLDERS` rather than as raw
+ * `olDefaultFolders` ids compared inline in each reader.
+ */
+export function isOutgoingRoot(rootId: number): boolean {
+    return rootId === WELL_KNOWN_FOLDERS['sent items']
+        || rootId === WELL_KNOWN_FOLDERS.outbox
+        || rootId === WELL_KNOWN_FOLDERS.drafts;
+}
 
 /**
  * Resolve a caller's folder string to a well-known root plus the segments below it.

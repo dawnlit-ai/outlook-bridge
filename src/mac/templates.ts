@@ -5,19 +5,19 @@
 // true — the same thing COM's HTMLBody returns — which is what makes templates
 // portable between the two platforms rather than a Windows-only feature.
 import {
-    AS_HANDLERS,
-    AS_LIST_SEP,
     asEscape,
     asRow,
+    boolField,
     field,
-    FIELD_SEP,
     runOsaScript,
     splitFields,
     splitList,
     splitRecords,
+    summaryFields,
 } from './run';
 import { accountLookupSnippet, FIND_FOLDER_HANDLER, macFolderPath } from './scripts';
 import { findTemplateMarkers } from '../outlookTemplateSections';
+import { clamp } from '../mail';
 import { NotFoundError } from '../errors';
 import type { SaveTemplateResult, TemplateEmail, TemplateFolderResult } from '../types';
 
@@ -58,12 +58,11 @@ export async function readTemplateEmails(
     includeBody = true,
     subject = '',
 ): Promise<TemplateFolderResult> {
-    const cap = Math.max(1, Math.min(50, Math.floor(limit)));
+    const cap = clamp(limit, 1, 50);
     const wanted = (subject || '').trim().toLowerCase();
 
     // Pass 1 — find the folder and index it: three bulk reads, no bodies.
-    const indexScript = `${AS_HANDLERS}
-${FIND_FOLDER_HANDLER}
+    const indexScript = `${FIND_FOLDER_HANDLER}
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set rootFolder to root folder of targetAcct
@@ -133,8 +132,7 @@ end tell`;
 
     // Pass 2 — the bodies, for the chosen templates only.
     const bodyProperty = includeBody ? 'content' : 'plain text content';
-    const bodyScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const bodyScript = `tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in {${chosen.map(item => item.id).join(', ')}}
         set theMsg to missing value
@@ -155,7 +153,7 @@ end tell`;
     const bodies = new Map<string, string>();
     for (const record of splitRecords(await runOsaScript(bodyScript, 120000))) {
         const parts = splitFields(record);
-        bodies.set(field(parts, 0), parts.slice(1).join(FIELD_SEP));
+        bodies.set(field(parts, 0), field(parts, 1));
     }
 
     const templates: TemplateEmail[] = chosen.map(item => {
@@ -193,8 +191,7 @@ export async function saveTemplateEmail(
     htmlBody: string,
     folderName = 'Templates',
 ): Promise<SaveTemplateResult> {
-    const script = `${AS_HANDLERS}
-${FIND_FOLDER_HANDLER}
+    const script = `${FIND_FOLDER_HANDLER}
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set rootFolder to root folder of targetAcct
@@ -217,10 +214,10 @@ tell application "Microsoft Outlook"
     if (count of messages of theFolder) is not greater than countBefore then error "Outlook did not file the template in '" & (name of theFolder) & "'."
     return ${asRow(['(name of theFolder as string)', '(wasCreated as string)'])}
 end tell`;
-    const parts = splitFields(splitRecords(await runOsaScript(script, 120000))[0] || '');
+    const parts = summaryFields(await runOsaScript(script, 120000));
     return {
         folderPath: macFolderPath(emailAccount, field(parts, 0) || folderName, []),
-        folderCreated: field(parts, 1).trim() === 'true',
+        folderCreated: boolField(parts, 1),
     };
 }
 
@@ -238,8 +235,7 @@ end tell`;
  */
 export async function editEmailTemplate(label: string, currentHtml: string): Promise<string> {
     const subject = `${label} - Save and close when done`;
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
     set editSubject to "${asEscape(subject)}"
     set draftMsg to make new outgoing message with properties {subject:editSubject, content:"${asEscape(currentHtml)}"}
     open draftMsg

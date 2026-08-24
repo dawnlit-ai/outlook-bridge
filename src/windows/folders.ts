@@ -2,7 +2,7 @@
 import { psList, requireWindows, runPowerShell } from './run';
 import { accountScript, DELIVERY_STORE_PS, mailScopeScript } from './scripts';
 import { num, parseArray, parseObject, record, str, toArray } from '../shared/json';
-import { mailFolderRef } from '../mail';
+import { clamp, mailFolderRef } from '../mail';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
 
 /** List the folders under an account's Inbox (the user's filing folders). */
@@ -11,7 +11,7 @@ export async function listInboxFolders(
     maxDepth = 2,
 ): Promise<InboxFolderInfo[]> {
     if (process.platform !== 'win32') return [];
-    const depth = Math.max(1, Math.min(4, Math.floor(maxDepth)));
+    const depth = clamp(maxDepth, 1, 4);
     const script = `${accountScript(emailAccount)}
 $inbox = $account.DeliveryStore.GetDefaultFolder(6)
 function Walk-Folders($folder, $level) {

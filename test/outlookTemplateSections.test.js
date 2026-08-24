@@ -12,6 +12,7 @@ const {
     removeTokenLine,
     composeTemplateBody,
 } = require('../dist/outlookTemplateSections.js');
+const {OutlookError} = require('../dist/errors.js');
 
 const TEMPLATE = [
     '<p>Hello,</p>',
@@ -67,7 +68,20 @@ test('composeTemplateBody refuses a section the template does not have', () => {
 
 test('composeTemplateBody refuses to send a sectioned template unnamed', () => {
     // Otherwise every variant plus the raw markers would go to the recipient.
-    assert.throws(() => composeTemplateBody(TEMPLATE, {}), /name one with template_section/);
+    // The message names `templateSection` — the parameter this package exposes —
+    // rather than the tool-layer spelling it was extracted from.
+    assert.throws(() => composeTemplateBody(TEMPLATE, {}), /name one with templateSection/);
+});
+
+test('a template failure is an OutlookError, like every other deliberate one', () => {
+    // These reach callers through replyOutlookEmail, so a bare Error would land
+    // them in the "bug" branch of the `err instanceof OutlookError` split that
+    // errors.ts tells consumers to write.
+    assert.throws(() => composeTemplateBody(TEMPLATE, {}), (error) => {
+        assert.ok(error instanceof OutlookError);
+        assert.equal(error.code, 'INVALID_REQUEST');
+        return true;
+    });
 });
 
 test('composeTemplateBody refuses a placeholder the template lacks', () => {

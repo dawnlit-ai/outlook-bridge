@@ -13,7 +13,7 @@ import type { MailFolderRef } from '../types';
  * that isn't, so it costs nothing and removes a class of "works only when
  * Outlook happens to be open" failure.
  */
-export const PS_PRELUDE = `
+const PS_PRELUDE = `
 $ErrorActionPreference = 'Stop'
 $outlook = New-Object -ComObject Outlook.Application
 $ns = $outlook.GetNamespace('mapi')

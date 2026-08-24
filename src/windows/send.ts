@@ -1,7 +1,7 @@
 // Composing outgoing mail: a new email, and a reply to an existing one.
 import { psEscape, requireWindows, runPowerShell, runPowerShellFile, scriptInput } from './run';
 import { accountScript, getItemScript } from './scripts';
-import { composeReplyHtml } from '../shared/replyBody';
+import { composeReplyHtml, WORD_SECTION_ANCHOR } from '../shared/replyBody';
 import { parseObject, str } from '../shared/json';
 import { listOutlookSignatures, readOutlookSignatureHtml } from './signatures';
 import { readTemplateEmails } from './templates';
@@ -85,13 +85,16 @@ $reply = $item.${replyMethod}()
 ${sendUsingAccount('reply')}
 
 $insertHtml = [IO.File]::ReadAllText('${psEscape(body.path)}', [Text.Encoding]::UTF8)
-$keyWord = 'WordSection1>'
-$idx = $reply.HTMLBody.IndexOf($keyWord)
+$keyWord = '${psEscape(WORD_SECTION_ANCHOR)}'
+# Bound to a local first: each $reply.HTMLBody read marshals the WHOLE generated
+# reply across COM, and a Word reply on a long thread runs to hundreds of KB.
+$html = $reply.HTMLBody
+$idx = $html.IndexOf($keyWord)
 if ($idx -ge 0) { $idx += $keyWord.Length } else {
-    $m = [regex]::Match($reply.HTMLBody, '<body[^>]*>')
+    $m = [regex]::Match($html, '<body[^>]*>')
     $idx = if ($m.Success) { $m.Index + $m.Length } else { 0 }
 }
-$reply.HTMLBody = $reply.HTMLBody.Insert($idx, $insertHtml)
+$reply.HTMLBody = $html.Insert($idx, $insertHtml)
 $to = [string]$reply.To
 $subject = [string]$reply.Subject
 $sender = ''

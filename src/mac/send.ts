@@ -1,5 +1,5 @@
 // Composing outgoing mail on macOS: a new email, and a reply to an existing one.
-import { asEscape, AS_HANDLERS, field, runOsaScript, splitFields } from './run';
+import { asEscape, field, runOsaScript, splitFields } from './run';
 import { accountLookupSnippet, macMessageId, messageLookupSnippet } from './scripts';
 import { composeReplyHtml } from '../shared/replyBody';
 import { listOutlookSignatures, readOutlookSignatureHtml } from './signatures';
@@ -94,8 +94,7 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
     });
     const {prelude, action} = composeAction('theReply', params.sendImmediately, params.openDraftWindow);
     const replyAll = params.replyAll ? 'reply to all true' : 'without reply to all';
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(params.emailAccount)}
 ${messageLookupSnippet(id)}
     set repliedTo to ""

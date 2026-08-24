@@ -1,6 +1,6 @@
 {
   "name": "@dawnlit/outlook-bridge",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Desktop Outlook automation for Node — read, send, reply, file, and template mail by driving the real Outlook client (PowerShell/COM on Windows, AppleScript on macOS).",
   "license": "Apache-2.0",
   "author": "Dawnlit",

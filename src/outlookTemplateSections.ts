@@ -21,6 +21,8 @@
  * what the operator wrote.
  */
 
+import { InvalidRequestError } from './errors';
+
 /** Marker/placeholder names: what an operator can reasonably type in Outlook. */
 const NAME = '[A-Za-z0-9_-]{1,40}';
 
@@ -52,9 +54,22 @@ function escapeRe(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Tag-tolerant matcher for one literal marker, e.g. `[[/QUOTE]]` or `{{QUESTIONS}}`. */
+/**
+ * Tag-tolerant matcher for one literal marker, e.g. `[[/QUOTE]]` or `{{QUESTIONS}}`.
+ *
+ * Memoized: the pattern interleaves `GAP` between every character, so a 15-character
+ * token compiles to several hundred characters, and the replace loops ask for the
+ * same token repeatedly while walking a template.
+ */
+const markerRegexCache = new Map<string, RegExp>();
+
 function markerRegex(token: string): RegExp {
-    return new RegExp(token.split('').map(escapeRe).join(GAP), 'i');
+    let regex = markerRegexCache.get(token);
+    if (!regex) {
+        regex = new RegExp(token.split('').map(escapeRe).join(GAP), 'i');
+        markerRegexCache.set(token, regex);
+    }
+    return regex;
 }
 
 /** HTML → rough plain text, enough to spot markers and to test a block for emptiness. */
@@ -270,15 +285,15 @@ export function composeTemplateBody(html: string, options: ComposeOptions = {}):
     const {sections, placeholders: available} = findTemplateMarkers(html);
 
     if (wanted && !sections.includes(wanted)) {
-        throw new Error(
+        throw new InvalidRequestError(
             sections.length
                 ? `${label} has no [[${wanted}]] section. Sections found: ${sections.join(', ')}.`
-                : `${label} has no [[${wanted}]]...[[/${wanted}]] markers — it holds a single body, so drop template_section (or add the markers in Outlook).`,
+                : `${label} has no [[${wanted}]]...[[/${wanted}]] markers — it holds a single body, so drop templateSection (or add the markers in Outlook).`,
         );
     }
     if (!wanted && sections.length) {
-        throw new Error(
-            `${label} is split into sections (${sections.join(', ')}) — name one with template_section, `
+        throw new InvalidRequestError(
+            `${label} is split into sections (${sections.join(', ')}) — name one with templateSection, `
             + `otherwise the reply would go out with the markers and every variant in it.`,
         );
     }
@@ -290,7 +305,7 @@ export function composeTemplateBody(html: string, options: ComposeOptions = {}):
         const open = locate(html, `[[${name}]]`);
         const close = locate(html, `[[/${name}]]`);
         if (!open || !close || close.start < open.end) {
-            throw new Error(`${label} has a malformed [[${name}]] section — expected [[${name}]] ... [[/${name}]] in that order.`);
+            throw new InvalidRequestError(`${label} has a malformed [[${name}]] section — expected [[${name}]] ... [[/${name}]] in that order.`);
         }
         const openSpan = markerSpan(html, open.start, open.end);
         const closeSpan = markerSpan(html, close.start, close.end);
@@ -308,7 +323,7 @@ export function composeTemplateBody(html: string, options: ComposeOptions = {}):
     for (const [rawKey, value] of Object.entries(options.placeholders || {})) {
         const key = rawKey.trim().toUpperCase();
         if (!available.includes(key)) {
-            throw new Error(
+            throw new InvalidRequestError(
                 `${label} has no {{${key}}} placeholder`
                 + (available.length ? ` (found: ${available.map(p => `{{${p}}}`).join(', ')}).` : '.')
                 + ` It may have been edited out in Outlook — ask the user rather than guessing where the text goes.`,
@@ -323,9 +338,9 @@ export function composeTemplateBody(html: string, options: ComposeOptions = {}):
     const leftover = markerTokens(out);
     if (leftover.length) {
         const hint = leftover.every(t => t.startsWith('{{'))
-            ? `Pass a value for each in template_placeholders.`
+            ? `Pass a value for each in templatePlaceholders.`
             : `Check the template in Outlook — every [[SECTION]] needs its [[/SECTION]].`;
-        throw new Error(
+        throw new InvalidRequestError(
             `${label} still contains unresolved markers after composing: ${leftover.join(', ')}. ${hint} The reply was not created.`,
         );
     }

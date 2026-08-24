@@ -7,15 +7,11 @@
 // shared/bounceRules — are applied here in TypeScript. Only messages that match
 // have their bodies read, which is the property that keeps either version
 // affordable on a real inbox.
-import { AS_HANDLERS, AS_LIST_SEP, asRow, field, runOsaScript, splitFields, splitList, splitRecords } from './run';
+import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords } from './run';
 import { accountLookupSnippet, allRecipientsSnippet } from './scripts';
 import { bounceReason, failedRecipients } from '../shared/bounceRules';
+import { clamp } from '../mail';
 import type { CleanUndeliverableResult, SentRecipientGroup, UndeliverableEmail } from '../types';
-
-/** Both scans clamp the window the same way; a year is as far back as either goes. */
-function scanWindow(daysBack: number): number {
-    return Math.max(1, Math.min(365, Math.floor(daysBack)));
-}
 
 interface IndexedMessage {
     id: string;
@@ -37,8 +33,7 @@ async function indexFolder(
     // Sender is a record, and a bulk `sender of every message` read hands back a
     // list of them that AppleScript then reads locally — so the whole index costs
     // four Apple events rather than one per message.
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set scanFolder to ${folderTerm} of targetAcct
     set idList to id of every message of scanFolder
@@ -96,8 +91,7 @@ end tell`;
 /** Read the plain-text bodies of the given messages, keyed by id. */
 async function readBodies(ids: readonly string[]): Promise<Map<string, string>> {
     if (ids.length === 0) return new Map();
-    const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const script = `tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in {${ids.join(', ')}}
         set theMsg to missing value
@@ -160,15 +154,14 @@ export async function cleanUndeliverableEmails(
     daysBack = 30,
     dryRun = true,
 ): Promise<CleanUndeliverableResult> {
-    const days = scanWindow(daysBack);
+    const days = clamp(daysBack, 1, 365);
     const indexed = await indexFolder(emailAccount, 'inbox', days);
     const matched = await collectBounces(indexed, emailAccount);
 
     let deletedCount = 0;
     const failed: { subject: string; error: string }[] = [];
     if (!dryRun && matched.length > 0) {
-        const script = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+        const script = `tell application "Microsoft Outlook"
     set deletedCount to 0
     set out to ""
     repeat with theId in {${matched.map(m => m.entryId).join(', ')}}
@@ -191,7 +184,7 @@ tell application "Microsoft Outlook"
     return ${asRow(['(deletedCount as string)'])} & out
 end tell`;
         const records = splitRecords(await runOsaScript(script, 300000));
-        deletedCount = Number.parseInt(field(splitFields(records[0] || ''), 0) || '0', 10) || 0;
+        deletedCount = intField(splitFields(records[0] || ''), 0);
         for (const record of records.slice(1)) {
             const parts = splitFields(record);
             failed.push({subject: field(parts, 0), error: field(parts, 1)});
@@ -223,7 +216,7 @@ export async function collectBouncedRecipients(
     daysBack = 30,
     scanDeleted = true,
 ): Promise<string[]> {
-    const days = scanWindow(daysBack);
+    const days = clamp(daysBack, 1, 365);
     const terms = scanDeleted ? ['inbox', 'deleted items'] : ['inbox'];
     const found = new Set<string>();
     for (const term of terms) {
@@ -247,13 +240,12 @@ export async function readSentRecipientGroups(
     daysBack = 30,
     limit = 3000,
 ): Promise<SentRecipientGroup[]> {
-    const days = scanWindow(daysBack);
-    const cap = Math.max(1, Math.min(10000, Math.floor(limit)));
+    const days = clamp(daysBack, 1, 365);
+    const cap = clamp(limit, 1, 10000);
     // Pass 1 — index Sent Items on `time sent`, which is the stamp outgoing mail
     // actually carries; indexing it on `time received` yields an empty set that
     // looks exactly like an empty folder.
-    const indexScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const indexScript = `tell application "Microsoft Outlook"
 ${accountLookupSnippet(emailAccount)}
     set sentFolder to sent items of targetAcct
     set idList to id of every message of sentFolder
@@ -288,8 +280,7 @@ end tell`;
     if (chosen.length === 0) return [];
 
     // Pass 2 — recipients, which can only be read per message.
-    const detailScript = `${AS_HANDLERS}
-tell application "Microsoft Outlook"
+    const detailScript = `tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in {${chosen.map(row => row.id).join(', ')}}
         set theMsg to missing value

@@ -2,6 +2,7 @@
 import { asBool, asEscape } from './run';
 import { InvalidRequestError, NotImplementedError } from '../errors';
 import type { MailFolderRef } from '../types';
+import { isOutgoingRoot } from '../mail';
 
 /**
  * Resolve the account whose SMTP address matches, or raise. Emitted into a
@@ -44,11 +45,6 @@ export const MAC_ROOT_TERMS: Record<number, string> = {
     4: 'outbox',
     23: 'junk mail',
 };
-
-/** Roots whose items are outgoing mail, which carries `time sent`, not `time received`. */
-export function isOutgoingRoot(rootId: number): boolean {
-    return rootId === 5 || rootId === 4 || rootId === 16;
-}
 
 /** The date property a folder's items actually carry. */
 export function dateProperty(rootId: number): string {
@@ -191,6 +187,72 @@ ${indent}        set sndName to (name of snd) as string
 ${indent}    end try
 ${indent}end try`;
 }
+
+/**
+ * Everything a reader wants off ONE message already bound to `theMsg`, and the
+ * row it produces — emitted together so the read order and the positions the
+ * TypeScript decoders index into cannot drift apart.
+ *
+ * Three callers share it (`readEmailBody`, `readSelectedEmail`, and the
+ * attachment resolver) and differ only in how they bind `theMsg`. They used to
+ * share it by copy: thirty lines repeated, with the `time received` → `time sent`
+ * fallback and the field order restated each time, so a dictionary fix reached
+ * one reader and not the others.
+ *
+ * `bodyText` is emitted LAST when asked for, so a stray separator in an earlier
+ * field cannot shift it.
+ */
+export function messageDetailSnippet(withBody = false, indent = '    '): string {
+    return `${indent}set subj to ""
+${indent}try
+${indent}    set subj to (subject of theMsg) as string
+${indent}end try
+${senderSnippet('theMsg', indent)}
+${indent}set recvd to ""
+${indent}try
+${indent}    set recvd to my isoDate(time received of theMsg)
+${indent}on error
+${indent}    try
+${indent}        set recvd to my isoDate(time sent of theMsg)
+${indent}    end try
+${indent}end try
+${indent}set attNames to {}
+${indent}try
+${indent}    set attNames to name of every attachment of theMsg
+${indent}end try` + (withBody ? `
+${indent}set bodyText to ""
+${indent}try
+${indent}    set bodyText to (plain text content of theMsg) as string
+${indent}end try` : '');
+}
+
+/**
+ * The fields `messageDetailSnippet` fills, in row order. The decoders read them
+ * back by the positions in `MessageDetail`.
+ */
+export function messageDetailFields(withBody = false): string[] {
+    const fields = [
+        '(id of theMsg as string)',
+        'subj',
+        'sndName',
+        'sndAddr',
+        'recvd',
+        'my sanitizeList(attNames)',
+    ];
+    if (withBody) fields.push('bodyText');
+    return fields;
+}
+
+/** Where each of those fields lands in the emitted row. */
+export const MessageDetail = {
+    id: 0,
+    subject: 1,
+    senderName: 2,
+    senderEmail: 3,
+    receivedTime: 4,
+    attachmentNames: 5,
+    body: 6,
+} as const;
 
 /**
  * The first recipient's name and address, as `sndName` / `sndAddr` — what
