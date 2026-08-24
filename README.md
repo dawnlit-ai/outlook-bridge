@@ -13,11 +13,18 @@ this automates the desktop client itself, the same way a person would.
 
 ## Install
 
+Install straight off GitHub `main`, rather than a versioned release:
+
 ```bash
-npm install @dawnlit/outlook-bridge
+npm install github:dawnlit-ai/outlook-bridge#main
 ```
 
-Requires Node 20+ and a real Outlook installation on the machine running it — this is desktop automation, not a hosted
+`prepare` runs `npm run build` automatically on install, so `dist/` is built from that checked-out
+source with no separate step. npm resolves the branch to a commit and pins it in `package-lock.json`,
+so a later plain `npm install` won't pick up new commits on its own — re-run the command above
+(naming the package and `#main` explicitly) whenever you want to advance to the current tip.
+
+Requires Node 24+ and a real Outlook installation on the machine running it — this is desktop automation, not a hosted
 API client.
 
 ## Usage
@@ -240,33 +247,6 @@ nested accessor (`address of (sender of m)` does not coerce, and inside a `try` 
 What no test can cover is the automation itself: driving a real Outlook client is the whole point of the package, and
 behaviour against a live mailbox — that a `move` really filed the mail, that a reply threaded correctly — is verified
 by running it, not in CI.
-
-## Layout
-
-```
-src/
-  index.ts           public surface       shared/       platform-neutral pieces
-  OutlookService.ts  platform dispatcher    bounceRules      what counts as a bounce
-  types.ts           the data contract      replyBody        template/signature composition
-  errors.ts          the error taxonomy     attachmentMatch  filename matching + its error
-  runtime.ts         config, temp files     json             PowerShell JSON coercion
-  mail.ts            folder paths, quotes
-  outlookTemplateSections.ts
-
-  windows/           mac/          one module per feature area, plus:
-    run.ts             run.ts        the interpreter, escaping, framing
-    scripts.ts         scripts.ts    the fragments several features emit
-    index.ts           index.ts      the barrel + that platform's capability map
-```
-
-Each platform directory splits by feature — `send`, `read`, `drafts`, `folders`, `cleanup`, `bounces`,
-`attachments`, `signatures`, `templates` — because every operation is "build a script, run it, coerce the result",
-and the interesting half is the script, which is only readable beside the rules it encodes. A script fragment lives
-in `scripts.ts` once a second feature emits it; one used by a single operation stays next to that operation.
-
-`shared/` is what stops the two platforms from drifting: the bounce phrase lists, the reply-body composition, and the
-attachment-not-found wording each have exactly one definition. The Windows scripts *generate* their PowerShell arrays
-and that error sentence from those constants, so "what is a bounce" cannot come to mean two different things.
 
 ## License
 
