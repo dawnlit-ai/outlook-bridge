@@ -149,6 +149,10 @@ const CASES = {
         run: () => mac.deleteOutlookDrafts(ACCOUNT, ['1263']),
         responses: [row('1')],
     },
+    sendDrafts: {
+        run: () => mac.sendDrafts(ACCOUNT, ['1263']),
+        responses: [row('1')],
+    },
     deleteOutlookEmails: {
         run: () => mac.deleteOutlookEmails(ACCOUNT, ['1263'], {allowProtected: true, dryRun: false}),
     },

@@ -121,6 +121,19 @@ export interface DeleteDraftsResult {
     failed: { entryId: string; error: string }[];
 }
 
+/** One draft that couldn't be sent in a selective send, identified by both id and
+ *  subject — id for the caller to retry or reconcile, subject for a human report. */
+export interface SendDraftsFailure {
+    entryId: string;
+    subject: string;
+    error: string;
+}
+
+export interface SendDraftsResult {
+    sent: number;
+    failed: SendDraftsFailure[];
+}
+
 // ── Deleting mail ────────────────────────────────────────────────────────
 /** What happened to one id in a deleteOutlookEmails call. */
 export interface DeleteMailOutcome {
@@ -405,6 +418,15 @@ export interface OutlookBridge {
     ): Promise<ListDraftsResult>;
 
     deleteOutlookDrafts(emailAccount: string, entryIds: string[]): Promise<DeleteDraftsResult>;
+
+    /**
+     * Send a chosen subset of an account's drafts by EntryID — e.g. after
+     * `listOutlookDrafts` and a user review pass — rather than the account-wide
+     * `sendAllDrafts`. Same "must be THIS account's draft" gate as
+     * `deleteOutlookDrafts`: an id pointing at ordinary mail, or at another
+     * account's draft, is refused and reported rather than sent.
+     */
+    sendDrafts(emailAccount: string, entryIds: string[]): Promise<SendDraftsResult>;
 
     deleteOutlookEmails(
         emailAccount: string,

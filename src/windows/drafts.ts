@@ -2,7 +2,7 @@
 import { psList, requireWindows, runPowerShell } from './run';
 import { accountScript } from './scripts';
 import { num, parseObject, record, str, strList, toArray } from '../shared/json';
-import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult } from '../types';
+import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult, SendDraftsResult } from '../types';
 
 /**
  * Resolve the Drafts folders belonging to one account into `$scan`, and define
@@ -252,6 +252,68 @@ ConvertTo-Json @{ deleted = $deleted; failed = @($failed) } -Depth 3
         failed: toArray(parsed.failed).map(f => {
             const e = record(f);
             return { entryId: str(e.entryId), error: str(e.error) };
+        }),
+    };
+}
+
+/**
+ * Send a chosen subset of `emailAccount`'s drafts by EntryID — e.g. after
+ * `listOutlookDrafts` and a user review pass — instead of `sendAllDrafts`'s
+ * account-wide sweep.
+ *
+ * Same ownership gate as `deleteOutlookDrafts`: every id must resolve to a mail
+ * item sitting in one of THIS account's Drafts folders before anything is sent.
+ * An id pointing at ordinary inbox mail, or at another account's draft, is
+ * refused and reported rather than sent.
+ */
+export async function sendDrafts(
+    emailAccount: string,
+    entryIds: string[],
+): Promise<SendDraftsResult> {
+    requireWindows();
+    if (entryIds.length === 0) return { sent: 0, failed: [] };
+    const script = `${draftsScript(emailAccount)}
+# Index this account's Drafts folders by EntryID, so a resolved item can be PROVED
+# to live in one of them before it is sent.
+$draftFolderIds = @{}
+foreach ($entry in $scan) { $draftFolderIds[$entry.folder.EntryID] = $entry.includeNull }
+
+$sent = 0
+$failed = @()
+foreach ($id in @(${psList(entryIds)})) {
+    $subj = ''
+    try {
+        $it = $null
+        foreach ($entry in $scan) {
+            try {
+                $it = $ns.GetItemFromID($id, $entry.folder.StoreID)
+                if ($it -ne $null) { break }
+            } catch { $it = $null }
+        }
+        if ($it -eq $null) { throw "no such item in this account's Drafts folders" }
+        try { $subj = $it.Subject } catch {}
+        $parentId = ''
+        try { $parentId = $it.Parent.EntryID } catch {}
+        if (-not $draftFolderIds.ContainsKey($parentId)) {
+            throw "item is not in this account's Drafts folder - refusing to send"
+        }
+        if (-not (Test-DraftMatches $it $draftFolderIds[$parentId])) {
+            throw "draft is not bound to $target - refusing to send"
+        }
+        $it.Send()
+        $sent++
+    } catch {
+        $failed += [pscustomobject]@{ entryId = $id; subject = $subj; error = $_.Exception.Message }
+    }
+}
+[pscustomobject]@{ sent = $sent; failed = @($failed) } | ConvertTo-Json -Compress -Depth 4
+`;
+    const parsed = parseObject(await runPowerShell(script, 300000));
+    return {
+        sent: num(parsed.sent),
+        failed: toArray(parsed.failed).map(f => {
+            const e = record(f);
+            return { entryId: str(e.entryId), subject: str(e.subject), error: str(e.error) };
         }),
     };
 }

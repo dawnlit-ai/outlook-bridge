@@ -19,7 +19,7 @@
 //    verified ones rather than the ones the Windows ids suggest.
 import { getOutlookAccounts } from './accounts';
 import { replyOutlookEmail, sendOutlookEmail } from './send';
-import { deleteOutlookDrafts, listOutlookDrafts, sendAllDrafts } from './drafts';
+import { deleteOutlookDrafts, listOutlookDrafts, sendAllDrafts, sendDrafts } from './drafts';
 import { openOutlookEmail, readEmailBody, readInboxEmails, readSelectedEmail, searchInboxByFilter, } from './read';
 import { listInboxFolders, moveOutlookEmails } from './folders';
 import { deleteOutlookEmails, purgeDeletedItems } from './cleanup';
@@ -52,6 +52,7 @@ const bridge: OutlookBridge = {
     moveOutlookEmails,
     listOutlookDrafts,
     deleteOutlookDrafts,
+    sendDrafts,
     deleteOutlookEmails,
     purgeDeletedItems,
     saveEmailAttachment,

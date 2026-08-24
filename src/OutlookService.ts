@@ -148,6 +148,7 @@ export const {
     moveOutlookEmails,
     listOutlookDrafts,
     deleteOutlookDrafts,
+    sendDrafts,
     deleteOutlookEmails,
     purgeDeletedItems,
     saveEmailAttachment,

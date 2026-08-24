@@ -10,7 +10,7 @@
 // works here, which is what the macOS capability map is measured against.
 import { getOutlookAccounts } from './accounts';
 import { replyOutlookEmail, sendOutlookEmail } from './send';
-import { deleteOutlookDrafts, listOutlookDrafts, sendAllDrafts } from './drafts';
+import { deleteOutlookDrafts, listOutlookDrafts, sendAllDrafts, sendDrafts } from './drafts';
 import { openOutlookEmail, readEmailBody, readInboxEmails, readSelectedEmail, searchInboxByFilter, } from './read';
 import { listInboxFolders, moveOutlookEmails } from './folders';
 import { deleteOutlookEmails, purgeDeletedItems } from './cleanup';
@@ -43,6 +43,7 @@ const bridge: OutlookBridge = {
     moveOutlookEmails,
     listOutlookDrafts,
     deleteOutlookDrafts,
+    sendDrafts,
     deleteOutlookEmails,
     purgeDeletedItems,
     saveEmailAttachment,

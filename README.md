@@ -188,7 +188,8 @@ building block for "find the emails matching X" without knowing which subfolder 
 **Sending & replying** — `sendOutlookEmail`, `replyOutlookEmail` (answers the sender; pass `replyAll: true` to answer
 every recipient), `sendAllDrafts`.
 
-**Drafts** — `listOutlookDrafts`, `deleteOutlookDrafts`.
+**Drafts** — `listOutlookDrafts`, `deleteOutlookDrafts`, `sendDrafts` (sends a chosen subset by
+EntryID — the review-and-select alternative to `sendAllDrafts`'s account-wide sweep).
 
 **Attachments** — `saveEmailAttachment`, `saveEmailAttachmentDetailed`, `saveEmailAttachments`
 (the same, batched into one COM round trip for several attachments off one email). All take an optional `destDir`,

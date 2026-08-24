@@ -7,7 +7,7 @@
 // scan reaches by a longer route, not a weaker one.
 import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords, } from './run';
 import { accountLookupSnippet, macFolderPath, partitionMessageIds } from './scripts';
-import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult } from '../types';
+import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult, SendDraftsResult } from '../types';
 
 /** The Drafts folder path this account's drafts are reported under. */
 function draftsPath(emailAccount: string): string {
@@ -215,6 +215,80 @@ end tell`;
             ...records.slice(1).map(record => {
                 const parts = splitFields(record);
                 return { entryId: field(parts, 0), error: field(parts, 1) };
+            }),
+        ],
+    };
+}
+
+/**
+ * Send a chosen subset of `emailAccount`'s drafts by message id — e.g. after
+ * `listOutlookDrafts` and a user review pass — instead of `sendAllDrafts`'s
+ * account-wide sweep.
+ *
+ * Same ownership gate as `deleteOutlookDrafts`: every id must resolve to a
+ * message sitting in THIS account's Drafts folder before anything is sent. An
+ * id pointing at ordinary mail, or at another account's draft, is refused and
+ * reported rather than sent.
+ */
+export async function sendDrafts(
+    emailAccount: string,
+    entryIds: string[],
+): Promise<SendDraftsResult> {
+    if (entryIds.length === 0) return { sent: 0, failed: [] };
+    const { valid, invalid } = partitionMessageIds(entryIds);
+    if (valid.length === 0) {
+        return { sent: 0, failed: invalid.map(f => ({ entryId: f.entryId, subject: '', error: f.error })) };
+    }
+    const script = `tell application "Microsoft Outlook"
+${accountLookupSnippet(emailAccount)}
+    set draftsFolder to drafts of targetAcct
+    set draftsName to (name of draftsFolder) as string
+    set draftIds to id of every message of draftsFolder
+    set sentCount to 0
+    set out to ""
+    repeat with theId in {${valid.join(', ')}}
+        set subj to ""
+        try
+            set theMsg to missing value
+            try
+                set theMsg to message id theId
+            end try
+            if theMsg is missing value then error "no such item in this account's Drafts folder"
+            try
+                set subj to (subject of theMsg) as string
+            end try
+            -- Prove it is in THIS account's Drafts before sending: the folder it
+            -- currently sits in, and the account it is bound to, must both match.
+            set inFolder to ""
+            try
+                set inFolder to (name of (folder of theMsg)) as string
+            end try
+            if inFolder is not draftsName then error "item is not in this account's Drafts folder - refusing to send"
+            if draftIds does not contain (id of theMsg) then error "item is not in this account's Drafts folder - refusing to send"
+            set boundTo to ""
+            try
+                set boundTo to (email address of (account of theMsg)) as string
+            end try
+            if boundTo is not "" and boundTo is not (email address of targetAcct) then
+                error "draft is not bound to this account - refusing to send"
+            end if
+            send theMsg
+            set sentCount to sentCount + 1
+        on error errText
+            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
+        end try
+    end repeat
+    return ${asRow(['(sentCount as string)'])} & out
+end tell`;
+
+    const records = splitRecords(await runOsaScript(script, 300000));
+    return {
+        sent: intField(splitFields(records[0] || ''), 0),
+        failed: [
+            ...invalid.map(f => ({ entryId: f.entryId, subject: '', error: f.error })),
+            ...records.slice(1).map(record => {
+                const parts = splitFields(record);
+                return { entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2) };
             }),
         ],
     };
