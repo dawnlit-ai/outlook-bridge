@@ -1,9 +1,8 @@
 // Platform-neutral mail helpers.
 //
-// These used to live in PowerShellService, which meant the macOS reader imported
-// them from the Windows implementation — the wrong direction, and the reason a
-// folder string or a quote split could drift between platforms. Both services
-// import them from here instead.
+// These used to live in the Windows implementation, which meant the macOS reader
+// imported them from it — the wrong direction, and the reason a folder string or
+// a quote split could drift between platforms. Both import them from here now.
 import type { MailFolderRef } from './types';
 
 /**

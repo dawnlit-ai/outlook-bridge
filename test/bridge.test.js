@@ -8,8 +8,8 @@ const assert = require('node:assert/strict');
 
 const {createOutlookBridge, capabilities, supports} = require('../dist/OutlookService.js');
 const {configure, getConfig, withConfig} = require('../dist/runtime.js');
-const windows = require('../dist/PowerShellService.js');
-const mac = require('../dist/OutlookMacService.js');
+const windows = require('../dist/windows/index.js');
+const mac = require('../dist/mac/index.js');
 
 test('both platform capability maps describe exactly the same operations', () => {
     // The compile-time Record<BridgeCapability, boolean> already forces this, but
@@ -25,17 +25,20 @@ test('Windows is the reference implementation — everything supported', () => {
     assert.ok(Object.values(windows.capabilities).every(Boolean));
 });
 
-test('macOS reports the gaps rather than hiding them', () => {
-    assert.equal(mac.capabilities.readInboxEmails, true);
-    assert.equal(mac.capabilities.sendOutlookEmail, true);
-    assert.equal(mac.capabilities.replyOutlookEmail, false);
-    assert.equal(mac.capabilities.editEmailTemplate, false);
-    // The soft stubs: these return an empty list rather than throwing, so the
-    // return value alone can't distinguish "none" from "can't". This map is the
-    // only thing that can.
-    assert.equal(mac.capabilities.searchInboxByFilter, false);
-    assert.equal(mac.capabilities.collectBouncedRecipients, false);
-    assert.equal(mac.capabilities.readSentRecipientGroups, false);
+test('macOS now answers the whole contract too', () => {
+    // This map used to announce a half-ported surface. The gaps are closed, so
+    // what it pins now is that they stay closed: a capability flipped back to
+    // false is a regression, not a documentation change.
+    for (const [name, supported] of Object.entries(mac.capabilities)) {
+        assert.equal(supported, true, `${name} should be implemented on macOS`);
+    }
+});
+
+test('every operation in the contract is a function on both platforms', () => {
+    for (const name of Object.keys(windows.capabilities)) {
+        assert.equal(typeof windows[name], 'function', `windows.${name}`);
+        assert.equal(typeof mac[name], 'function', `mac.${name}`);
+    }
 });
 
 test('capabilities() and supports() agree with each other', () => {
@@ -126,7 +129,7 @@ test('an unsupported operation rejects rather than throwing synchronously', asyn
     // a try/catch and a .catch() around the same call.
     const bridge = createOutlookBridge();
     const unsupported = Object.entries(capabilities()).find(([, ok]) => !ok);
-    if (!unsupported) return; // Windows: nothing to assert.
+    if (!unsupported) return; // Windows and macOS: nothing to assert.
     const [name] = unsupported;
     const result = bridge[name]('someone@example.com', 'x');
     assert.ok(result instanceof Promise, `${name} returns a promise`);
@@ -136,23 +139,47 @@ test('an unsupported operation rejects rather than throwing synchronously', asyn
     });
 });
 
-test('a macOS gap rejects with NOT_IMPLEMENTED naming the operation', async (t) => {
+test('macOS rejects a Windows EntryID before it reaches Outlook', async (t) => {
     if (process.platform !== 'darwin') return t.skip('macOS only');
+    // The two id spaces are not interchangeable, and the reads that would fail
+    // on a stale id say so up front rather than as a confusing "not found".
     const bridge = createOutlookBridge();
-    await assert.rejects(
-        bridge.replyOutlookEmail({emailAccount: 'a@b.com', entryId: '1', htmlBody: '<p>x</p>'}),
-        (error) => {
-            assert.equal(error.code, 'NOT_IMPLEMENTED');
-            assert.equal(error.operation, 'replyOutlookEmail');
+    const windowsEntryId = '00000000AABBCCDD1122334455667788';
+    for (const call of [
+        () => bridge.readEmailBody(windowsEntryId),
+        () => bridge.openOutlookEmail(windowsEntryId),
+        () => bridge.replyOutlookEmail({
+            emailAccount: 'a@b.com',
+            entryId: windowsEntryId,
+            htmlBody: '<p>x</p>',
+        }),
+    ]) {
+        await assert.rejects(call(), (error) => {
+            assert.equal(error.code, 'INVALID_REQUEST');
+            assert.match(error.message, /Outlook for Mac message id/);
             return true;
-        },
-    );
+        });
+    }
 });
 
-test('editEmailTemplate is reachable on the instance and fails cleanly off Windows', async (t) => {
-    if (process.platform === 'win32') return t.skip('would open a real compose window');
+test('per-id operations report a bad id rather than discarding the batch', async (t) => {
+    if (process.platform !== 'darwin') return t.skip('macOS only');
+    // A batch is not all-or-nothing: an unusable id belongs in `failed` beside a
+    // genuine lookup miss, not as an exception that throws away the good ids.
+    const bridge = createOutlookBridge();
+    const result = await bridge.moveOutlookEmails('a@b.com', ['not-a-mac-id'], 'Archive');
+    assert.equal(result.moved, 0);
+    assert.equal(result.failed.length, 1);
+    assert.equal(result.failed[0].entryId, 'not-a-mac-id');
+});
+
+test('editEmailTemplate is part of the contract on both platforms', async (t) => {
     const bridge = createOutlookBridge();
     assert.equal(typeof bridge.editEmailTemplate, 'function');
+    assert.equal(capabilities().editEmailTemplate, process.platform === 'win32' || process.platform === 'darwin');
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+        return t.skip('would open a real compose window');
+    }
     await assert.rejects(bridge.editEmailTemplate('label', '<p>x</p>'), (error) => {
         assert.equal(error.code, 'UNSUPPORTED_PLATFORM');
         return true;

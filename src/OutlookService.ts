@@ -1,7 +1,7 @@
 // Platform dispatcher for Outlook automation: Windows drives Outlook via
-// PowerShell + COM, macOS via AppleScript (see each service for capability
-// notes — New Outlook for Mac supports composing but not mailbox reading).
-// Other platforms report no capabilities and every call rejects.
+// PowerShell + COM, macOS via AppleScript (see each implementation's index for
+// its platform notes — New Outlook for Mac supports composing but not mailbox
+// reading). Other platforms report no capabilities and every call rejects.
 //
 // Both implementations are pinned to `OutlookBridge` here rather than being
 // destructured straight off the module namespaces. That is the difference
@@ -9,19 +9,16 @@
 // `Promise<CleanUndeliverableResult | { matched: unknown[] }>` — a union of
 // whatever the two platforms happened to declare, which is what this used to
 // publish.
-import * as PowerShellService from './PowerShellService';
-import * as OutlookMacService from './OutlookMacService';
+import * as windowsBridge from './windows';
+import * as macBridge from './mac';
 import type { BridgeOptions, ResolvedConfig } from './runtime';
 import { getGlobalConfig, mergeOptions, withConfig } from './runtime';
 import type { BridgeCapability, CapabilityMap, OutlookBridge } from './types';
 
-const windows: OutlookBridge = PowerShellService;
-const mac: OutlookBridge = OutlookMacService;
-
-const impl: OutlookBridge = process.platform === 'darwin' ? mac : windows;
+const impl: OutlookBridge = process.platform === 'darwin' ? macBridge.bridge : windowsBridge.bridge;
 
 /** Every operation name, taken from the Windows map — the complete one. */
-const ALL_CAPABILITIES = Object.keys(PowerShellService.capabilities) as BridgeCapability[];
+const ALL_CAPABILITIES = Object.keys(windowsBridge.capabilities) as BridgeCapability[];
 
 function noCapabilities(): CapabilityMap {
     return Object.freeze(
@@ -34,12 +31,12 @@ function noCapabilities(): CapabilityMap {
  *
  * Resolved from the real `process.platform` rather than from which module the
  * dispatcher picked: off Windows and macOS entirely, `impl` is still the
- * PowerShell service (whose calls reject with UNSUPPORTED_PLATFORM), and
+ * PowerShell implementation (whose calls reject with UNSUPPORTED_PLATFORM), and
  * reporting its all-true map there would be a lie.
  */
 function platformCapabilities(): CapabilityMap {
-    if (process.platform === 'win32') return PowerShellService.capabilities;
-    if (process.platform === 'darwin') return OutlookMacService.capabilities;
+    if (process.platform === 'win32') return windowsBridge.capabilities;
+    if (process.platform === 'darwin') return macBridge.capabilities;
     return noCapabilities();
 }
 
@@ -71,12 +68,6 @@ export interface OutlookBridgeInstance extends OutlookBridge {
     supports(operation: BridgeCapability): boolean;
 
     /**
-     * Open a template in a real Outlook compose window and return the saved HTML.
-     * Windows only — `supports('editEmailTemplate')` before offering it.
-     */
-    editEmailTemplate(label: string, currentHtml: string): Promise<string>;
-
-    /**
      * A bridge like this one with some settings changed — the per-call escape
      * hatch, and how a cancellable call is made:
      * `bridge.withOptions({ signal }).searchInboxByFilter(...)`.
@@ -84,20 +75,17 @@ export interface OutlookBridgeInstance extends OutlookBridge {
     withOptions(options: BridgeOptions): OutlookBridgeInstance;
 }
 
-/** The methods to wrap — the contract, plus the Windows-only editor. */
-const BRIDGE_METHODS = ALL_CAPABILITIES;
-
 type AnyFn = (...args: never[]) => unknown;
 
 /**
  * Build a bridge whose every call runs with `config` in force.
  *
  * The wrapper is what makes per-instance settings work at all: the platform
- * services read their config from a module-level accessor, so the config has to
- * be established around the call rather than passed into it. `withConfig` puts
- * it in an AsyncLocalStorage that the whole async subtree inherits, which is why
- * two bridges with different timeouts can run concurrently without seeing each
- * other's.
+ * implementations read their config from a module-level accessor, so the config
+ * has to be established around the call rather than passed into it. `withConfig`
+ * puts it in an AsyncLocalStorage that the whole async subtree inherits, which is
+ * why two bridges with different timeouts can run concurrently without seeing
+ * each other's.
  */
 function build(config: ResolvedConfig): OutlookBridgeInstance {
     const instance = {
@@ -107,13 +95,8 @@ function build(config: ResolvedConfig): OutlookBridgeInstance {
         options: Object.freeze({...config}),
     } as OutlookBridgeInstance;
 
-    for (const name of BRIDGE_METHODS) {
-        // editEmailTemplate lives only on the Windows service; off Windows the
-        // property is absent, and calling it must fail the same way every other
-        // unsupported call does rather than as "not a function".
-        const source: Record<string, unknown> = name === 'editEmailTemplate'
-            ? (PowerShellService as unknown as Record<string, unknown>)
-            : (impl as unknown as Record<string, unknown>);
+    const source = impl as unknown as Record<string, unknown>;
+    for (const name of ALL_CAPABILITIES) {
         const fn = source[name] as AnyFn | undefined;
         (instance as unknown as Record<string, unknown>)[name] = (...args: never[]) => {
             if (typeof fn !== 'function') {
@@ -177,10 +160,5 @@ export const {
     readOutlookSignatureHtml,
     readTemplateEmails,
     saveTemplateEmail,
+    editEmailTemplate,
 } = impl;
-
-// Template editing drives a real Outlook compose window (COM inspector), which
-// only Windows supports — macOS gets no fallback here since it isn't Outlook
-// automation; callers needing an editor on macOS supply their own. Off Windows
-// it throws rather than being absent, so it stays out of OutlookBridge.
-export { editEmailTemplate } from './PowerShellService';

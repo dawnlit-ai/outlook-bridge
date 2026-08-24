@@ -1,0 +1,154 @@
+// The generated scripts themselves.
+//
+// Neither platform's scripts can be run in CI, but they can be checked, and the
+// two failure modes worth catching are exactly the ones a live run reports
+// badly. A PowerShell folder walk that emits the wrong shape only shows up as a
+// failed run against a real mailbox; an AppleScript with one bad dictionary term
+// fails the WHOLE script at compile time rather than at the offending line, so
+// on a Mac with Outlook installed every fragment is put through osacompile here
+// — no Outlook session, no mailbox touched, just terminology resolution.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {execFileSync} = require('node:child_process');
+
+const {mailScopeScript} = require('../dist/windows/index.js');
+const {mailFolderRef} = require('../dist/mail.js');
+const macScripts = require('../dist/mac/scripts.js');
+const macRun = require('../dist/mac/run.js');
+
+// ── The Windows folder-scope emitter ─────────────────────────────────────
+test('a bare well-known root needs no walk', () => {
+    const script = mailScopeScript(mailFolderRef('Sent Items'));
+    assert.match(script, /\$scope = \$store\.GetDefaultFolder\(5\)/);
+    assert.match(script, /\$scopeCreated = \$false/);
+    assert.doesNotMatch(script, /Find-FolderByName/, 'no recursive search is needed');
+});
+
+test('a path under a root walks its segments and names the caller string on failure', () => {
+    const script = mailScopeScript(mailFolderRef('Inbox\\Clients\\Acme'), 'Inbox\\Clients\\Acme');
+    assert.match(script, /\$segments = @\('Clients','Acme'\)/);
+    assert.match(script, /GetDefaultFolder\(6\)/);
+    assert.match(script, /Folder 'Inbox\\Clients\\Acme' not found/);
+});
+
+test('createMissing rebuilds the whole chain rather than only the leaf', () => {
+    const withCreate = mailScopeScript(mailFolderRef('Clients\\Acme\\2026'), 'Clients\\Acme\\2026', true);
+    // The creation branch is emitted either way and gated on a literal, so what
+    // distinguishes the two calls is the gate — not the presence of Folders.Add.
+    assert.match(withCreate, /if \(\$scope -eq \$null -and \$true\)/);
+    assert.match(withCreate, /foreach \(\$seg in \$segments\)[\s\S]*\$scope\.Folders\.Add\(\$seg\)/);
+    const without = mailScopeScript(mailFolderRef('Clients\\Acme\\2026'), 'Clients\\Acme\\2026', false);
+    assert.match(without, /if \(\$scope -eq \$null -and \$false\)/);
+});
+
+test('a folder name carrying an apostrophe stays inside its literal', () => {
+    // The single-quote doubling is the whole defence for caller text in a
+    // generated script; a name like "Bob's mail" must not close the literal.
+    const script = mailScopeScript(mailFolderRef("Inbox\\Bob's mail"), "Inbox\\Bob's mail");
+    assert.match(script, /'Bob''s mail'/);
+});
+
+// ── The macOS fragments, compiled ────────────────────────────────────────
+const OUTLOOK_APP = '/Applications/Microsoft Outlook.app';
+const canCompile = process.platform === 'darwin' && fs.existsSync(OUTLOOK_APP);
+
+/** Compile (never run) a script, returning osacompile's complaint or ''. */
+function compileError(source) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-osa-'));
+    const input = path.join(dir, 'fragment.applescript');
+    const output = path.join(dir, 'fragment.scpt');
+    fs.writeFileSync(input, source, 'utf-8');
+    try {
+        execFileSync('osacompile', ['-o', output, input], {stdio: 'pipe'});
+        return '';
+    } catch (error) {
+        return String(error.stderr || error.message);
+    } finally {
+        fs.rmSync(dir, {recursive: true, force: true});
+    }
+}
+
+/** Wrap a snippet in the tell block its terms are resolved against. */
+function inTell(body) {
+    return `${macRun.AS_HANDLERS}
+tell application "Microsoft Outlook"
+${body}
+end tell`;
+}
+
+test('the shared AppleScript handlers compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    assert.equal(compileError(macRun.AS_HANDLERS), '');
+    assert.equal(compileError(macScripts.FIND_FOLDER_HANDLER), '');
+    assert.equal(compileError(macScripts.LIST_ACCOUNTS_SNIPPET), '');
+});
+
+test('the account and message lookups compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    assert.equal(compileError(inTell(macScripts.accountLookupSnippet('someone@example.com'))), '');
+    assert.equal(compileError(inTell(macScripts.messageLookupSnippet('123'))), '');
+});
+
+test('the per-message field snippets compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    for (const snippet of [
+        macScripts.senderSnippet(),
+        macScripts.firstRecipientSnippet(),
+        macScripts.allRecipientsSnippet(),
+    ]) {
+        assert.equal(compileError(inTell(`    set theMsg to missing value\n${snippet}`)), '');
+    }
+});
+
+test('every well-known root term Outlook actually accepts', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    // A wrong term here is the expensive kind of mistake: it fails the whole
+    // script at compile time, so the error never names the folder that caused it.
+    for (const [rootId, term] of Object.entries(macScripts.MAC_ROOT_TERMS)) {
+        const source = inTell(`    set targetAcct to item 1 of imap accounts
+    set f to ${term} of targetAcct`);
+        assert.equal(compileError(source), '', `root ${rootId} (${term})`);
+    }
+});
+
+test('a folder scope compiles for every root, walked and created', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    for (const rootId of Object.keys(macScripts.MAC_ROOT_TERMS)) {
+        const ref = {rootId: Number(rootId), rootLabel: 'Root', segments: []};
+        assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(ref)}`)), '', `root ${rootId}`);
+    }
+    const nested = {rootId: 6, rootLabel: 'Inbox', segments: ['Clients', 'Acme']};
+    assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(nested, 'Inbox\\Clients\\Acme')}`)), '');
+    assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(nested, 'Inbox\\Clients\\Acme', true)}`)), '', 'createMissing variant');
+});
+
+test('an unsupported root is refused in TypeScript, not by a broken script', () => {
+    // olDefaultFolders ids with no Outlook-for-Mac term must fail as
+    // NOT_IMPLEMENTED naming the folder, rather than emitting a script that
+    // cannot compile.
+    assert.throws(
+        () => macScripts.mailScopeSnippet({rootId: 99, rootLabel: 'Journal', segments: []}, 'Journal'),
+        (error) => {
+            assert.equal(error.code, 'NOT_IMPLEMENTED');
+            assert.match(error.message, /Journal/);
+            return true;
+        },
+    );
+});
+
+test('an emitted row compiles and round-trips through the splitters', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    const row = macRun.asRow(['"alpha"', '"beta"', 'my joinList({"x", "y"}, ' + macRun.AS_LIST_SEP + ')']);
+    assert.equal(compileError(`${macRun.AS_HANDLERS}\nreturn ${row}`), '');
+});
+
+test('the framing survives a body that contains the separators', () => {
+    // sanitize() strips these inside AppleScript; this pins the TypeScript half
+    // of the contract — that a record splits into exactly the fields emitted.
+    const raw = ['one', 'two', ['a', 'b'].join(macRun.LIST_SEP)].join(macRun.FIELD_SEP) + macRun.RECORD_SEP;
+    const records = macRun.splitRecords(raw);
+    assert.equal(records.length, 1);
+    const fields = macRun.splitFields(records[0]);
+    assert.deepEqual(fields.slice(0, 2), ['one', 'two']);
+    assert.deepEqual(macRun.splitList(fields[2]), ['a', 'b']);
+});

@@ -1,13 +1,13 @@
 // The package's data contract, and the interface both platform implementations
 // answer to.
 //
-// These types used to live in PowerShellService, so macOS imported its own return
-// shapes from the Windows implementation and its unimplemented stubs re-declared
-// them structurally. The two drifted, and because OutlookService dispatches by
-// picking one module or the other, every drift surfaced in the PUBLIC types as a
-// union — `matched: UndeliverableEmail[] | unknown[]` and the like. Both services
-// now implement `OutlookBridge` from here, so a drift is a compile error in the
-// package rather than a union in the consumer's editor.
+// These types used to live in the Windows implementation, so macOS imported its
+// own return shapes from it and its stubs re-declared them structurally. The two
+// drifted, and because OutlookService dispatches by picking one implementation or
+// the other, every drift surfaced in the PUBLIC types as a union — `matched:
+// UndeliverableEmail[] | unknown[]` and the like. Both now implement
+// `OutlookBridge` from here, so a drift is a compile error in the package rather
+// than a union in the consumer's editor.
 
 // ── Sending ──────────────────────────────────────────────────────────────
 export interface SendEmailParams {
@@ -475,15 +475,13 @@ export interface OutlookBridge {
         htmlBody: string,
         folderName?: string,
     ): Promise<SaveTemplateResult>;
+
+    editEmailTemplate(label: string, currentHtml: string): Promise<string>;
 }
 
 // ── Capability discovery ─────────────────────────────────────────────────
-/**
- * Every operation whose availability can be asked about — the platform contract
- * plus `editEmailTemplate`, which sits outside `OutlookBridge` because only
- * Windows has it at all.
- */
-export type BridgeCapability = keyof OutlookBridge | 'editEmailTemplate';
+/** Every operation whose availability can be asked about. */
+export type BridgeCapability = keyof OutlookBridge;
 
 /**
  * Which operations actually work on this machine.

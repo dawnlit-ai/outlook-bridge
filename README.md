@@ -4,10 +4,11 @@ Drive a real, locally installed Outlook client from Node — read the inbox, sen
 with signatures and template emails, file and delete messages. No Graph API, no app registration, no cloud permissions:
 this automates the desktop client itself, the same way a person would.
 
-- **Windows** — via PowerShell + Outlook's COM object model. Everything is supported here.
-- **macOS** — via AppleScript. New Outlook for Mac can compose and send, but cannot read the mailbox the way classic
-  Outlook can; functions that need mailbox access fail loudly on that combination. About half the surface is not yet
-  ported — ask `capabilities()` rather than guessing (see [What works where](#what-works-where)).
+- **Windows** — via PowerShell + Outlook's COM object model.
+- **macOS** — via AppleScript. The whole surface is ported, with two differences no capability flag can express (see
+  [Platform differences](#platform-differences)). Requires **legacy** Outlook for Mac: New Outlook implements only a
+  slice of the AppleScript dictionary — accounts don't enumerate and the inbox reports 0 messages — so calls fail
+  loudly with `ACCOUNT_NOT_FOUND` there rather than quietly doing the wrong thing.
 - Any other platform — `capabilities()` reports everything false and every call rejects with `UNSUPPORTED_PLATFORM`.
 
 ## Install
@@ -40,9 +41,11 @@ await sendOutlookEmail({
 Every function is exposed under one signature regardless of platform — the dispatcher pins both implementations to the
 same `OutlookBridge` interface, so nothing here returns a per-platform union you have to narrow.
 
-## What works where
+## Platform differences
 
-Half the macOS surface isn't ported. Ask before you call, rather than finding out from an exception:
+Both platforms implement the whole contract, so `capabilities()` is all-true on Windows and on macOS. It still exists,
+and is still worth asking, because it answers for the machine you are actually on — on any other OS every entry is
+false and every call rejects:
 
 ```ts
 import { createOutlookBridge } from '@dawnlit/outlook-bridge';
@@ -51,16 +54,27 @@ const bridge = createOutlookBridge();
 
 if (bridge.supports('searchInboxByFilter')) { /* … */ }
 
-bridge.capabilities(); // { readInboxEmails: true, replyOutlookEmail: false, … }
+bridge.capabilities(); // { readInboxEmails: true, replyOutlookEmail: true, … }
 ```
-
-`false` covers two cases, and the difference matters. Most unsupported operations throw `NOT_IMPLEMENTED`. But
-`searchInboxByFilter`, `collectBouncedRecipients` and `readSentRecipientGroups` return an **empty list** on macOS —
-the same shape Windows produces when there genuinely is nothing — so on those three an empty result means "can't",
-not "none found". The map is the only way to tell them apart.
 
 The map is derived from `keyof OutlookBridge`, so a function added to the contract fails both platform maps at
 compile time rather than quietly defaulting to supported.
+
+Two things differ between the platforms that no flag can express, and code moving between them has to know both:
+
+**Ids are not portable.** Windows returns MAPI `EntryID` strings; macOS returns Outlook for Mac's small integer message
+ids (`"1263"`). Each platform rejects the other's with `INVALID_REQUEST` rather than failing later as a confusing "not
+found". `storeId` has no macOS equivalent: it is returned as `''` and accepted-and-ignored wherever it is a parameter.
+Don't persist an id from one platform and look it up on the other.
+
+**`searchInboxByFilter` filters in-process on macOS.** Windows hands `subjectLike` and the date window to Outlook's
+server-side `Items.Restrict`; AppleScript has no counterpart, so the macOS walk indexes each folder with bulk property
+reads and applies the same tests here. Same results, different cost — a `daysBack` of 0 over a large mailbox tree is
+considerably heavier on macOS.
+
+Two smaller notes: `replyOutlookEmail` reports `to` as the reply's resolved recipient addresses on macOS rather than the
+display-name string Windows reports; and `editEmailTemplate` on macOS files the edited draft when you answer Outlook's
+own "save this message?" prompt on close, where Windows asks for Ctrl+S.
 
 ## Configuration
 
@@ -134,7 +148,7 @@ try {
 | code | class | meaning |
 | --- | --- | --- |
 | `UNSUPPORTED_PLATFORM` | `UnsupportedPlatformError` | No Outlook automation exists on this OS. |
-| `NOT_IMPLEMENTED` | `NotImplementedError` | The platform could, but the port is not written. Carries `operation`. |
+| `NOT_IMPLEMENTED` | `NotImplementedError` | The platform could, but this corner isn't written. Carries `operation`. Now only reachable for a folder root macOS has no term for (Journal and the like). |
 | `ACCOUNT_NOT_FOUND` | `AccountNotFoundError` | No configured account matches. Carries `account`. |
 | `NOT_FOUND` | `NotFoundError` | A folder, template, signature or item did not resolve. Carries `kind`. |
 | `INVALID_REQUEST` | `InvalidRequestError` | The arguments cannot produce a call; nothing was attempted. |
@@ -175,8 +189,9 @@ created if absent. Without one, each call saves into a fresh private directory �
 gave them, so a shared folder means two emails carrying `invoice.pdf` overwrite each other.
 
 **Signatures & templates** — `listOutlookSignatures`, `readOutlookSignatureHtml`,
-`readTemplateEmails`, `saveTemplateEmail`, `editEmailTemplate` (Windows only — opens the template in a real
-Outlook compose window and returns the saved HTML; throws on other platforms).
+`readTemplateEmails`, `saveTemplateEmail`, `editEmailTemplate` (opens the template in a real Outlook compose window,
+waits for the user to close it, and returns the saved HTML — so it has no timeout by default; give it an
+`AbortSignal` if you need a way to give up).
 
 **Bounce handling** — `cleanUndeliverableEmails`, `collectBouncedRecipients`,
 `readSentRecipientGroups`.
@@ -207,12 +222,51 @@ npm test        # build, then node:test over the platform-independent parts
 ```
 
 The tests cover the parts that need no Outlook session — folder-string parsing, quote splitting, template
-composition, scratch-file handling, the error taxonomy and its run classifier, capability maps, and config scoping —
-so they run anywhere, with or without Outlook installed.
+composition, scratch-file handling, the error taxonomy and its run classifier, capability maps, config scoping, and
+the shape of the PowerShell the folder walk emits — so they run anywhere, with or without Outlook installed.
 
-What they cannot cover is the automation itself: driving a real Outlook client is the whole point of the package, and
-the COM and AppleScript paths need a machine with that client on it. Changes to a generated script are verified by
-running them against a real Outlook, not in CI.
+On a **Mac with Outlook installed** they additionally compile every AppleScript the macOS implementation generates.
+The runner is stubbed, each operation is driven with plausible arguments, and the captured scripts go through
+`osacompile` — which resolves terminology against the real dictionary without opening a session, sending anything or
+touching a message. This is worth the trouble because one bad dictionary term fails the WHOLE script at compile time
+rather than at the offending line, so a live failure never names the thing that caused it. Those tests skip
+automatically elsewhere.
+
+Two guards over the same captured scripts run **everywhere**, with no Outlook needed, because they cover the
+failures compiling cannot catch — both of which shipped once and only surfaced against a live mailbox: assigning to a
+reserved AppleScript word (`set rest to …` parses, then fails at run time), and reading a record field through a
+nested accessor (`address of (sender of m)` does not coerce, and inside a `try` that means a silently empty sender).
+
+What no test can cover is the automation itself: driving a real Outlook client is the whole point of the package, and
+behaviour against a live mailbox — that a `move` really filed the mail, that a reply threaded correctly — is verified
+by running it, not in CI.
+
+## Layout
+
+```
+src/
+  index.ts           public surface       shared/       platform-neutral pieces
+  OutlookService.ts  platform dispatcher    bounceRules      what counts as a bounce
+  types.ts           the data contract      replyBody        template/signature composition
+  errors.ts          the error taxonomy     attachmentMatch  filename matching + its error
+  runtime.ts         config, temp files     json             PowerShell JSON coercion
+  mail.ts            folder paths, quotes
+  outlookTemplateSections.ts
+
+  windows/           mac/          one module per feature area, plus:
+    run.ts             run.ts        the interpreter, escaping, framing
+    scripts.ts         scripts.ts    the fragments several features emit
+    index.ts           index.ts      the barrel + that platform's capability map
+```
+
+Each platform directory splits by feature — `send`, `read`, `drafts`, `folders`, `cleanup`, `bounces`,
+`attachments`, `signatures`, `templates` — because every operation is "build a script, run it, coerce the result",
+and the interesting half is the script, which is only readable beside the rules it encodes. A script fragment lives
+in `scripts.ts` once a second feature emits it; one used by a single operation stays next to that operation.
+
+`shared/` is what stops the two platforms from drifting: the bounce phrase lists, the reply-body composition, and the
+attachment-not-found wording each have exactly one definition. The Windows scripts *generate* their PowerShell arrays
+and that error sentence from those constants, so "what is a bounce" cannot come to mean two different things.
 
 ## License
 
