@@ -9,7 +9,7 @@ import {
     runPowerShellFile,
     scriptInput
 } from './run';
-import { accountScript, FIND_FOLDER_PS } from './scripts';
+import { accountScript, DELIVERY_STORE_PS, FIND_FOLDER_PS } from './scripts';
 import { parseObject, record, str, toArray } from '../shared/json';
 import { findTemplateMarkers } from '../outlookTemplateSections';
 import { clamp } from '../mail';
@@ -34,7 +34,8 @@ export async function readTemplateEmails(
     const cap = clamp(limit, 1, 50);
     const wanted = (subject || '').trim();
     const script = `${accountScript(emailAccount)}
-$root = $account.DeliveryStore.GetRootFolder()
+${DELIVERY_STORE_PS}
+$root = $store.GetRootFolder()
 ${FIND_FOLDER_PS}
 $folder = Find-FolderByName $root '${psEscape(folderName)}' 3
 if ($folder -eq $null) {
@@ -151,7 +152,8 @@ export async function saveTemplateEmail(
     requireWindows();
     const body = scriptInput('template-body', htmlBody);
     const script = `${accountScript(emailAccount)}
-$root = $account.DeliveryStore.GetRootFolder()
+${DELIVERY_STORE_PS}
+$root = $store.GetRootFolder()
 ${FIND_FOLDER_PS}
 $folder = Find-FolderByName $root '${psEscape(folderName)}' 3
 $folderCreated = $false

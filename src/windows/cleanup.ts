@@ -138,7 +138,8 @@ export async function purgeDeletedItems(
 ): Promise<PurgeDeletedItemsResult> {
     requireWindows();
     const script = `${accountScript(emailAccount)}
-$folder = $account.DeliveryStore.GetDefaultFolder(3)
+${DELIVERY_STORE_PS}
+$folder = $store.GetDefaultFolder(3)
 $cutoff = (Get-Date).AddDays(-${olderThanDays})
 $matched = 0
 $purged = 0

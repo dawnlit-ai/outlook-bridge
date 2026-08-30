@@ -13,9 +13,20 @@ import type { ReplyEmailParams, ReplyEmailResult, SendEmailParams } from '../typ
  * Direct assignment (`$mail.SendUsingAccount = $account`) is a silent no-op under
  * PowerShell's COM binding — the mail then goes out from whichever account
  * Outlook considers default, which is the failure this package exists to prevent.
+ *
+ * Refuses a mailbox that resolved to a store with no account. `accountScript`
+ * admits those deliberately so the reads can reach them, but SendUsingAccount
+ * takes an Account and there is no store to substitute: sending anyway would
+ * leave $account null and fall through to the default account — the exact silent
+ * wrong-mailbox send this function exists to stop. The guard lives here rather
+ * than at the two call sites so neither can be added without it.
+ *
+ * The wording avoids the phrase `classifyRunFailure` matches for
+ * AccountNotFoundError; the mailbox WAS found, it just cannot send.
  */
 function sendUsingAccount(variable: string): string {
-    return `[void]$${variable}.GetType().InvokeMember('SendUsingAccount', [Reflection.BindingFlags]::SetProperty, $null, $${variable}, @($account))`;
+    return `if ($account -eq $null) { throw "Mailbox '$target' is a secondary store with no sending account attached." }
+[void]$${variable}.GetType().InvokeMember('SendUsingAccount', [Reflection.BindingFlags]::SetProperty, $null, $${variable}, @($account))`;
 }
 
 /**

@@ -14,10 +14,46 @@ const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
 
-const {mailScopeScript} = require('../dist/windows/index.js');
+const {accountScript, mailScopeScript} = require('../dist/windows/index.js');
 const {mailFolderRef} = require('../dist/mail.js');
 const macScripts = require('../dist/mac/scripts.js');
 const macRun = require('../dist/mac/run.js');
+
+// -- The Windows mailbox resolver --------------------------------------
+
+// A mailbox open as a secondary store has no Account object. Resolving through
+// Accounts alone made every operation unreachable for it, so both routes are
+// tried and either one is enough.
+test('a mailbox resolves through Accounts or through Stores', () => {
+    const script = accountScript('team@example.com');
+    assert.match(script, /\$a\.SmtpAddress -ieq \$target/);
+    assert.match(script, /\$f\.Name -ieq \$target/);
+    assert.match(script, /if \(\$account -eq \$null -and \$storeFolder -eq \$null\)/);
+});
+
+// classifyRunFailure recognises this exact sentence to raise AccountNotFoundError.
+// Reword it and the most common operational mistake degrades to SCRIPT_FAILED.
+test('the not-found sentence stays the one the error classifier matches', () => {
+    assert.match(accountScript('nobody@example.com'), /throw "Account '\$target' not found"/);
+});
+
+// The address is matched before the account's display name, which is what keeps
+// the named-store route selecting the folders it selected before on a profile
+// where the two differ.
+test('the target address is matched before the account display name', () => {
+    const script = accountScript('team@example.com');
+    const byTarget = script.indexOf('$f.Name -ieq $target');
+    const byDisplay = script.indexOf('$f.Name -ieq $account.DisplayName');
+    assert.ok(byTarget > -1 && byDisplay > -1);
+    assert.ok(byTarget < byDisplay, 'target match must come first');
+});
+
+// Caller text goes into a single-quoted PowerShell literal; a quote in it would
+// otherwise close the string and run whatever followed.
+test('the target address is escaped into its literal', () => {
+    assert.match(accountScript("o'brien@example.com"), /\$target = 'o''brien@example\.com'/);
+});
+
 
 // ── The Windows folder-scope emitter ─────────────────────────────────────
 test('a bare well-known root needs no walk', () => {

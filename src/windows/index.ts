@@ -79,7 +79,7 @@ export * from './templates';
 // The folder-scope emitter, exported so the generated script can be checked
 // without an Outlook session — a syntax error in it would otherwise only ever
 // surface as a failed live run.
-export { mailScopeScript } from './scripts';
+export { accountScript, mailScopeScript } from './scripts';
 
 /**
  * Windows drives the full COM object model, so every operation is available —

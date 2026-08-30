@@ -13,7 +13,8 @@ export async function listInboxFolders(
     if (process.platform !== 'win32') return [];
     const depth = clamp(maxDepth, 1, 4);
     const script = `${accountScript(emailAccount)}
-$inbox = $account.DeliveryStore.GetDefaultFolder(6)
+${DELIVERY_STORE_PS}
+$inbox = $store.GetDefaultFolder(6)
 function Walk-Folders($folder, $level) {
     foreach ($f in $folder.Folders) {
         [PSCustomObject]@{

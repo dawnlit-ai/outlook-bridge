@@ -1,6 +1,6 @@
 // Drafts: which ones belong to an account, and sending, listing or deleting them.
 import { psList, requireWindows, runPowerShell } from './run';
-import { accountScript } from './scripts';
+import { accountScript, DELIVERY_STORE_PS } from './scripts';
 import { num, parseObject, record, str, strList, toArray } from '../shared/json';
 import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult, SendDraftsResult } from '../types';
 
@@ -31,7 +31,7 @@ $scan = @()
 $seen = @{}
 
 $homeDrafts = $null
-try { $homeDrafts = $account.DeliveryStore.GetDefaultFolder(16) } catch {}  # olFolderDrafts
+try { $homeDrafts = $store.GetDefaultFolder(16) } catch {}  # olFolderDrafts
 if ($homeDrafts -ne $null) {
     $seen["$($homeDrafts.StoreID)|$($homeDrafts.EntryID)"] = $true
     $scan += [pscustomobject]@{ folder = $homeDrafts; includeNull = $true }
@@ -59,7 +59,7 @@ function Test-DraftMatches($item, $includeNull) {
 
 /** Session, account and the drafts scan rule — the prelude all three share. */
 function draftsScript(emailAccount: string): string {
-    return accountScript(emailAccount) + DRAFTS_SCAN_PS;
+    return accountScript(emailAccount) + DELIVERY_STORE_PS + DRAFTS_SCAN_PS;
 }
 
 /**

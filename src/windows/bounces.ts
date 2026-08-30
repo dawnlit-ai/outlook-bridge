@@ -231,7 +231,8 @@ export async function readSentRecipientGroups(
     const days = clamp(daysBack, 1, 365);
     const cap = clamp(limit, 1, 10000);
     const script = `${accountScript(emailAccount)}
-$sent = $account.DeliveryStore.GetDefaultFolder(5)  # olFolderSentMail
+${DELIVERY_STORE_PS}
+$sent = $store.GetDefaultFolder(5)  # olFolderSentMail
 $cutoff = (Get-Date).AddDays(-${days}).ToString('MM/dd/yyyy HH:mm')
 $items = $sent.Items.Restrict("[SentOn] >= '$cutoff'")
 $items.Sort('[SentOn]', $true)

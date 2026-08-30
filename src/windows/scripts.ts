@@ -21,13 +21,25 @@ $ns.Logon()
 `;
 
 /**
- * Session plus the account whose SMTP address matches; binds `$target` and
- * `$account`.
+ * Session plus the mailbox the address names; binds `$target`, `$account` and
+ * `$storeFolder`.
+ *
+ * An address can name a mailbox two different ways, and only one of them is an
+ * Account. A mailbox opened as a secondary store has no Account object, so
+ * resolving through Accounts alone closes every operation to it — including the
+ * reads, which never needed an Account in the first place. Both are resolved
+ * here and EITHER is enough: `$account` is null for a store-only mailbox, and
+ * the operations that genuinely require an identity to act as (sending) check
+ * for it themselves rather than being denied the mailbox up front.
  *
  * Fails rather than falling back to the default account. A bad address must
  * never silently send from — or read — the wrong mailbox, and the thrown
  * sentence is the one `classifyRunFailure` recognises to raise
  * `AccountNotFoundError`, so the wording is load-bearing.
+ *
+ * The store is matched on the target address BEFORE the account's display name,
+ * which is what keeps the named-store route (see `namedStoreScript`) selecting
+ * the folders it selected before on a profile where the two differ.
  */
 export function accountScript(emailAccount: string): string {
     return `${PS_PRELUDE}
@@ -36,32 +48,48 @@ $account = $null
 foreach ($a in $ns.Accounts) {
     if ($a.SmtpAddress -ieq $target) { $account = $a; break }
 }
-if ($account -eq $null) { throw "Account '$target' not found" }
+$storeFolder = $null
+foreach ($f in $ns.Folders) {
+    if ($f.Name -ieq $target) { $storeFolder = $f; break }
+}
+if ($storeFolder -eq $null -and $account -ne $null) {
+    foreach ($f in $ns.Folders) {
+        if ($f.Name -ieq $account.DisplayName) { $storeFolder = $f; break }
+    }
+}
+if ($account -eq $null -and $storeFolder -eq $null) { throw "Account '$target' not found" }
 `;
 }
 
-/** The account's own delivery store, as `$store`. Requires `accountScript`. */
+/**
+ * The mailbox's own store, as `$store`. Requires `accountScript`.
+ *
+ * Falls back to the resolved store folder because a store-only mailbox has no
+ * account to read a DeliveryStore off — reaching through `$account` directly is
+ * what makes an operation fail on exactly those mailboxes.
+ */
 export const DELIVERY_STORE_PS = `
-$store = $account.DeliveryStore
+$store = if ($account -ne $null) { $account.DeliveryStore } else { $storeFolder.Store }
 $storeId = $store.StoreID
 `;
 
 /**
- * The account's store reached through the namespace's top-level folders, as
- * `$storeFolder` / `$store`.
+ * The store `accountScript` resolved through the namespace's top-level folders,
+ * as `$store`.
  *
  * Kept alongside `DELIVERY_STORE_PS` rather than replaced by it: the reading
  * operations resolve the store this way, and on a profile where a mailbox is
  * open under a display name that differs from the delivery store's, the two do
  * not select the same folders. Changing which one a reader uses changes what it
  * returns, so each keeps the route it was verified against.
+ *
+ * The folder search itself now lives in `accountScript`, which has to attempt it
+ * anyway to resolve a mailbox that has no account. This throws when it found
+ * nothing, which is the case where the address named an account whose store is
+ * not open in this profile.
  */
 export function namedStoreScript(emailAccount: string): string {
     return `
-$storeFolder = $null
-foreach ($f in $ns.Folders) {
-    if ($f.Name -ieq $account.DisplayName) { $storeFolder = $f; break }
-}
 if ($storeFolder -eq $null) { throw "Store folder not found for account '${psEscape(emailAccount)}'" }
 $store = $storeFolder.Store
 $storeId = $store.StoreID
