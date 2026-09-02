@@ -375,9 +375,30 @@ ConvertTo-Json $result -Depth 3
     };
 }
 
-/** Open an email in Outlook by its EntryID. */
-export async function openOutlookEmail(entryId: string): Promise<void> {
+/**
+ * Open an email in Outlook by its EntryID.
+ *
+ * `storeId` disambiguates across mailboxes — without one, `GetItemFromID` only
+ * looks in the default store, so an id from a shared or secondary mailbox
+ * simply isn't found. It's tried first and the bare lookup is the fallback, so
+ * a caller holding a stale StoreID (or none) still resolves whatever it can.
+ *
+ * EntryIDs are rewritten when an item MOVES between folders, so an id recorded
+ * before its mail was filed can resolve to nothing — or, worse, to a different
+ * message. The caller is the one that knows what the email was supposed to be;
+ * this throws a plain not-found rather than guessing.
+ */
+export async function openOutlookEmail(entryId: string, storeId?: string): Promise<void> {
     requireWindows();
-    const script = `(New-Object -ComObject Outlook.Application).GetNamespace('mapi').GetItemFromID('${psEscape(entryId)}').Display()`;
+    const script = `
+$outlook = New-Object -ComObject Outlook.Application
+$ns = $outlook.GetNamespace('mapi')
+$ns.Logon()
+$item = $null
+${storeId ? `try { ${getItemScript(entryId, storeId)} } catch { $item = $null }` : ''}
+if ($item -eq $null) { try { ${getItemScript(entryId)} } catch { $item = $null } }
+if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
+$item.Display()
+`;
     await runPowerShell(script);
 }

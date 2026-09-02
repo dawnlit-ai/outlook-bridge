@@ -400,7 +400,7 @@ export interface OutlookBridge {
         includeQuoted?: boolean,
     ): Promise<EmailBodyResult>;
 
-    openOutlookEmail(entryId: string): Promise<void>;
+    openOutlookEmail(entryId: string, storeId?: string): Promise<void>;
 
     listInboxFolders(emailAccount: string, maxDepth?: number): Promise<InboxFolderInfo[]>;
 

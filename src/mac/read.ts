@@ -422,8 +422,10 @@ end tell`;
     };
 }
 
-/** Open an email in Outlook by its message id, and bring Outlook forward. */
-export async function openOutlookEmail(entryId: string): Promise<void> {
+/** Open an email in Outlook by its message id, and bring Outlook forward.
+ *  `_storeId` is accepted for parity with Windows and ignored — macOS
+ *  AppleScript has no StoreID (see `readEmailBody`). */
+export async function openOutlookEmail(entryId: string, _storeId?: string): Promise<void> {
     const id = macMessageId(entryId);
     const script = `
 tell application "Microsoft Outlook"
