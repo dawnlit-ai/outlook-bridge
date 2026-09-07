@@ -223,9 +223,11 @@ export interface InboxEmail {
 }
 
 export interface InboxSearchFilter {
-    /** SQL-LIKE fragment for the [Subject] clause in Items.Restrict — the
-     *  server-side prefilter that keeps a full-mailbox walk cheap, e.g.
-     *  '*invoice*'. Omit to restrict on date only. */
+    /** Glob-style subject pattern — `*` and `?` wildcards, e.g. '*invoice*'.
+     *  Handed to Items.Restrict as the server-side prefilter that keeps a
+     *  full-mailbox walk cheap, and re-checked against every subject that
+     *  comes back, so it filters the result set on stores that won't run the
+     *  query as well. Omit to restrict on date only. */
     subjectLike?: string;
     /** Regex re-checked client-side against each survivor's trimmed subject,
      *  since Restrict's `like` is a blunt substring match. A normal JS
@@ -509,7 +511,7 @@ export type BridgeCapability = keyof OutlookBridge;
  * Which operations actually work on this machine.
  *
  * The alternative was matching on an error message: a consumer had no way to
- * learn a gap existed except by calling into it. A UI can now grey out the
+ * learn a gap existed except by calling into it. A UI can now gray out the
  * buttons it can't back rather than discovering the gap when the user clicks one.
  *
  * Windows and macOS both answer the whole contract today, so every flag is

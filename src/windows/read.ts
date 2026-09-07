@@ -201,7 +201,10 @@ ConvertTo-Json $out -Depth 3 -Compress
  * daily batch run wants, since a subject filter alone walks the whole Inbox
  * tree and returns every match ever received. 0 keeps that unbounded
  * behavior, and is only sane paired with `filter.subjectLike` so Restrict can
- * narrow the set server-side before anything crosses COM.
+ * narrow the set server-side before anything crosses COM. Where the store
+ * won't run that subject query — an IMAP mailbox accepts it and then matches
+ * nothing — an unbounded scan falls back to the last 60 days rather than
+ * walking every item the mailbox has ever held.
  */
 export async function searchInboxByFilter(
     emailAccount: string,
@@ -210,20 +213,16 @@ export async function searchInboxByFilter(
 ): Promise<InboxSearchMatch[]> {
     if (process.platform !== 'win32') return [];
     const subjectLike = filter.subjectLike ? psEscape(filter.subjectLike) : '';
+    // DASL's `like` takes SQL wildcards, so the glob the filter is written in is
+    // translated for the server-side prefilter. The client-side re-check keeps
+    // the glob form, which is what PowerShell's own -like reads.
+    const subjectDasl = filter.subjectLike
+        ? psEscape(filter.subjectLike.replace(/\*/g, '%').replace(/\?/g, '_'))
+        : '';
     const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
-    // The subject filter reaches PowerShell as a single-quoted literal assigned to
-    // $subjLike, and the Restrict query is CONCATENATED from it. Interpolating it
-    // into the double-quoted query string directly — which is what the query needs
-    // to be, so `$cutoff` expands — would let a caller's `$(...)` execute, and
-    // would break the query outright on an apostrophe.
-    const boundedRestrict = subjectLike
-        ? `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff' AND [Subject] like '" + $subjLike + "'")`
-        : `$folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")`;
-    const unboundedRestrict = subjectLike
-        ? `$folder.Items.Restrict("[Subject] like '" + $subjLike + "'")`
-        : `$folder.Items`;
     const script = `
 $subjLike = '${subjectLike}'
+$subjDasl = '${subjectDasl}'
 ${accountScript(emailAccount)}
 ${namedStoreScript(emailAccount)}
 $inbox = $store.GetDefaultFolder(6)
@@ -235,31 +234,42 @@ while ($fi -lt $folders.Count) {
     try { foreach ($sub in $folders[$fi].Folders) { [void]$folders.Add($sub) } } catch {}
     $fi++
 }
+# The subject prefilter is a DASL property query rather than Outlook's Jet
+# syntax: "[Subject] like '...'" is rejected outright by some stores — an IMAP
+# mailbox answers "Condition is not valid" — while DASL is accepted wherever
+# Restrict is. The two syntaxes cannot be mixed in one filter string, so the
+# date clause stays Jet and the subject one is applied as a second Restrict on
+# top of it. The pattern is CONCATENATED into the query, never interpolated:
+# interpolating would let a caller's $(...) run, and would break the query
+# outright on an apostrophe.
+$subjQuery = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' like ' + [char]39 + $subjDasl + [char]39
 $daysBack = ${daysBack}
 foreach ($folder in $folders) {
     if ($daysBack -gt 0) {
-        # Bounded scan. Filter on BOTH date and subject in the Restrict so Outlook does the
-        # work server-side — a date-only restrict hands back every item in the window for
-        # every folder in the tree, which is thousands of COM round-trips on a busy mailbox.
-        # Any stricter subject regex still runs on whatever survives.
         $cutoff = (Get-Date).AddDays(-$daysBack).ToString('MM/dd/yyyy HH:mm')
-        try {
-            $filtered = ${boundedRestrict}
-            $fCount = $filtered.Count
-        } catch {
-            # Some stores reject the compound query; fall back to date-only.
-            $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
-            $fCount = $filtered.Count
-        }
+        $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
     } else {
-        $filtered = ${unboundedRestrict}
-        $fCount = $filtered.Count
-        ${subjectLike ? `if ($fCount -eq 0) {
-            $cutoff = (Get-Date).AddDays(-60).ToString('MM/dd/yyyy HH:mm')
-            $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
-            $fCount = $filtered.Count
-        }` : ''}
+        $filtered = $folder.Items
     }
+${subjectLike ? `    # Narrowing on the subject server-side is what keeps this cheap — a date-only
+    # restrict hands back every item in the window for every folder in the tree,
+    # which is thousands of COM round-trips on a busy mailbox. It is only an
+    # optimization though: every subject is re-checked below, so a store that
+    # cannot run the query returns the same answer, slower.
+    $narrowed = $null
+    try {
+        $candidate = $filtered.Restrict($subjQuery)
+        if ($candidate.Count -gt 0) { $narrowed = $candidate }
+    } catch {}
+    if ($narrowed -ne $null) {
+        $filtered = $narrowed
+    } elseif ($daysBack -le 0) {
+        # Nothing narrowed it and nothing bounds it, which would walk every item
+        # the folder has ever held; cap the sweep at a window instead.
+        $cutoff = (Get-Date).AddDays(-60).ToString('MM/dd/yyyy HH:mm')
+        $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
+    }
+` : ''}    $fCount = $filtered.Count
     for ($i = 1; $i -le $fCount; $i++) {
         $item = $filtered.Item($i)
         if ($seen.ContainsKey($item.EntryID)) { continue }
@@ -267,6 +277,7 @@ foreach ($folder in $folders) {
         $subject = $item.Subject
         if (-not $subject) { continue }
         $subject = $subject.Trim()
+        ${subjectLike ? `if ($subject -notlike $subjLike) { continue }` : ''}
         ${subjectPatternSrc ? `if ($subject -notmatch '${subjectPatternSrc}') { continue }` : ''}
         ${filter.excludeReplies ? `if ($subject -imatch '^(re|fw[d]?)\\s*:') { continue }` : ''}
         ${filter.requireAttachment ? `if ($item.Attachments.Count -eq 0) { continue }` : ''}
