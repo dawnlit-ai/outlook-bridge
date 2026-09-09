@@ -21,11 +21,18 @@ import type { ReplyEmailParams, ReplyEmailResult, SendEmailParams } from '../typ
  * wrong-mailbox send this function exists to stop. The guard lives here rather
  * than at the two call sites so neither can be added without it.
  *
+ * The usual cause is not a shared mailbox but a stale session: `Session.Accounts`
+ * is built when Outlook starts, so an account added to the profile afterwards
+ * has its store mounted and syncing - reads work - while no Account object ever
+ * appears, until Outlook is restarted. The message says so, because reading it
+ * as a permanent property of the mailbox sends the reader hunting for a
+ * delegation problem that is not there.
+ *
  * The wording avoids the phrase `classifyRunFailure` matches for
  * AccountNotFoundError; the mailbox WAS found, it just cannot send.
  */
 function sendUsingAccount(variable: string): string {
-    return `if ($account -eq $null) { throw "Mailbox '$target' is a secondary store with no sending account attached." }
+    return `if ($account -eq $null) { throw "Mailbox '$target' has no sending account in this Outlook session. If it was added to the profile after Outlook started, restart Outlook and try again." }
 [void]$${variable}.GetType().InvokeMember('SendUsingAccount', [Reflection.BindingFlags]::SetProperty, $null, $${variable}, @($account))`;
 }
 
