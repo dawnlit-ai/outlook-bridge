@@ -37,7 +37,7 @@ import {
     folderLeafName,
     isOutgoingRoot,
     mailFolderRef,
-    replyPrefixSource,
+    REPLY_PREFIX,
     splitQuotedOriginal,
 } from '../mail';
 import { NotFoundError } from '../errors';
@@ -373,8 +373,6 @@ return my scanFolder(rootInbox, rootName, cutoff, true, skipIds, skipNames, only
     const patternRe = filter.subjectPattern
         ? new RegExp(filter.subjectPattern.source, 'i')
         : null;
-    const replyRe = new RegExp(replyPrefixSource(filter.extraReplyPrefixes), 'i');
-
     const candidates = splitRecords(await runOsaScript(indexScript, 300000))
         .map(record => {
             const parts = splitFields(record);
@@ -390,7 +388,7 @@ return my scanFolder(rootInbox, rootName, cutoff, true, skipIds, skipNames, only
             if (!candidate.subject) return false;
             if (likeRe && !likeRe.test(candidate.subject)) return false;
             if (patternRe && !patternRe.test(candidate.subject)) return false;
-            if (filter.excludeReplies && replyRe.test(candidate.subject)) return false;
+            if (filter.excludeReplies && REPLY_PREFIX.test(candidate.subject)) return false;
             return true;
         });
     if (candidates.length === 0) return [];

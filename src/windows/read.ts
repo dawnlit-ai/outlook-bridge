@@ -8,7 +8,7 @@ import {
     isOutgoingRoot,
     mailFolderRef,
     NON_INCOMING_ROOTS,
-    replyPrefixSource,
+    REPLY_PREFIX_SOURCE,
     splitQuotedOriginal,
     WELL_KNOWN_FOLDERS,
 } from '../mail';
@@ -235,11 +235,7 @@ export async function searchInboxByFilter(
         ? psEscape(filter.subjectLike.replace(/\*/g, '%').replace(/\?/g, '_'))
         : '';
     const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
-    // Escaped for the single-quoted PowerShell literal it lands in, since an
-    // operator-supplied prefix can carry an apostrophe where the built-ins cannot.
-    const replyPattern = filter.excludeReplies
-        ? psEscape(replyPrefixSource(filter.extraReplyPrefixes))
-        : '';
+    const replyPattern = filter.excludeReplies ? REPLY_PREFIX_SOURCE : '';
     const clean = (list?: string[]) => (list ?? []).map(name => name.trim()).filter(Boolean);
     const excludeFolders = clean(filter.excludeFolders);
     const includeFolders = clean(filter.includeFolders);

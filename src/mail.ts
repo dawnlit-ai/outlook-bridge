@@ -116,48 +116,18 @@ export const DEFAULT_SCAN_DAYS = 60;
  * The colon may be the full-width one (U+FF1A) a CJK input method produces, and
  * Outlook's reply counter (`RE[2]:`) sits between the prefix and the colon.
  */
-const BUILT_IN_REPLY_PREFIXES: readonly string[] = [
+const REPLY_PREFIXES: readonly string[] = [
     're', 'fwd?', 'aw', 'wg', 'sv', 'vs', 'vb', 'tr', 'res', 'rv', 'enc', 'odp',
     '\\u56DE\\u590D', '\\u56DE\\u8986', '\\u7B54\\u590D', '\\u7B54\\u8986',
     '\\u8F6C\\u53D1', '\\u8F49\\u767C', '\\u8FD4\\u4FE1', '\\u8EE2\\u9001',
     '\\uB2F5\\uC7A5', '\\uC804\\uB2EC',
 ];
 
-/**
- * One operator-supplied prefix as pattern source: regex metacharacters escaped
- * so it matches as the literal text they typed, and every non-ASCII character
- * spelled \uXXXX so the emitted PowerShell stays pure ASCII whatever the
- * console codepage happens to be.
- */
-function literalPrefixSource(text: string): string {
-    let out = '';
-    for (let i = 0; i < text.length; i++) {
-        const code = text.charCodeAt(i);
-        if (code < 0x20 || code > 0x7e) {
-            out += '\\u' + code.toString(16).toUpperCase().padStart(4, '0');
-        } else if ('\\^$.|?*+()[]{}'.includes(text[i])) {
-            out += '\\' + text[i];
-        } else {
-            out += text[i];
-        }
-    }
-    return out;
-}
-
-/**
- * The reply/forward prefix pattern, optionally widened with prefixes of the
- * caller's own — a house convention the built-in list has no way to know, like
- * an 'ACK:' an operator's own team puts on acknowledgements.
- *
- * Caller prefixes are matched as literal text sitting where RE: would sit: the
- * same optional reply counter and the same half- or full-width colon still have
- * to follow, so adding one cannot accidentally match mid-subject.
- */
-export function replyPrefixSource(extra: readonly string[] = []): string {
-    const own = extra.map(prefix => prefix.trim()).filter(Boolean).map(literalPrefixSource);
-    const alternatives = [...BUILT_IN_REPLY_PREFIXES, ...own].join('|');
-    return '^\\s*(?:' + alternatives + ')\\s*(?:\\[\\d+\\])?\\s*[:\\uFF1A]';
-}
+/** The prefixes as one pattern source: a prefix, Outlook's optional reply
+ *  counter, then a half- or full-width colon. */
+export const REPLY_PREFIX_SOURCE =
+    '^\\s*(?:' + REPLY_PREFIXES.join('|') + ')\\s*(?:\\[\\d+\\])?\\s*[:\\uFF1A]';
+export const REPLY_PREFIX = new RegExp(REPLY_PREFIX_SOURCE, 'i');
 
 /**
  * The leaf name of an exclude-list entry, for the platforms that can only match
@@ -167,10 +137,6 @@ export function replyPrefixSource(extra: readonly string[] = []): string {
 export function folderLeafName(entry: string): string {
     return entry.trim().split(/[\\\\/]/).filter(Boolean).pop() ?? '';
 }
-
-/** The built-in prefixes as one pattern source. */
-export const REPLY_PREFIX_SOURCE = replyPrefixSource();
-export const REPLY_PREFIX = new RegExp(REPLY_PREFIX_SOURCE, 'i');
 
 /**
  * Resolve a caller's folder string to a well-known root plus the segments below it.

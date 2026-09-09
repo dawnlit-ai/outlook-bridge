@@ -236,7 +236,7 @@ export interface InboxSearchFilter {
      *  there by default regardless of the JS pattern's `i` flag. */
     subjectPattern?: RegExp;
     /** Drop subjects carrying a reply or forward prefix — RE:/FW:/Fwd: and the
-     *  CJK equivalents, widened by `extraReplyPrefixes`. */
+     *  CJK equivalents. */
     excludeReplies?: boolean;
     /** Only return items carrying at least one attachment. */
     requireAttachment?: boolean;
@@ -267,11 +267,6 @@ export interface InboxSearchFilter {
      *  under it can be reached, let alone named back in. Exclusion therefore
      *  beats inclusion wherever the two overlap. */
     includeFolders?: string[];
-    /** Reply/forward subject prefixes to honour on top of the built-in list —
-     *  a house convention like 'ACK'. Matched as literal text in the position
-     *  RE: would occupy, so one cannot match mid-subject. Only consulted when
-     *  `excludeReplies` is set. */
-    extraReplyPrefixes?: string[];
 }
 
 export interface InboxSearchMatch {
