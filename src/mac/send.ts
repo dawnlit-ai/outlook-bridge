@@ -1,6 +1,6 @@
 // Composing outgoing mail on macOS: a new email, and a reply to an existing one.
 import { asEscape, field, runOsaScript, splitFields } from './run';
-import { accountLookupSnippet, macMessageId, messageLookupSnippet } from './scripts';
+import { accountLookupSnippet, macMessageId, messageLookupSnippet, resolveMacAccount, } from './scripts';
 import { composeReplyHtml } from '../shared/replyBody';
 import { listOutlookSignatures, readOutlookSignatureHtml } from './signatures';
 import { readTemplateEmails } from './templates';
@@ -55,10 +55,11 @@ export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
         ? `    make new attachment at newMsg with properties {file:POSIX file "${asEscape(params.attachmentPath)}"}`
         : '';
 
+    const acct = await resolveMacAccount(params.emailAccount);
     const { prelude, action } = composeAction('newMsg', params.sendImmediately, params.openDraftWindow);
     const script = `
 tell application "Microsoft Outlook"
-${accountLookupSnippet(params.emailAccount)}
+${accountLookupSnippet(acct, true)}
 ${prelude}
     set newMsg to make new outgoing message with properties {subject:"${asEscape(params.subject)}", content:"${asEscape(params.htmlBody)}"}
 ${recipientLines}
@@ -92,10 +93,11 @@ export async function replyOutlookEmail(params: ReplyEmailParams): Promise<Reply
         readOutlookSignatureHtml,
         listOutlookSignatures,
     });
+    const acct = await resolveMacAccount(params.emailAccount);
     const { prelude, action } = composeAction('theReply', params.sendImmediately, params.openDraftWindow);
     const replyAll = params.replyAll ? 'reply to all true' : 'without reply to all';
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(params.emailAccount)}
+${accountLookupSnippet(acct, true)}
 ${messageLookupSnippet(id)}
     set repliedTo to ""
     try

@@ -10,7 +10,14 @@ import {
     splitList,
     splitRecords,
 } from './run';
-import { accountLookupSnippet, macFolderPath, mailScopeSnippet, partitionMessageIds, } from './scripts';
+import {
+    accountLookupSnippet,
+    macFolderPath,
+    mailScopeSnippet,
+    partitionMessageIds,
+    resolveMacAccount,
+    rootFolderSnippet,
+} from './scripts';
 import { clamp, mailFolderRef } from '../mail';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
 
@@ -27,6 +34,7 @@ export async function listInboxFolders(
     maxDepth = 2,
 ): Promise<InboxFolderInfo[]> {
     const depth = clamp(maxDepth, 1, 4);
+    const acct = await resolveMacAccount(emailAccount);
     const script = `on walkFolders(theFolder, level, maxLevel, prefix)
     set out to ""
     tell application "Microsoft Outlook"
@@ -53,8 +61,8 @@ export async function listInboxFolders(
 end walkFolders
 
 tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set inb to inbox of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'inbox', 'inb')}
 end tell
 return my walkFolders(inb, 1, ${depth}, "")`;
 
@@ -102,9 +110,10 @@ export async function moveOutlookEmails(
     if (valid.length === 0) {
         return { folderPath, folderCreated: false, moved: 0, failed: invalid };
     }
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-${mailScopeSnippet(ref, folderName, createIfMissing)}
+${accountLookupSnippet(acct)}
+${mailScopeSnippet(acct, ref, folderName, createIfMissing)}
     set countBefore to count of messages of scopeFolder
     set movedCount to 0
     set out to ""

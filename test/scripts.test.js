@@ -121,9 +121,59 @@ test('the shared AppleScript handlers compile', {skip: !canCompile && 'needs mac
     assert.equal(compileError(macScripts.LIST_ACCOUNTS_SNIPPET), '');
 });
 
+/** An account only the AppleScript probe can reach — no profile folder ids. */
+const PROBED = {emailAccount: 'someone@example.com'};
+
+/**
+ * An account the profile database also describes, which is the only handle on a
+ * mailbox Outlook publishes no account object for. Every root is present, since
+ * that is what the profile reports for a mailbox in normal shape.
+ */
+const PROFILED = {
+    emailAccount: 'someone@example.com',
+    folderIds: {
+        'inbox': 148,
+        'sent items': 149,
+        'deleted items': 146,
+        'drafts': 147,
+        'junk mail': 150,
+        'root folder': 142,
+    },
+};
+
 test('the account and message lookups compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    assert.equal(compileError(inTell(macScripts.accountLookupSnippet('someone@example.com'))), '');
+    assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROBED))), '');
+    assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED))), '');
+    assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED, true))), '');
     assert.equal(compileError(inTell(macScripts.messageLookupSnippet('123'))), '');
+});
+
+// classifyRunFailure recognises this exact sentence to raise AccountNotFoundError,
+// and only a mailbox that genuinely isn't there should produce it. One the profile
+// can reach by folder id is found — it just can't be composed from, which is a
+// different failure and says so.
+test('only a genuinely absent account emits the not-found sentence', () => {
+    assert.match(macScripts.accountLookupSnippet(PROBED), /error "Account '[^']*' not found"/);
+    assert.doesNotMatch(macScripts.accountLookupSnippet(PROFILED), /not found/);
+    const composing = macScripts.accountLookupSnippet(PROFILED, true);
+    assert.doesNotMatch(composing, /not found/);
+    assert.match(composing, /publishes no account object/);
+});
+
+test('a well-known root resolves by account, by id, or refuses', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+    for (const term of Object.values(macScripts.MAC_ROOT_TERMS)) {
+        for (const acct of [PROBED, PROFILED]) {
+            const source = inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.rootFolderSnippet(acct, term, 'f')}`);
+            assert.equal(compileError(source), '', `${term} (${acct === PROBED ? 'probed' : 'profiled'})`);
+        }
+    }
+    // The probe is the only way in, and it is the one that may have come up
+    // empty — so the folder that is out of reach gets named.
+    const partial = {emailAccount: 'someone@example.com', folderIds: {'inbox': 148}};
+    assert.match(macScripts.rootFolderSnippet(partial, 'drafts', 'f'), /has no drafts folder/);
+    assert.match(macScripts.rootFolderSnippet(PROFILED, 'drafts', 'f'), /mail folder id 147/);
+    assert.doesNotMatch(macScripts.rootFolderSnippet(PROBED, 'drafts', 'f'), /mail folder id/);
 });
 
 test('the per-message field snippets compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
@@ -147,16 +197,19 @@ test('every well-known root term Outlook actually accepts', {skip: !canCompile &
 });
 
 test('a folder scope compiles for every root, walked and created', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    for (const rootId of Object.keys(macScripts.MAC_ROOT_TERMS)) {
-        const ref = {rootId: Number(rootId), rootLabel: 'Root', segments: []};
+    for (const acct of [PROBED, PROFILED]) {
+        const how = acct === PROBED ? 'probed' : 'profiled';
+        for (const rootId of Object.keys(macScripts.MAC_ROOT_TERMS)) {
+            const ref = {rootId: Number(rootId), rootLabel: 'Root', segments: []};
+            assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(acct, ref)}`)), '', `root ${rootId} (${how})`);
+        }
+        const nested = {rootId: 6, rootLabel: 'Inbox', segments: ['Clients', 'Acme']};
         assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(ref)}`)), '', `root ${rootId}`);
+${macScripts.mailScopeSnippet(acct, nested, 'Inbox\\Clients\\Acme')}`)), '', how);
+        assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(acct, nested, 'Inbox\\Clients\\Acme', true)}`)), '', `createMissing (${how})`);
     }
-    const nested = {rootId: 6, rootLabel: 'Inbox', segments: ['Clients', 'Acme']};
-    assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(nested, 'Inbox\\Clients\\Acme')}`)), '');
-    assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(nested, 'Inbox\\Clients\\Acme', true)}`)), '', 'createMissing variant');
 });
 
 test('an unsupported root is refused in TypeScript, not by a broken script', () => {
@@ -164,7 +217,7 @@ test('an unsupported root is refused in TypeScript, not by a broken script', () 
     // NOT_IMPLEMENTED naming the folder, rather than emitting a script that
     // cannot compile.
     assert.throws(
-        () => macScripts.mailScopeSnippet({rootId: 99, rootLabel: 'Journal', segments: []}, 'Journal'),
+        () => macScripts.mailScopeSnippet(PROBED, {rootId: 99, rootLabel: 'Journal', segments: []}, 'Journal'),
         (error) => {
             assert.equal(error.code, 'NOT_IMPLEMENTED');
             assert.match(error.message, /Journal/);

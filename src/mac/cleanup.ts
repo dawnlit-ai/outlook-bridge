@@ -11,7 +11,13 @@ import {
     splitRecords,
     summaryFields
 } from './run';
-import { accountLookupSnippet, macFolderPath, partitionMessageIds } from './scripts';
+import {
+    accountLookupSnippet,
+    macFolderPath,
+    partitionMessageIds,
+    resolveMacAccount,
+    rootFolderSnippet,
+} from './scripts';
 import { PROTECTED_MAIL_REASON } from '../mail';
 import type { DeleteMailOptions, DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult, } from '../types';
 
@@ -84,10 +90,13 @@ export async function deleteOutlookEmails(
         reason: bad.error,
     }));
     if (valid.length > 0) {
+        const acct = await resolveMacAccount(emailAccount);
         const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set inboxName to (name of (inbox of targetAcct)) as string
-    set sentName to (name of (sent items of targetAcct)) as string
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'inbox', 'inboxFolder')}
+${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
+    set inboxName to (name of inboxFolder) as string
+    set sentName to (name of sentFolder) as string
     set out to ""
     repeat with theId in {${valid.join(', ')}}
         set subj to ""
@@ -179,9 +188,10 @@ export async function purgeDeletedItems(
 ): Promise<PurgeDeletedItemsResult> {
     const days = Math.max(0, Math.floor(olderThanDays));
     const folderPath = macFolderPath(emailAccount, 'Deleted Items', []);
+    const acct = await resolveMacAccount(emailAccount);
     const indexScript = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set trashFolder to deleted items of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'deleted items', 'trashFolder')}
     set idList to id of every message of trashFolder
     try
         set timeList to time received of every message of trashFolder

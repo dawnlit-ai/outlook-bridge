@@ -18,6 +18,8 @@ import {
     messageDetailFields,
     messageDetailSnippet,
     messageLookupSnippet,
+    resolveMacAccount,
+    rootFolderSnippet,
     senderSnippet,
 } from './scripts';
 import { isOutgoingRoot, mailFolderRef, splitQuotedOriginal } from '../mail';
@@ -51,14 +53,15 @@ export async function readInboxEmails(
         && folder.trim().toLowerCase() !== 'inbox') {
         throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
     }
-    const resolveScope = mailScopeSnippet(ref, folder || '');
+    const acct = await resolveMacAccount(emailAccount);
+    const resolveScope = mailScopeSnippet(acct, ref, folder || '');
     const folderPath = macFolderPath(emailAccount, ref.rootLabel, ref.segments);
     const isOutgoing = isOutgoingRoot(ref.rootId);
 
     // Pass 1 — index the folder. Folder order isn't documented, so sort here
     // rather than trusting Outlook to hand back newest-first.
     const indexScript = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
+${accountLookupSnippet(acct)}
 ${resolveScope}
     set cutoff to (current date) - (${days} * days)
     set idList to id of every message of scopeFolder
@@ -238,6 +241,7 @@ export async function searchInboxByFilter(
     daysBack = 0,
 ): Promise<InboxSearchMatch[]> {
     const days = Math.max(0, Math.floor(daysBack));
+    const acct = await resolveMacAccount(emailAccount);
     // Pass 1 — index every folder under the Inbox: path, id, subject, received.
     const indexScript = `on scanFolder(theFolder, prefix, cutoff, useCutoff)
     set out to ""
@@ -284,8 +288,8 @@ export async function searchInboxByFilter(
 end scanFolder
 
 tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set rootInbox to inbox of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'inbox', 'rootInbox')}
     set rootName to (name of rootInbox) as string
 end tell
 set cutoff to (current date) - (${days} * days)

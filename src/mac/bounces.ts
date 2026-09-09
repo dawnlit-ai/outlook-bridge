@@ -8,7 +8,7 @@
 // have their bodies read, which is the property that keeps either version
 // affordable on a real inbox.
 import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords } from './run';
-import { accountLookupSnippet, allRecipientsSnippet } from './scripts';
+import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet, } from './scripts';
 import { bounceReason, failedRecipients } from '../shared/bounceRules';
 import { clamp } from '../mail';
 import type { CleanUndeliverableResult, SentRecipientGroup, UndeliverableEmail } from '../types';
@@ -33,9 +33,10 @@ async function indexFolder(
     // Sender is a record, and a bulk `sender of every message` read hands back a
     // list of them that AppleScript then reads locally — so the whole index costs
     // four Apple events rather than one per message.
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set scanFolder to ${folderTerm} of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
     set idList to id of every message of scanFolder
     set subjList to subject of every message of scanFolder
     try
@@ -245,9 +246,10 @@ export async function readSentRecipientGroups(
     // Pass 1 — index Sent Items on `time sent`, which is the stamp outgoing mail
     // actually carries; indexing it on `time received` yields an empty set that
     // looks exactly like an empty folder.
+    const acct = await resolveMacAccount(emailAccount);
     const indexScript = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set sentFolder to sent items of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
     set idList to id of every message of sentFolder
     try
         set timeList to time sent of every message of sentFolder

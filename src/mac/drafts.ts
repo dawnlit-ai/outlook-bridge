@@ -1,12 +1,23 @@
 // Drafts: which ones belong to an account, and sending, listing or deleting them.
 //
 // Where Windows has to scan two Drafts folders and prove each item's
-// SendUsingAccount, macOS asks the account for its own Drafts folder directly —
-// `drafts of targetAcct` is already account-scoped, so a draft found there
-// belongs to this account by construction. That is the same rule the Windows
-// scan reaches by a longer route, not a weaker one.
-import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords, } from './run';
-import { accountLookupSnippet, macFolderPath, partitionMessageIds } from './scripts';
+// SendUsingAccount, macOS resolves the one Drafts folder that belongs to the
+// account — through the account object, or by the folder's own id for a mailbox
+// the dictionary won't name (see profile.ts) — so a draft found there belongs to
+// this account by construction. That is the same rule the Windows scan reaches
+// by a longer route, not a weaker one.
+//
+// The one thing the folder cannot vouch for is the item's own binding, which is
+// why the guards compare against the requested address as a literal rather than
+// asking `targetAcct` for it: there may be no account object to ask.
+import { asEscape, asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords, } from './run';
+import {
+    accountLookupSnippet,
+    macFolderPath,
+    partitionMessageIds,
+    resolveMacAccount,
+    rootFolderSnippet,
+} from './scripts';
 import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult, SendDraftsResult } from '../types';
 
 /** The Drafts folder path this account's drafts are reported under. */
@@ -27,9 +38,10 @@ export async function listOutlookDrafts(
 ): Promise<ListDraftsResult> {
     const cap = Math.max(1, Math.floor(limit));
     const preview = Math.max(1, Math.floor(previewChars));
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set draftsFolder to drafts of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     set out to ""
     repeat with theMsg in (messages of draftsFolder)
         set subj to ""
@@ -116,9 +128,10 @@ end tell`;
  * — the same trap the Windows implementation avoids by snapshotting item refs.
  */
 export async function sendAllDrafts(emailAccount: string): Promise<SendAllDraftsResult> {
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set draftsFolder to drafts of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     set wanted to id of every message of draftsFolder
     set sentCount to 0
     set out to ""
@@ -169,9 +182,10 @@ export async function deleteOutlookDrafts(
     if (entryIds.length === 0) return { deleted: 0, failed: [] };
     const { valid, invalid } = partitionMessageIds(entryIds);
     if (valid.length === 0) return { deleted: 0, failed: invalid };
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set draftsFolder to drafts of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     set draftsName to (name of draftsFolder) as string
     set draftIds to id of every message of draftsFolder
     set deletedCount to 0
@@ -195,7 +209,7 @@ ${accountLookupSnippet(emailAccount)}
             try
                 set boundTo to (email address of (account of theMsg)) as string
             end try
-            if boundTo is not "" and boundTo is not (email address of targetAcct) then
+            if boundTo is not "" and boundTo is not "${asEscape(emailAccount)}" then
                 error "draft is not bound to this account - refusing to delete"
             end if
             delete theMsg
@@ -239,9 +253,10 @@ export async function sendDrafts(
     if (valid.length === 0) {
         return { sent: 0, failed: invalid.map(f => ({ entryId: f.entryId, subject: '', error: f.error })) };
     }
+    const acct = await resolveMacAccount(emailAccount);
     const script = `tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set draftsFolder to drafts of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     set draftsName to (name of draftsFolder) as string
     set draftIds to id of every message of draftsFolder
     set sentCount to 0
@@ -269,7 +284,7 @@ ${accountLookupSnippet(emailAccount)}
             try
                 set boundTo to (email address of (account of theMsg)) as string
             end try
-            if boundTo is not "" and boundTo is not (email address of targetAcct) then
+            if boundTo is not "" and boundTo is not "${asEscape(emailAccount)}" then
                 error "draft is not bound to this account - refusing to send"
             end if
             send theMsg

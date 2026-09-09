@@ -15,7 +15,13 @@ import {
     splitRecords,
     summaryFields,
 } from './run';
-import { accountLookupSnippet, FIND_FOLDER_HANDLER, macFolderPath } from './scripts';
+import {
+    accountLookupSnippet,
+    FIND_FOLDER_HANDLER,
+    macFolderPath,
+    resolveMacAccount,
+    rootFolderSnippet,
+} from './scripts';
 import { findTemplateMarkers } from '../outlookTemplateSections';
 import { clamp } from '../mail';
 import { NotFoundError } from '../errors';
@@ -60,12 +66,13 @@ export async function readTemplateEmails(
 ): Promise<TemplateFolderResult> {
     const cap = clamp(limit, 1, 50);
     const wanted = (subject || '').trim().toLowerCase();
+    const acct = await resolveMacAccount(emailAccount);
 
     // Pass 1 — find the folder and index it: three bulk reads, no bodies.
     const indexScript = `${FIND_FOLDER_HANDLER}
 tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set rootFolder to root folder of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'root folder', 'rootFolder')}
 end tell
 set theFolder to my findFolderByName(rootFolder, "${asEscape(folderName)}", ${TEMPLATE_SEARCH_DEPTH})
 tell application "Microsoft Outlook"
@@ -191,10 +198,11 @@ export async function saveTemplateEmail(
     htmlBody: string,
     folderName = 'Templates',
 ): Promise<SaveTemplateResult> {
+    const acct = await resolveMacAccount(emailAccount);
     const script = `${FIND_FOLDER_HANDLER}
 tell application "Microsoft Outlook"
-${accountLookupSnippet(emailAccount)}
-    set rootFolder to root folder of targetAcct
+${accountLookupSnippet(acct)}
+${rootFolderSnippet(acct, 'root folder', 'rootFolder')}
 end tell
 set theFolder to my findFolderByName(rootFolder, "${asEscape(folderName)}", ${TEMPLATE_SEARCH_DEPTH})
 tell application "Microsoft Outlook"

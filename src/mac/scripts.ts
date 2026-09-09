@@ -1,8 +1,33 @@
 // The AppleScript fragments more than one macOS operation is built from.
 import { asBool, asEscape } from './run';
+import { readProfileAccounts } from './profile';
 import { InvalidRequestError, NotImplementedError } from '../errors';
 import type { MailFolderRef } from '../types';
 import { isOutgoingRoot } from '../mail';
+
+/**
+ * An account as the generated AppleScript will reach it.
+ *
+ * `folderIds` carries what Outlook's profile database knows about the mailbox's
+ * well-known folders — the only handle there is on a mailbox the dictionary
+ * publishes no account object for (see profile.ts). It is filled in for every
+ * account the profile lists, including the ones the probe below resolves
+ * perfectly well, because the generated script picks between the two at run
+ * time. Nothing here has to predict which kinds of account a given Outlook build
+ * chooses to expose.
+ */
+export interface MacAccount {
+    readonly emailAccount: string;
+    readonly folderIds?: Readonly<Record<string, number>>;
+}
+
+/** Look an address up in Outlook's profile database, for the ids it can add. */
+export async function resolveMacAccount(emailAccount: string): Promise<MacAccount> {
+    const wanted = emailAccount.trim().toLowerCase();
+    const found = (await readProfileAccounts())
+        .find(account => account.emailAccount.trim().toLowerCase() === wanted);
+    return found ? { emailAccount, folderIds: found.folderIds } : { emailAccount };
+}
 
 /**
  * Resolve the account whose SMTP address matches, or raise. Emitted into a
@@ -12,20 +37,67 @@ import { isOutgoingRoot } from '../mail';
  * `whose email address is ...` filter can't be used either: `email address` is
  * also a class name, and AppleScript resolves it as one ("into type specifier").
  *
- * The thrown sentence is the one `classifyRunFailure` recognises to raise
- * `AccountNotFoundError`, so its wording is load-bearing.
+ * A mailbox the dictionary publishes no account object for leaves `targetAcct`
+ * as `missing value` rather than failing here, provided `rootFolderSnippet` has
+ * a folder id to reach it by instead. `needsAccountObject` is for the operations
+ * that cannot work without the object itself — composing mail is the whole of
+ * that list, because the account a message is sent from can only be set from it,
+ * and a message composed without it goes out from whichever mailbox Outlook
+ * considers default.
+ *
+ * The "not found" sentence is the one `classifyRunFailure` recognises to raise
+ * `AccountNotFoundError`, so its wording is load-bearing. The sentence for a
+ * mailbox that resolved but cannot compose deliberately is not: that account was
+ * found, and reporting it missing would send the caller hunting the wrong thing.
  */
-export function accountLookupSnippet(emailAccount: string): string {
-    return `    set targetAcct to missing value
+export function accountLookupSnippet(acct: MacAccount, needsAccountObject = false): string {
+    const address = asEscape(acct.emailAccount);
+    const probe = `    set targetAcct to missing value
     try
         repeat with a in (exchange accounts & imap accounts & pop accounts)
-            if (email address of a as string) is "${asEscape(emailAccount)}" then
+            if (email address of a as string) is "${address}" then
                 set targetAcct to a
                 exit repeat
             end if
         end repeat
-    end try
-    if targetAcct is missing value then error "Account '${asEscape(emailAccount)}' not found"`;
+    end try`;
+    if (acct.folderIds && !needsAccountObject) return probe;
+    const complaint = acct.folderIds
+        ? `Outlook publishes no account object for '${address}', so the account a `
+        + `message is sent from cannot be set. Its folders can be read; mail cannot `
+        + `be composed from it.`
+        : `Account '${address}' not found`;
+    return `${probe}
+    if targetAcct is missing value then error "${asEscape(complaint)}"`;
+}
+
+/**
+ * Bind `variable` to one of the account's well-known folders.
+ *
+ * Two ways in, chosen at run time: through the account object when the probe
+ * found one, and by the folder's own id when it didn't. `mail folder id N`
+ * resolves against the application rather than through an account, which is what
+ * makes the second way possible at all — and N is the same integer Outlook's
+ * profile database records for that folder.
+ */
+export function rootFolderSnippet(acct: MacAccount, term: string, variable: string): string {
+    const viaAccount = `    set ${variable} to ${term} of targetAcct`;
+    const id = acct.folderIds?.[term];
+    if (id !== undefined) {
+        return `    if targetAcct is missing value then
+        set ${variable} to mail folder id ${id}
+    else
+${viaAccount}
+    end if`;
+    }
+    // The profile listed the mailbox but not this root, so the probe is the only
+    // way left in — and it is the one that may have come up empty. Say which
+    // folder is out of reach rather than let `<term> of missing value` say it.
+    if (acct.folderIds) {
+        return `    if targetAcct is missing value then error "Account '${asEscape(acct.emailAccount)}' has no ${term} folder that AppleScript can reach"
+${viaAccount}`;
+    }
+    return viaAccount;
 }
 
 /**
@@ -86,6 +158,7 @@ export function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
  * chain instead, so a nested destination is one call.
  */
 export function mailScopeSnippet(
+    acct: MacAccount,
     ref: MailFolderRef,
     folderLabel = '',
     createMissing = false,
@@ -109,7 +182,7 @@ export function mailScopeSnippet(
     end if
     set scopeFolder to foundFolder`).join('');
     return `    set scopeCreated to false
-    set scopeFolder to ${term} of targetAcct${walk}`;
+${rootFolderSnippet(acct, term, 'scopeFolder')}${walk}`;
 }
 
 /**
