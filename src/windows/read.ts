@@ -1,9 +1,17 @@
 // Reading mail: one folder, one item, a whole Inbox tree, or whatever is
 // selected in the running Outlook.
-import { psBool, psEscape, requireWindows, runPowerShell } from './run';
+import { psBool, psEscape, psList, requireWindows, runPowerShell } from './run';
 import { accountScript, getItemScript, mailScopeScript, namedStoreScript, SENDER_SMTP_PS } from './scripts';
 import { parseArray, parseObject, record, str, toArray } from '../shared/json';
-import { isOutgoingRoot, mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from '../mail';
+import {
+    DEFAULT_SCAN_DAYS,
+    isOutgoingRoot,
+    mailFolderRef,
+    NON_INCOMING_ROOTS,
+    replyPrefixSource,
+    splitQuotedOriginal,
+    WELL_KNOWN_FOLDERS,
+} from '../mail';
 import { NotFoundError } from '../errors';
 import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
 
@@ -198,13 +206,17 @@ ConvertTo-Json $out -Depth 3 -Compress
  * it's after; `readInboxEmails` covers the cheaper "one known folder" case.
  *
  * `daysBack` bounds the scan to items received within that many days — what a
- * daily batch run wants, since a subject filter alone walks the whole Inbox
- * tree and returns every match ever received. 0 keeps that unbounded
- * behavior, and is only sane paired with `filter.subjectLike` so Restrict can
- * narrow the set server-side before anything crosses COM. Where the store
- * won't run that subject query — an IMAP mailbox accepts it and then matches
- * nothing — an unbounded scan falls back to the last 60 days rather than
- * walking every item the mailbox has ever held.
+ * daily batch run wants, since a subject filter alone walks the whole Inbox tree
+ * and would otherwise return every match ever received. 0 means the caller named
+ * no window and takes `DEFAULT_SCAN_DAYS`; there is no unbounded mode, and a
+ * caller that wants a year asks for 365.
+ *
+ * The window is enforced twice — a date Restrict per folder, then a per-item
+ * re-check — because Restrict is not reliable across stores, and the failure it
+ * used to produce was silent and store-dependent rather than loud. `subjectLike`
+ * still drives a server-side prefilter, but purely as an optimization now: a
+ * store that cannot answer it (an IMAP mailbox accepts the query and then
+ * matches nothing) returns the same set, slower, never a wider one.
  */
 export async function searchInboxByFilter(
     emailAccount: string,
@@ -212,6 +224,9 @@ export async function searchInboxByFilter(
     daysBack = 0,
 ): Promise<InboxSearchMatch[]> {
     if (process.platform !== 'win32') return [];
+    // Resolved here rather than in the script, so a caller that names no window
+    // gets the default one instead of whatever the store's indexing allows.
+    const days = daysBack > 0 ? Math.max(1, Math.floor(daysBack)) : DEFAULT_SCAN_DAYS;
     const subjectLike = filter.subjectLike ? psEscape(filter.subjectLike) : '';
     // DASL's `like` takes SQL wildcards, so the glob the filter is written in is
     // translated for the server-side prefilter. The client-side re-check keeps
@@ -220,6 +235,14 @@ export async function searchInboxByFilter(
         ? psEscape(filter.subjectLike.replace(/\*/g, '%').replace(/\?/g, '_'))
         : '';
     const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
+    // Escaped for the single-quoted PowerShell literal it lands in, since an
+    // operator-supplied prefix can carry an apostrophe where the built-ins cannot.
+    const replyPattern = filter.excludeReplies
+        ? psEscape(replyPrefixSource(filter.extraReplyPrefixes))
+        : '';
+    const clean = (list?: string[]) => (list ?? []).map(name => name.trim()).filter(Boolean);
+    const excludeFolders = clean(filter.excludeFolders);
+    const includeFolders = clean(filter.includeFolders);
     const script = `
 $subjLike = '${subjectLike}'
 $subjDasl = '${subjectDasl}'
@@ -228,10 +251,56 @@ ${namedStoreScript(emailAccount)}
 $inbox = $store.GetDefaultFolder(6)
 $results = @()
 $seen = @{}
+# Sent, Drafts, Deleted and Junk are siblings of the Inbox on an Exchange profile
+# and CHILDREN of it on an IMAP one, where this walk would otherwise hand back
+# mail the operator already sent or threw away as though it had just arrived.
+# Cut by EntryID, which holds whatever the profile's own language calls them, and
+# cut before the queue so each one's whole subtree goes with it.
+$skipIds = @{}
+foreach ($wellKnown in @(${NON_INCOMING_ROOTS.join(', ')})) {
+    try {
+        $wkFolder = $store.GetDefaultFolder($wellKnown)
+        if ($wkFolder -ne $null) { $skipIds[$wkFolder.EntryID] = $true }
+    } catch {}
+}
+# The operator's own folders, by full path or by bare name. These are ordinary
+# user folders — an archive of sent copies, a "handled" pile — so nothing about
+# the store identifies them and only the operator can say which is which.
+$skipNames = @(${psList(excludeFolders)})
+$onlyNames = @(${psList(includeFolders)})
+function Test-FolderNamed($name, $path, $list) {
+    foreach ($entry in $list) {
+        if ($name -ieq $entry -or $path -ieq $entry) { return $true }
+    }
+    return $false
+}
+# Traversal and scanning are separate, and the two lists are not symmetric.
+# An excluded folder is never queued, so its whole subtree goes with it — the
+# walk cannot prune a folder and still reach what is under it. An INCLUDED
+# folder is only a filter on a folder that WAS reached: the walk still passes
+# through folders nobody asked for to get to a nested one they did, and each
+# survivor carries a flag for whether it is itself named. Naming a folder says
+# nothing about its children, so a caller wanting a subtree lists it.
+$rootName = ''
+try { $rootName = [string]$inbox.Name } catch {}
+$rootPath = ''
+try { $rootPath = [string]$inbox.FolderPath } catch {}
 $folders = [System.Collections.ArrayList]@($inbox)
+$inScope = [System.Collections.ArrayList]@(($onlyNames.Count -eq 0) -or (Test-FolderNamed $rootName $rootPath $onlyNames))
 $fi = 0
 while ($fi -lt $folders.Count) {
-    try { foreach ($sub in $folders[$fi].Folders) { [void]$folders.Add($sub) } } catch {}
+    try {
+        foreach ($sub in $folders[$fi].Folders) {
+            if ($skipIds.ContainsKey($sub.EntryID)) { continue }
+            $subName = ''
+            try { $subName = [string]$sub.Name } catch {}
+            $subPath = ''
+            try { $subPath = [string]$sub.FolderPath } catch {}
+            if (Test-FolderNamed $subName $subPath $skipNames) { continue }
+            [void]$folders.Add($sub)
+            [void]$inScope.Add(($onlyNames.Count -eq 0) -or (Test-FolderNamed $subName $subPath $onlyNames))
+        }
+    } catch {}
     $fi++
 }
 # The subject prefilter is a DASL property query rather than Outlook's Jet
@@ -243,32 +312,27 @@ while ($fi -lt $folders.Count) {
 # interpolating would let a caller's $(...) run, and would break the query
 # outright on an apostrophe.
 $subjQuery = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' like ' + [char]39 + $subjDasl + [char]39
-$daysBack = ${daysBack}
-foreach ($folder in $folders) {
-    if ($daysBack -gt 0) {
-        $cutoff = (Get-Date).AddDays(-$daysBack).ToString('MM/dd/yyyy HH:mm')
-        $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
-    } else {
-        $filtered = $folder.Items
-    }
+$cutoff = (Get-Date).AddDays(-${days}).ToString('MM/dd/yyyy HH:mm')
+$cutoffDate = (Get-Date).AddDays(-${days})
+for ($fx = 0; $fx -lt $folders.Count; $fx++) {
+    # Walked to get here, but not asked for.
+    if (-not $inScope[$fx]) { continue }
+    $folder = $folders[$fx]
+    # Unconditional. This restrict used to be skipped whenever the caller asked
+    # for an unbounded scan, which left the subject prefilter below deciding the
+    # window: where the store could answer that query the scan reached back
+    # forever, and where it could not a 60-day fallback quietly took over. One
+    # mailbox, one call, two answers, depending on how the store was set up.
+    $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
 ${subjectLike ? `    # Narrowing on the subject server-side is what keeps this cheap — a date-only
     # restrict hands back every item in the window for every folder in the tree,
-    # which is thousands of COM round-trips on a busy mailbox. It is only an
-    # optimization though: every subject is re-checked below, so a store that
-    # cannot run the query returns the same answer, slower.
-    $narrowed = $null
+    # which is thousands of COM round-trips on a busy mailbox. It is ONLY an
+    # optimization: every subject is re-checked below, so a store that cannot run
+    # the query returns the same answer, slower — never a different window.
     try {
         $candidate = $filtered.Restrict($subjQuery)
-        if ($candidate.Count -gt 0) { $narrowed = $candidate }
+        if ($candidate.Count -gt 0) { $filtered = $candidate }
     } catch {}
-    if ($narrowed -ne $null) {
-        $filtered = $narrowed
-    } elseif ($daysBack -le 0) {
-        # Nothing narrowed it and nothing bounds it, which would walk every item
-        # the folder has ever held; cap the sweep at a window instead.
-        $cutoff = (Get-Date).AddDays(-60).ToString('MM/dd/yyyy HH:mm')
-        $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
-    }
 ` : ''}    $fCount = $filtered.Count
     for ($i = 1; $i -le $fCount; $i++) {
         $item = $filtered.Item($i)
@@ -279,7 +343,13 @@ ${subjectLike ? `    # Narrowing on the subject server-side is what keeps this c
         $subject = $subject.Trim()
         ${subjectLike ? `if ($subject -notlike $subjLike) { continue }` : ''}
         ${subjectPatternSrc ? `if ($subject -notmatch '${subjectPatternSrc}') { continue }` : ''}
-        ${filter.excludeReplies ? `if ($subject -imatch '^(re|fw[d]?)\\s*:') { continue }` : ''}
+        ${filter.excludeReplies ? `if ($subject -imatch '${replyPattern}') { continue }` : ''}
+        # Re-checked per item rather than trusted to Restrict alone: a store
+        # that cannot run the date query hands back everything it holds, and a
+        # scan that silently widens is the whole failure this guards against.
+        $rt = $null
+        try { $rt = $item.ReceivedTime } catch {}
+        if ($rt -ne $null -and $rt -lt $cutoffDate) { continue }
         ${filter.requireAttachment ? `if ($item.Attachments.Count -eq 0) { continue }` : ''}
         $attNames = @()
         foreach ($att in $item.Attachments) { $attNames += $att.FileName }

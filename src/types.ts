@@ -235,10 +235,43 @@ export interface InboxSearchFilter {
      *  engine, which reads the same syntax; `-match` is case-insensitive
      *  there by default regardless of the JS pattern's `i` flag. */
     subjectPattern?: RegExp;
-    /** Drop subjects starting with Re:/Fw:/Fwd:. */
+    /** Drop subjects carrying a reply or forward prefix — RE:/FW:/Fwd: and the
+     *  CJK equivalents, widened by `extraReplyPrefixes`. */
     excludeReplies?: boolean;
     /** Only return items carrying at least one attachment. */
     requireAttachment?: boolean;
+    /** Folders under the Inbox to leave out of the walk, each given as a full
+     *  folder path or as a bare folder name, matched case-insensitively. An
+     *  excluded folder takes its whole subtree with it.
+     *
+     *  This is for the operator's OWN folders — an archive of sent copies, a
+     *  "handled" pile — which no well-known-folder test can recognize because
+     *  they are ordinary user folders that merely happen to be named like the
+     *  special ones. The genuine Sent/Deleted/Drafts/Junk roots are skipped
+     *  regardless and need no entry here.
+     *
+     *  macOS matches on the leaf name only; a path entry narrows to its last
+     *  segment there. */
+    excludeFolders?: string[];
+    /** Restrict the scan to these folders, given the same way as
+     *  `excludeFolders`. Empty (the default) scans the whole Inbox tree; the
+     *  Inbox root itself is in scope only when it is named here.
+     *
+     *  Matched EXACTLY: naming a folder says nothing about its children, so a
+     *  caller that wants a subtree lists the subtree. The walk still passes
+     *  through folders that are not listed, so a nested folder can be reached
+     *  without its parent being in scope.
+     *
+     *  This is deliberately not symmetric with `excludeFolders`, which does take
+     *  its whole subtree — a pruned folder is never walked into, so nothing
+     *  under it can be reached, let alone named back in. Exclusion therefore
+     *  beats inclusion wherever the two overlap. */
+    includeFolders?: string[];
+    /** Reply/forward subject prefixes to honour on top of the built-in list —
+     *  a house convention like 'ACK'. Matched as literal text in the position
+     *  RE: would occupy, so one cannot match mid-subject. Only consulted when
+     *  `excludeReplies` is set. */
+    extraReplyPrefixes?: string[];
 }
 
 export interface InboxSearchMatch {

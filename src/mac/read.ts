@@ -6,7 +6,17 @@
 // attachments, sender — only for the messages that survived. Reading
 // per-message in a loop costs an event per property and is unusably slow on a
 // real mailbox, which is the whole reason for the shape.
-import { AS_LIST_SEP, asRow, field, runOsaScript, splitFields, splitList, splitRecords, summaryFields, } from './run';
+import {
+    AS_LIST_SEP,
+    asEscape,
+    asRow,
+    field,
+    runOsaScript,
+    splitFields,
+    splitList,
+    splitRecords,
+    summaryFields,
+} from './run';
 import {
     accountLookupSnippet,
     dateProperty,
@@ -22,7 +32,14 @@ import {
     rootFolderSnippet,
     senderSnippet,
 } from './scripts';
-import { isOutgoingRoot, mailFolderRef, splitQuotedOriginal } from '../mail';
+import {
+    DEFAULT_SCAN_DAYS,
+    folderLeafName,
+    isOutgoingRoot,
+    mailFolderRef,
+    replyPrefixSource,
+    splitQuotedOriginal,
+} from '../mail';
 import { NotFoundError } from '../errors';
 import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
 
@@ -240,19 +257,57 @@ export async function searchInboxByFilter(
     filter: InboxSearchFilter = {},
     daysBack = 0,
 ): Promise<InboxSearchMatch[]> {
-    const days = Math.max(0, Math.floor(daysBack));
+    // No unbounded mode: a caller naming no window gets the default one rather
+    // than a sweep whose reach depends on the mailbox it happens to land on.
+    const days = daysBack > 0 ? Math.max(1, Math.floor(daysBack)) : DEFAULT_SCAN_DAYS;
     const acct = await resolveMacAccount(emailAccount);
+    // Sent, Drafts, Deleted and Junk hang UNDER the Inbox on an IMAP profile, so
+    // the walk below would otherwise hand back mail the operator already sent or
+    // threw away as though it had just arrived. Their ids are collected up front
+    // and the recursion refuses to descend into them — the profile's own id where
+    // it records one, the account probe where it does not.
+    // AppleScript reaches a child folder by name, not by the Windows-style path,
+    // so a path entry narrows to its leaf here. Named in the type's contract.
+    const asNameList = (list?: string[]) => (list ?? [])
+        .map(folderLeafName)
+        .filter(Boolean)
+        .map(name => `"${asEscape(name)}"`)
+        .join(', ');
+    const skipNames = asNameList(filter.excludeFolders);
+    const onlyNames = asNameList(filter.includeFolders);
+    // Empty means no include filter, so the root starts in scope; otherwise it is
+    // in scope only when the caller named it.
+    const rootInScope = (filter.includeFolders ?? []).length === 0 ? "true" : "false";
+    const skipIdSnippet = ['sent items', 'deleted items', 'drafts', 'junk mail']
+        .map(term => {
+            const id = acct.folderIds?.[term];
+            return id !== undefined
+                ? `    set end of skipIds to ${id}`
+                : `    try
+        set end of skipIds to (id of (${term} of targetAcct))
+    end try`;
+        })
+        .join('\n');
     // Pass 1 — index every folder under the Inbox: path, id, subject, received.
-    const indexScript = `on scanFolder(theFolder, prefix, cutoff, useCutoff)
+    const indexScript = `on scanFolder(theFolder, prefix, cutoff, useCutoff, skipIds, skipNames, onlyNames, inScope)
     set out to ""
+    set idList to {}
+    set subjList to {}
+    set timeList to {}
+    -- A folder the walk only passes through to reach a nested one nobody asked
+    -- for is never read: the bulk property reads are the expensive part here.
+    if inScope then
+        tell application "Microsoft Outlook"
+            set idList to id of every message of theFolder
+            set subjList to subject of every message of theFolder
+            try
+                set timeList to time received of every message of theFolder
+            on error
+                set timeList to {}
+            end try
+        end tell
+    end if
     tell application "Microsoft Outlook"
-        set idList to id of every message of theFolder
-        set subjList to subject of every message of theFolder
-        try
-            set timeList to time received of every message of theFolder
-        on error
-            set timeList to {}
-        end try
         set subs to mail folders of theFolder
     end tell
     set hasTimes to ((count of timeList) is (count of idList))
@@ -261,10 +316,10 @@ export async function searchInboxByFilter(
         if hasTimes then set d to item i of timeList
         set keep to true
         if d is missing value then
-            -- A folder whose items carry no readable receive time can only be
-            -- included when the caller isn't bounding by date; silently dropping
-            -- it would look exactly like an empty folder.
-            set keep to not useCutoff
+            -- A folder whose items carry no readable receive time is included
+            -- whatever the window says: dropping them would look exactly like an
+            -- empty folder, and the Windows reader keeps them for the same reason.
+            set keep to true
         else if useCutoff and d is less than cutoff then
             set keep to false
         end if
@@ -278,11 +333,24 @@ export async function searchInboxByFilter(
         end if
     end repeat
     repeat with f in subs
-        set childName to ""
+        set skipThis to false
         try
-            set childName to (name of f) as string
+            if skipIds contains (id of f) then set skipThis to true
         end try
-        set out to out & my scanFolder(f, prefix & ${AS_LIST_SEP} & childName, cutoff, useCutoff)
+        try
+            if skipNames contains ((name of f) as string) then set skipThis to true
+        end try
+        if not skipThis then
+            set childName to ""
+            try
+                set childName to (name of f) as string
+            end try
+            set childScope to (count of onlyNames) is 0
+            try
+                if onlyNames contains childName then set childScope to true
+            end try
+            set out to out & my scanFolder(f, prefix & ${AS_LIST_SEP} & childName, cutoff, useCutoff, skipIds, skipNames, onlyNames, childScope)
+        end if
     end repeat
     return out
 end scanFolder
@@ -291,9 +359,13 @@ tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'inbox', 'rootInbox')}
     set rootName to (name of rootInbox) as string
+    set skipIds to {}
+${skipIdSnippet}
+    set skipNames to {${skipNames}}
+    set onlyNames to {${onlyNames}}
 end tell
 set cutoff to (current date) - (${days} * days)
-return my scanFolder(rootInbox, rootName, cutoff, ${days > 0 ? 'true' : 'false'})`;
+return my scanFolder(rootInbox, rootName, cutoff, true, skipIds, skipNames, onlyNames, ${rootInScope})`;
 
     const likeRe = filter.subjectLike ? likePattern(filter.subjectLike) : null;
     // PowerShell's -match is case-insensitive by default, so the pattern is
@@ -301,6 +373,7 @@ return my scanFolder(rootInbox, rootName, cutoff, ${days > 0 ? 'true' : 'false'}
     const patternRe = filter.subjectPattern
         ? new RegExp(filter.subjectPattern.source, 'i')
         : null;
+    const replyRe = new RegExp(replyPrefixSource(filter.extraReplyPrefixes), 'i');
 
     const candidates = splitRecords(await runOsaScript(indexScript, 300000))
         .map(record => {
@@ -317,7 +390,7 @@ return my scanFolder(rootInbox, rootName, cutoff, ${days > 0 ? 'true' : 'false'}
             if (!candidate.subject) return false;
             if (likeRe && !likeRe.test(candidate.subject)) return false;
             if (patternRe && !patternRe.test(candidate.subject)) return false;
-            if (filter.excludeReplies && /^(re|fwd?)\s*:/i.test(candidate.subject)) return false;
+            if (filter.excludeReplies && replyRe.test(candidate.subject)) return false;
             return true;
         });
     if (candidates.length === 0) return [];

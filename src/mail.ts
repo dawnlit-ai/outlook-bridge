@@ -68,6 +68,111 @@ export function isOutgoingRoot(rootId: number): boolean {
 }
 
 /**
+ * Roots a content scan must never walk INTO, as olDefaultFolders ids.
+ *
+ * On an Exchange profile these sit beside the Inbox, and a walk from it cannot
+ * reach them anyway. On an IMAP profile Outlook maps them UNDER the Inbox — a
+ * mailbox whose sent and deleted mail is literally `Inbox\Sent Items` and
+ * `Inbox\Deleted Items` — so that same walk hands back mail the operator already
+ * sent, drafted or threw away as though it had just arrived.
+ *
+ * Matched by EntryID off `GetDefaultFolder`, never by folder name: the names are
+ * localized (a Chinese profile files them under 已发送邮件 and 已删除邮件), which
+ * is precisely the case a name test would miss.
+ */
+export const NON_INCOMING_ROOTS: number[] = [
+    WELL_KNOWN_FOLDERS['deleted items'],
+    WELL_KNOWN_FOLDERS.outbox,
+    WELL_KNOWN_FOLDERS['sent items'],
+    WELL_KNOWN_FOLDERS.drafts,
+    WELL_KNOWN_FOLDERS['junk email'],
+];
+
+/**
+ * How far back a filtered scan reaches when the caller names no window.
+ *
+ * There is no unbounded mode. A scan reaching back forever is never what a batch
+ * run wants — it re-surfaces every pre-alert ever filed — and the one that used
+ * to exist was reachable only by accident, depending on whether a given store
+ * could answer the subject prefilter. A caller that really wants a year asks for
+ * 365.
+ */
+export const DEFAULT_SCAN_DAYS = 60;
+
+/**
+ * Subject prefixes that mark a message as a reply or a forward.
+ *
+ * A pattern SOURCE rather than a RegExp because it must hold in two engines:
+ * macOS tests it as a JavaScript RegExp, Windows concatenates it into a
+ * PowerShell `-imatch`, and .NET and JavaScript agree on every construct used
+ * here. Non-ASCII is spelled as \uXXXX escapes for the same reason — the Windows
+ * script crosses a console codepage that plain ASCII survives unconditionally.
+ *
+ * The list is not only English. A mailbox run in Chinese threads its replies
+ * under 回复: and its forwards under 转发:, so an `RE:|FW:` test reads every one
+ * of them as a brand-new message — which is how one shipment's thread becomes a
+ * dozen apparent arrivals.
+ *
+ * The colon may be the full-width one (U+FF1A) a CJK input method produces, and
+ * Outlook's reply counter (`RE[2]:`) sits between the prefix and the colon.
+ */
+const BUILT_IN_REPLY_PREFIXES: readonly string[] = [
+    're', 'fwd?', 'aw', 'wg', 'sv', 'vs', 'vb', 'tr', 'res', 'rv', 'enc', 'odp',
+    '\\u56DE\\u590D', '\\u56DE\\u8986', '\\u7B54\\u590D', '\\u7B54\\u8986',
+    '\\u8F6C\\u53D1', '\\u8F49\\u767C', '\\u8FD4\\u4FE1', '\\u8EE2\\u9001',
+    '\\uB2F5\\uC7A5', '\\uC804\\uB2EC',
+];
+
+/**
+ * One operator-supplied prefix as pattern source: regex metacharacters escaped
+ * so it matches as the literal text they typed, and every non-ASCII character
+ * spelled \uXXXX so the emitted PowerShell stays pure ASCII whatever the
+ * console codepage happens to be.
+ */
+function literalPrefixSource(text: string): string {
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code < 0x20 || code > 0x7e) {
+            out += '\\u' + code.toString(16).toUpperCase().padStart(4, '0');
+        } else if ('\\^$.|?*+()[]{}'.includes(text[i])) {
+            out += '\\' + text[i];
+        } else {
+            out += text[i];
+        }
+    }
+    return out;
+}
+
+/**
+ * The reply/forward prefix pattern, optionally widened with prefixes of the
+ * caller's own — a house convention the built-in list has no way to know, like
+ * an 'ACK:' an operator's own team puts on acknowledgements.
+ *
+ * Caller prefixes are matched as literal text sitting where RE: would sit: the
+ * same optional reply counter and the same half- or full-width colon still have
+ * to follow, so adding one cannot accidentally match mid-subject.
+ */
+export function replyPrefixSource(extra: readonly string[] = []): string {
+    const own = extra.map(prefix => prefix.trim()).filter(Boolean).map(literalPrefixSource);
+    const alternatives = [...BUILT_IN_REPLY_PREFIXES, ...own].join('|');
+    return '^\\s*(?:' + alternatives + ')\\s*(?:\\[\\d+\\])?\\s*[:\\uFF1A]';
+}
+
+/**
+ * The leaf name of an exclude-list entry, for the platforms that can only match
+ * a folder by name. A full folder path narrows to its last segment; a bare name
+ * is already one.
+ */
+export function folderLeafName(entry: string): string {
+    return entry.trim().split(/[\\\\/]/).filter(Boolean).pop() ?? '';
+}
+
+/** The built-in prefixes as one pattern source. */
+export const REPLY_PREFIX_SOURCE = replyPrefixSource();
+export const REPLY_PREFIX = new RegExp(REPLY_PREFIX_SOURCE, 'i');
+
+/**
  * Resolve a caller's folder string to a well-known root plus the segments below it.
  *
  * Accepts every shape a user has to hand: a bare name ("Invoices"), a relative
