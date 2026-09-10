@@ -393,11 +393,11 @@ export interface SaveTemplateResult {
  * What every platform implementation provides. `OutlookService` picks one at load
  * time and exposes it under these exact signatures.
  *
- * Not everything is implemented everywhere — macOS in particular still throws for
- * a good part of this. That is a runtime answer ("not implemented on this
- * platform"), deliberately not a type-level one: a consumer writing against the
- * package should see one signature per function, not a per-platform subset they
- * have to narrow.
+ * Windows and macOS both answer all of it today. Where a platform ever cannot,
+ * that is a runtime answer ("not implemented on this platform") and deliberately
+ * not a type-level one: a consumer writing against the package should see one
+ * signature per function, not a per-platform subset they have to narrow. See
+ * `CapabilityMap` for how a gap is announced ahead of the call.
  */
 export interface OutlookBridge {
     getOutlookAccounts(): Promise<string[]>;

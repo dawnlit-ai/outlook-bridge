@@ -168,10 +168,8 @@ on sanitizeList(lst)
     set cleaned to {}
     repeat with item_ in lst
         set t to my sanitize(item_)
-        repeat with codePoint in {29}
-            set marker to (character id (codePoint as integer))
-            if t contains marker then set t to my replaceText(t, marker, " ")
-        end repeat
+        set marker to (character id 29)
+        if t contains marker then set t to my replaceText(t, marker, " ")
         set end of cleaned to t
     end repeat
     return my joinList(cleaned, (character id 29))

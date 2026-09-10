@@ -38,7 +38,9 @@ const DEFAULT_PROFILE = 'Main Profile';
  * These are Outlook's own numbering, confirmed against a profile's local "On My
  * Computer" store, where every one of them appears exactly once: 1 Inbox,
  * 2 Outbox, 8 Sent Items, 9 Deleted Items, 10 Drafts, 12 Junk, 99 the account
- * root. Outbox is absent here because no script asks for one.
+ * root. Outbox is left out: a caller can still name it (`MAC_ROOT_TERMS` maps it),
+ * but nothing here files mail into one, so it is not worth an id — that request
+ * falls back to the account probe like any root the profile has no row for.
  */
 const ROOT_SPECIAL_TYPES: Readonly<Record<string, number>> = {
     'inbox': 1,

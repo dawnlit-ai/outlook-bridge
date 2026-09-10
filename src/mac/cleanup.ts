@@ -1,5 +1,6 @@
 // Deleting mail, and emptying what was already deleted.
 import {
+    asBool,
     asEscape,
     asRow,
     boolField,
@@ -119,7 +120,7 @@ ${folderChainSnippet('            ')}
             set pathText to my sanitizeList(my reverseList(chainNames))
             set rootName to item (count of chainNames) of chainNames
             set isProtected to (rootName is inboxName) or (rootName is sentName)
-            if isProtected and not ${allowProtected} then
+            if isProtected and not ${asBool(allowProtected)} then
                 set out to out & ${asRow([
             '(theId as string)',
             'subj',
@@ -127,7 +128,7 @@ ${folderChainSnippet('            ')}
             '"refused"',
             `"${asEscape(PROTECTED_MAIL_REASON)}"`,
         ])}
-            else if ${dryRun} then
+            else if ${asBool(dryRun)} then
                 set out to out & ${asRow(['(theId as string)', 'subj', 'pathText', '"would-delete"', '""'])}
             else
                 delete theMsg

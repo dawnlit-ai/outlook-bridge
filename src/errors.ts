@@ -43,17 +43,15 @@ export class OutlookError extends Error {
     readonly cause?: unknown;
 
     constructor(code: OutlookErrorCode, message: string, options?: { cause?: unknown }) {
-        // Declared as a field rather than passed to `super`: the ES2022 `cause`
-        // constructor option isn't in this package's ES2020 target.
+        // Declared as a field rather than passed to `super`'s `cause` option: an
+        // own enumerable property is what puts it in a JSON dump of the error,
+        // which is where a consumer logging a failure actually looks for it.
         super(message);
         if (options && 'cause' in options) this.cause = options.cause;
         this.code = code;
         // `name` is what shows up in an unhandled-rejection dump, so make it the
         // subclass rather than a uniform "Error".
         this.name = new.target.name;
-        // Restores the prototype chain when the package is consumed as compiled
-        // ES2020 output — without it `instanceof` fails for a subclass.
-        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 

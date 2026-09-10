@@ -165,7 +165,7 @@ $mail = $outlook.CreateItem(0)
 $mail.Subject = '${psEscape(subject)}'
 $mail.HTMLBody = [IO.File]::ReadAllText('${psEscape(body.path)}', [Text.Encoding]::UTF8)
 $mail.Save()
-$moved = $mail.Move($folder)
+[void]$mail.Move($folder)
 ConvertTo-Json @{ folderPath = $folder.FolderPath; folderCreated = $folderCreated }
 `;
     try {

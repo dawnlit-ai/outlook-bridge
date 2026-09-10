@@ -69,10 +69,10 @@ const globalConfig: ResolvedConfig = {
  * Per-instance config, scoped to an async call tree.
  *
  * `createOutlookBridge()` hands each instance its own settings, but the platform
- * services are 3,000 lines of module-level functions that read `getConfig()`
- * directly. Threading a config parameter through all of them would touch every
- * line for no behavioural gain; an AsyncLocalStorage lets an instance wrap its
- * calls instead, and the store follows across every `await` inside one. Two
+ * services are thousands of lines of module-level functions that read
+ * `getConfig()` directly. Threading a config parameter through all of them would
+ * touch every line for no behavioural gain; an AsyncLocalStorage lets an instance
+ * wrap its calls instead, and the store follows across every `await` inside one. Two
  * bridges with different timeouts can then run concurrently in one process,
  * which is the thing a second consumer actually needs and the global could never
  * give them.

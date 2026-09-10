@@ -314,13 +314,11 @@ export async function searchInboxByFilter(
     repeat with i from 1 to (count of idList)
         set d to missing value
         if hasTimes then set d to item i of timeList
+        -- An item carrying no readable receive time is kept whatever the window
+        -- says: dropping those would make a folder of them look exactly like an
+        -- empty folder, and the Windows reader keeps them for the same reason.
         set keep to true
-        if d is missing value then
-            -- A folder whose items carry no readable receive time is included
-            -- whatever the window says: dropping them would look exactly like an
-            -- empty folder, and the Windows reader keeps them for the same reason.
-            set keep to true
-        else if useCutoff and d is less than cutoff then
+        if d is not missing value and useCutoff and d is less than cutoff then
             set keep to false
         end if
         if keep then

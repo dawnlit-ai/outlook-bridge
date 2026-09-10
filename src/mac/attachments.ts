@@ -94,10 +94,10 @@ end tell`;
 export async function saveEmailAttachmentDetailed(
     entryId: string,
     fileName: string,
-    _storeId?: string,
+    storeId?: string,
     destDir?: string,
 ): Promise<SavedAttachment> {
-    const results = await saveEmailAttachments(entryId, [fileName], _storeId, destDir);
+    const results = await saveEmailAttachments(entryId, [fileName], storeId, destDir);
     if (results.length === 0) {
         throw new NotFoundError('attachment', 'Failed to save attachment.');
     }
