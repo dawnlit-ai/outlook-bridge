@@ -49,6 +49,13 @@ export interface SendEmailParams {
     htmlBody: string;
     /** Absolute paths of files to attach. Each has to exist. */
     attachments?: readonly string[];
+    /**
+     * An Outlook signature, by the name listOutlookSignatures reports, added to
+     * the body: in its `{{SIGNATURE}}` placeholder when it has one, otherwise
+     * at the end. Outlook adds no signature of its own to a body set this way,
+     * so this is how a composed email gets one.
+     */
+    signatureName?: string;
     /** Send now. Default false: the email is staged as a draft instead. */
     sendImmediately?: boolean;
     /**
@@ -81,9 +88,10 @@ export interface ReplyEmailParams extends EmailLocator {
     /** `{{PLACEHOLDER}}` → HTML substituted into the composed body. */
     templatePlaceholders?: Readonly<Record<string, string>>;
     /**
-     * An Outlook signature (by the name listOutlookSignatures reports) to
-     * substitute into the body's `{{SIGNATURE}}` placeholder. Resolved here, so
-     * the signature's HTML never crosses the caller's boundary.
+     * An Outlook signature (by the name listOutlookSignatures reports), put in
+     * the body's `{{SIGNATURE}}` placeholder, or below the new text when there
+     * is none. Resolved here, so the signature's HTML never crosses the
+     * caller's boundary.
      */
     signatureName?: string;
     /**
@@ -257,6 +265,40 @@ export interface SentRecipientGroup {
     recipients: string[];
 }
 
+export interface BounceReportOptions {
+    /** How far back to read bounce-backs and Sent Items. Default 30. */
+    daysBack?: number;
+    /** Count bounces already moved to Deleted Items too. Default true. */
+    includeDeletedItems?: boolean;
+}
+
+/** A sent message that at least one of its recipients bounced back from. */
+export interface BouncedSend {
+    entryId: string;
+    subject: string;
+    sentOn: string;
+    /** Every address it went to, lower-cased and deduplicated. */
+    recipients: string[];
+    /** The recipients a bounce-back reported as failed. */
+    failedRecipients: string[];
+    /** True when every recipient failed: the message reached nobody. */
+    allFailed: boolean;
+}
+
+export interface BounceReport {
+    account: string;
+    scannedDays: number;
+    /** Every distinct address the bounce-backs reported, lower-cased. */
+    bouncedAddresses: string[];
+    /** The sent messages with a bounced recipient, newest first. */
+    sends: BouncedSend[];
+    /**
+     * Bounced addresses no sent message in the window went to: an alias the
+     * server expanded, or a send older than the window.
+     */
+    unmatchedAddresses: string[];
+}
+
 // ── Reading ──────────────────────────────────────────────────────────────
 export interface ReadInboxOptions {
     /**
@@ -338,6 +380,39 @@ export interface InboxSearchMatch extends EmailLocator {
     /** Not saved to disk — pass the ones you want to saveEmailAttachments. */
     attachmentNames: string[];
     folderPath: string;
+}
+
+/**
+ * What was kept about an email besides its id, for finding it again once the
+ * id no longer resolves: Outlook rewrites an email's id whenever it moves, and
+ * an id from one platform means nothing on the other.
+ *
+ * At least two of `subject`, `sender` and `receivedTime` are needed, since a
+ * subject alone names every message in a thread.
+ */
+export interface EmailDescription {
+    /** Compared without reply and forward prefixes, spacing or case. */
+    subject?: string;
+    /**
+     * An address, a display name, or both (`Jo Doe <jo@example.com>`). An
+     * address is compared as an address; a bare name only against the
+     * sender's display name.
+     */
+    sender?: string;
+    /** `yyyy-MM-dd HH:mm` as a listing reported it, or just the day. */
+    receivedTime?: string;
+    /** The mailbox to search. Default: every account, the one `folderPath` names first. */
+    emailAccount?: string;
+    /**
+     * The folderPath a listing reported (`\\team@example.com\Inbox\Invoices`).
+     * Only decides which mailbox is searched first.
+     */
+    folderPath?: string;
+}
+
+export interface LocateEmailOptions {
+    /** How far back to search when the description has no receivedTime. Default 60. */
+    daysBack?: number;
 }
 
 export interface SelectedEmail extends EmailLocator {
@@ -521,6 +596,13 @@ export interface OutlookBridge {
     /** Open an email in Outlook. */
     openOutlookEmail(email: EmailRef): Promise<void>;
 
+    /**
+     * Find an email again from what was kept about it, when its id no longer
+     * resolves. Searches the Inbox and its subfolders, and returns null rather
+     * than a guess: every field the description gives has to agree.
+     */
+    locateEmail(description: EmailDescription, options?: LocateEmailOptions): Promise<InboxSearchMatch | null>;
+
     /** The folders under an account's Inbox. */
     listInboxFolders(emailAccount: string, options?: ListFoldersOptions): Promise<InboxFolderInfo[]>;
 
@@ -575,6 +657,9 @@ export interface OutlookBridge {
 
     /** Sent Items, each message with the full set of addresses it went to. */
     readSentRecipientGroups(emailAccount: string, options?: SentRecipientGroupsOptions): Promise<SentRecipientGroup[]>;
+
+    /** Which sent messages bounced, and for which of their recipients. */
+    readBounceReport(emailAccount: string, options?: BounceReportOptions): Promise<BounceReport>;
 
     /** The names of the Outlook signatures on this machine. */
     listOutlookSignatures(): Promise<string[]>;

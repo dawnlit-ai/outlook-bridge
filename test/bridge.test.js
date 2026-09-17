@@ -12,10 +12,10 @@ const {fakeBackend} = require('./support.js');
 
 const PUBLIC_OPERATIONS = [
     'getOutlookAccounts', 'sendOutlookEmail', 'replyOutlookEmail', 'readInboxEmails', 'searchInboxByFilter',
-    'readSelectedEmail', 'readEmailBody', 'openOutlookEmail', 'listInboxFolders', 'moveOutlookEmails',
+    'readSelectedEmail', 'readEmailBody', 'openOutlookEmail', 'locateEmail', 'listInboxFolders', 'moveOutlookEmails',
     'listOutlookDrafts', 'sendDrafts', 'sendAllDrafts', 'deleteOutlookDrafts', 'deleteOutlookEmails',
     'purgeDeletedItems', 'saveEmailAttachment', 'saveEmailAttachments', 'cleanUndeliverableEmails',
-    'collectBouncedRecipients', 'readSentRecipientGroups', 'listOutlookSignatures', 'readOutlookSignatureHtml',
+    'collectBouncedRecipients', 'readSentRecipientGroups', 'readBounceReport', 'listOutlookSignatures', 'readOutlookSignatureHtml',
     'readTemplateEmails', 'saveTemplateEmail', 'editEmailTemplate',
 ];
 

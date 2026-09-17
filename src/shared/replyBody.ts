@@ -1,9 +1,9 @@
 // Everything a reply needs before it touches Outlook: resolving a named
 // template, keeping its section, filling placeholders and a named signature,
 // and reducing the result to HTML that can be inserted into another document.
-// String work plus three reads each platform already provides, so it is done
-// once here for both.
-import { composeTemplateBody } from '../templateBody';
+// Signing a new email uses the signature half of it. String work plus three
+// reads each platform already provides, so it is done once here for both.
+import { composeTemplateBody, findTokens, replaceToken } from '../templateBody';
 import { InvalidRequestError, NotFoundError } from '../errors';
 import type { ReadTemplatesRequest } from '../backend';
 import type { TemplateFolderResult } from '../types';
@@ -72,6 +72,40 @@ export async function resolveTemplateHtml(
     return match.htmlBody;
 }
 
+/** Where a template asks for the signature. */
+const SIGNATURE_TOKEN = '{{SIGNATURE}}';
+
+/** A named signature's HTML, ready to insert into a body; NOT_FOUND naming the ones there are. */
+export async function resolveSignatureHtml(
+    deps: Pick<ReplyBodyDeps, 'readOutlookSignatureHtml' | 'listOutlookSignatures'>,
+    name: string,
+): Promise<string> {
+    const signatureHtml = await deps.readOutlookSignatureHtml(name);
+    if (signatureHtml.trim() === '') {
+        const available = (await deps.listOutlookSignatures()).join(', ') || '(none)';
+        throw new NotFoundError('signature', `Outlook signature '${name}' not found. Signatures on this machine: ${available}.`);
+    }
+    return innerBodyHtml(signatureHtml);
+}
+
+/** Whether a body says where its signature goes. */
+function asksForSignature(html: string): boolean {
+    return findTokens(html, [SIGNATURE_TOKEN]).length > 0;
+}
+
+/**
+ * Sign a body: in its `{{SIGNATURE}}` placeholder when it has one, otherwise at
+ * the end, where Outlook itself would put a signature. In a whole document the
+ * end is just inside `</body>`, since anything after `</html>` is outside the
+ * email.
+ */
+export function placeSignature(html: string, signature: string): string {
+    if (asksForSignature(html)) return replaceToken(html, SIGNATURE_TOKEN, signature);
+    const block = `<br>${signature}`;
+    const close = html.toLowerCase().lastIndexOf('</body');
+    return close === -1 ? html + block : html.slice(0, close) + block + html.slice(close);
+}
+
 /**
  * The HTML to insert above the quoted original: template resolved, section
  * kept, placeholders and signature filled, document wrapper removed.
@@ -91,18 +125,13 @@ export async function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDep
         throw new InvalidRequestError('A reply needs either htmlBody or templateSubject.');
     }
 
+    // A signature with a placeholder to go in is filled with the others, so
+    // one that sat in a dropped section goes with it. Without one it is added
+    // below the new text once everything else is composed.
     let placeholders = content.templatePlaceholders;
-    if (content.signatureName) {
-        const signatureHtml = await deps.readOutlookSignatureHtml(content.signatureName);
-        if (signatureHtml.trim() === '') {
-            const available = (await deps.listOutlookSignatures()).join(', ') || '(none)';
-            throw new NotFoundError(
-                'signature',
-                `Outlook signature '${content.signatureName}' not found. Signatures on this machine: ${available}.`,
-            );
-        }
-        placeholders = {...placeholders, SIGNATURE: innerBodyHtml(signatureHtml)};
-    }
+    const signature = content.signatureName ? await resolveSignatureHtml(deps, content.signatureName) : '';
+    const signatureInPlace = signature !== '' && asksForSignature(html);
+    if (signatureInPlace) placeholders = {...placeholders, SIGNATURE: signature};
 
     const hasPlaceholders = !!placeholders && Object.keys(placeholders).length > 0;
     if (fromTemplate || content.templateSection || hasPlaceholders) {
@@ -112,7 +141,8 @@ export async function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDep
             label: content.templateSubject,
         });
     }
-    return innerBodyHtml(html);
+    const body = innerBodyHtml(html);
+    return signature !== '' && !signatureInPlace ? placeSignature(body, signature) : body;
 }
 
 /**

@@ -27,9 +27,11 @@ import {
     stringRecord,
     textList,
 } from './shared/args';
-import { composeReplyHtml } from './shared/replyBody';
+import { composeReplyHtml, placeSignature, resolveSignatureHtml } from './shared/replyBody';
+import { accountSearchOrder, bestMatch, daysBackFor, requireDescribed, subjectPrefilter, } from './shared/locate';
+import { buildBounceReport } from './shared/bounceReport';
 import { folderOption, splitQuotedOriginal } from './mail';
-import { InvalidRequestError, NotFoundError, UnsupportedPlatformError } from './errors';
+import { AbortedError, InvalidRequestError, NotFoundError, UnsupportedPlatformError } from './errors';
 import {
     attachmentDestination,
     type BridgeOptions,
@@ -72,6 +74,7 @@ const OPERATION_NAMES = {
     readSelectedEmail: true,
     readEmailBody: true,
     openOutlookEmail: true,
+    locateEmail: true,
     listInboxFolders: true,
     moveOutlookEmails: true,
     listOutlookDrafts: true,
@@ -85,6 +88,7 @@ const OPERATION_NAMES = {
     cleanUndeliverableEmails: true,
     collectBouncedRecipients: true,
     readSentRecipientGroups: true,
+    readBounceReport: true,
     listOutlookSignatures: true,
     readOutlookSignatureHtml: true,
     readTemplateEmails: true,
@@ -166,6 +170,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         async sendOutlookEmail(params) {
             const platform = backend();
             const p = requireObject(params, 'params');
+            const signatureName = optionalText(p.signatureName, 'signatureName');
             const request = {
                 account: requiredText(p.emailAccount, 'emailAccount'),
                 to: recipientList(p.to, 'to'),
@@ -178,6 +183,9 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             };
             if (request.disposition === 'send' && request.to.length + request.cc.length + request.bcc.length === 0) {
                 throw new InvalidRequestError('An email sent immediately needs at least one recipient.');
+            }
+            if (signatureName) {
+                request.htmlBody = placeSignature(request.htmlBody, await resolveSignatureHtml(platform, signatureName));
             }
             await platform.sendOutlookEmail(request);
         },
@@ -270,6 +278,54 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         async openOutlookEmail(email) {
             const platform = backend();
             await platform.openOutlookEmail(emailLocator(email));
+        },
+
+        async locateEmail(description, options) {
+            const platform = backend();
+            const d = requireObject(description, 'description');
+            const wanted = {
+                subject: optionalText(d.subject, 'subject'),
+                sender: optionalText(d.sender, 'sender'),
+                receivedTime: optionalText(d.receivedTime, 'receivedTime'),
+            };
+            requireDescribed(wanted);
+            const emailAccount = optionalText(d.emailAccount, 'emailAccount');
+            const folderPath = optionalText(d.folderPath, 'folderPath');
+            const fallbackDays = count(optionsObject(options).daysBack, 'daysBack', DEFAULTS.daysBack, 1, MAX_DAYS);
+            const search = {
+                daysBack: Math.min(MAX_DAYS, daysBackFor(wanted.receivedTime, fallbackDays)),
+                subjectLike: subjectPrefilter(wanted.subject),
+                excludeReplies: false,
+                requireAttachment: false,
+                includeFolders: [],
+                excludeFolders: [],
+                // Judging a match reads subjects, senders and times, so the bodies
+                // (the heavy part of a scan) are left behind.
+                includeBody: false,
+            };
+            const accounts = emailAccount
+                ? [emailAccount]
+                : accountSearchOrder(await platform.getOutlookAccounts(), folderPath);
+
+            let searched = 0;
+            let firstFailure: unknown;
+            for (const account of accounts) {
+                let matches;
+                try {
+                    matches = await platform.searchInboxByFilter({account, ...search});
+                } catch (error) {
+                    if (error instanceof AbortedError) throw error;
+                    // One mailbox that can't be read shouldn't decide the answer
+                    // for the rest; only every one failing is an error.
+                    firstFailure ??= error;
+                    continue;
+                }
+                searched++;
+                const found = bestMatch(wanted, matches);
+                if (found) return found;
+            }
+            if (searched === 0 && firstFailure !== undefined) throw firstFailure;
+            return null;
         },
 
         async listInboxFolders(emailAccount, options) {
@@ -386,6 +442,17 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
                 daysBack: count(o.daysBack, 'daysBack', DEFAULTS.bounceDaysBack, 1, MAX_DAYS),
                 limit: count(o.limit, 'limit', DEFAULTS.sentGroupsLimit, 1, 100_000),
             });
+        },
+
+        async readBounceReport(emailAccount, options) {
+            const platform = backend();
+            const account = requiredText(emailAccount, 'emailAccount');
+            const o = optionsObject(options);
+            const daysBack = count(o.daysBack, 'daysBack', DEFAULTS.bounceDaysBack, 1, MAX_DAYS);
+            const includeDeletedItems = flag(o.includeDeletedItems, 'includeDeletedItems', true);
+            const bounced = await platform.collectBouncedRecipients({account, daysBack, includeDeletedItems});
+            const sent = await platform.readSentRecipientGroups({account, daysBack, limit: DEFAULTS.sentGroupsLimit});
+            return buildBounceReport(account, daysBack, bounced, sent);
         },
 
         async listOutlookSignatures() {

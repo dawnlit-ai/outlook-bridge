@@ -125,6 +125,97 @@ test('a listing row can be passed back in as the email', async () => {
     assert.deepEqual(last('openOutlookEmail').args[0], {entryId: 'E10'});
 });
 
+// ── Finding an email again ───────────────────────────────────────────────
+
+function match(fields) {
+    return {
+        entryId: 'X', storeId: 'S', subject: '', senderName: '', senderEmail: '', receivedTime: '',
+        body: '', attachmentNames: [], folderPath: '', ...fields,
+    };
+}
+
+test('locateEmail needs two fields to tell an email from its thread', async () => {
+    const {outlook, calls} = setup();
+    await rejectsWith(outlook.locateEmail({subject: 'RE: Offer'}), 'INVALID_REQUEST');
+    await rejectsWith(outlook.locateEmail({subject: 'RE: Offer', receivedTime: 'last Tuesday'}), 'INVALID_REQUEST');
+    assert.equal(calls.length, 0);
+});
+
+test('locateEmail narrows the search, starts with the mailbox the folder names, and prefers the exact minute', async () => {
+    const searched = [];
+    const {outlook} = setup({
+        getOutlookAccounts: () => ['me@example.com', 'team@example.com'],
+        searchInboxByFilter: request => {
+            searched.push(request);
+            if (request.account !== 'team@example.com') return [];
+            return [
+                match({
+                    entryId: 'DAY',
+                    subject: 'RE: FW: Rate for Savannah',
+                    senderEmail: 'jo@x.com',
+                    receivedTime: '2026-09-01 08:00'
+                }),
+                match({
+                    entryId: 'MIN',
+                    subject: 'Re: Rate for Savannah',
+                    senderEmail: 'Jo@X.com',
+                    receivedTime: '2026-09-01 14:32'
+                }),
+                match({
+                    entryId: 'OTHER',
+                    subject: 'RE: Rate for Savannah',
+                    senderEmail: 'amy@x.com',
+                    receivedTime: '2026-09-01 14:32'
+                }),
+            ];
+        },
+    });
+    const found = await outlook.locateEmail({
+        subject: 'RE: Rate for Savannah',
+        sender: 'Jo Doe <jo@x.com>',
+        receivedTime: '2026-09-01T14:32',
+        folderPath: '\\\\team@example.com\\Inbox\\Savannah',
+    });
+    assert.equal(found.entryId, 'MIN');
+    assert.equal(searched.length, 1, 'the named mailbox answered, so no other was searched');
+    assert.equal(searched[0].account, 'team@example.com');
+    assert.equal(searched[0].subjectLike, '*Rate for Savannah*');
+    assert.equal(searched[0].includeBody, false);
+    assert.ok(searched[0].daysBack >= 2);
+});
+
+test('locateEmail returns null rather than an email that disagrees on any field', async () => {
+    const {outlook} = setup({
+        getOutlookAccounts: () => ['me@example.com'],
+        searchInboxByFilter: () => [match({
+            subject: 'RE: Offer',
+            senderName: 'Amy',
+            senderEmail: 'amy@x.com',
+            receivedTime: '2026-09-01 10:00'
+        })],
+    });
+    assert.equal(await outlook.locateEmail({subject: 'Offer', sender: 'jo@x.com'}), null);
+    assert.equal(await outlook.locateEmail({subject: 'Offer', receivedTime: '2026-09-02'}), null);
+    const byName = await outlook.locateEmail({sender: 'amy', receivedTime: '2026-09-01 10:00'});
+    assert.equal(byName.senderEmail, 'amy@x.com');
+});
+
+test('locateEmail skips a mailbox it cannot read, and fails only when none could be', async () => {
+    const {outlook} = setup({
+        getOutlookAccounts: () => ['broken@example.com', 'me@example.com'],
+        searchInboxByFilter: request => {
+            if (request.account === 'broken@example.com') throw new Error('store offline');
+            return [match({entryId: 'OK', subject: 'Offer', senderEmail: 'jo@x.com'})];
+        },
+    });
+    assert.equal((await outlook.locateEmail({subject: 'Offer', sender: 'jo@x.com'})).entryId, 'OK');
+    await assert.rejects(outlook.locateEmail({
+        subject: 'Offer',
+        sender: 'jo@x.com',
+        emailAccount: 'broken@example.com'
+    }), /store offline/);
+});
+
 // ── Sending ──────────────────────────────────────────────────────────────
 
 test('sendOutlookEmail splits recipients, keeping display names whole', async () => {
@@ -185,6 +276,52 @@ test('an email sent immediately needs a recipient; a draft does not', async () =
         sendImmediately: true
     }), 'INVALID_REQUEST');
     await outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's', htmlBody: 'b'});
+});
+
+const SIGNATURE_FILE = '<html><head><style>p{}</style></head><body><b>Jo</b></body></html>';
+
+test('sendOutlookEmail signs inside a whole document, never after it', async () => {
+    const {outlook, last} = setup({readOutlookSignatureHtml: () => SIGNATURE_FILE});
+    await outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT,
+        subject: 's',
+        htmlBody: '<html><body><p>Hello</p></body></html>',
+        signatureName: 'Work',
+    });
+    assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<html><body><p>Hello</p><br><b>Jo</b></body></html>');
+});
+
+test('sendOutlookEmail puts the signature in its placeholder, or after a fragment', async () => {
+    const {outlook, last} = setup({readOutlookSignatureHtml: () => SIGNATURE_FILE});
+    const base = {emailAccount: ACCOUNT, subject: 's', signatureName: 'Work'};
+    await outlook.sendOutlookEmail({...base, htmlBody: '<p>Hi</p><p>{{<span>SIGNATURE</span>}}</p><p>PS</p>'});
+    assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<p>Hi</p><p><b>Jo</b></p><p>PS</p>');
+    await outlook.sendOutlookEmail({...base, htmlBody: '<p>Hi</p>'});
+    assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<p>Hi</p><br><b>Jo</b>');
+});
+
+test('sendOutlookEmail checks the request before reading a signature, and names the ones there are', async () => {
+    const {outlook, calls} = setup({readOutlookSignatureHtml: () => '', listOutlookSignatures: () => ['Home']});
+    await rejectsWith(outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, subject: 's', htmlBody: 'b', sendImmediately: true, signatureName: 'Work',
+    }), 'INVALID_REQUEST');
+    assert.equal(calls.length, 0);
+    await assert.rejects(
+        outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's', htmlBody: 'b', signatureName: 'Work'}),
+        error => error.code === 'NOT_FOUND' && error.kind === 'signature' && /Home/.test(error.message),
+    );
+    assert.ok(!calls.some(call => call.name === 'sendOutlookEmail'), 'nothing is sent unsigned');
+});
+
+test('replyOutlookEmail puts a signature with no placeholder below the new text', async () => {
+    const {outlook, last} = setup({readOutlookSignatureHtml: () => SIGNATURE_FILE});
+    await outlook.replyOutlookEmail({
+        emailAccount: ACCOUNT,
+        entryId: 'E1',
+        htmlBody: '<html><body><p>Thanks.</p></body></html>',
+        signatureName: 'Work',
+    });
+    assert.equal(last('replyOutlookEmail').args[0].html, '<p>Thanks.</p><br><b>Jo</b>');
 });
 
 test('replyOutlookEmail composes a template section, placeholders and signature before the backend sees it', async () => {
@@ -279,6 +416,32 @@ test('batch operations deduplicate ids and skip the backend for an empty batch',
         failed: []
     });
     assert.equal(calls.length, before);
+});
+
+test('readBounceReport lists each sent message a recipient bounced from, and what no send explains', async () => {
+    const {outlook, last} = setup({
+        collectBouncedRecipients: () => ['Gone@a.com', 'dead@b.com', 'alias@c.com', 'gone@a.com'],
+        readSentRecipientGroups: () => [
+            {entryId: 'OLD', subject: 'Offer', sentOn: '2026-08-01 09:00', recipients: ['dead@b.com']},
+            {entryId: 'NEW', subject: 'Offer', sentOn: '2026-08-10 09:00', recipients: ['GONE@a.com', 'ok@a.com']},
+            {entryId: 'FINE', subject: 'Hello', sentOn: '2026-08-05 09:00', recipients: ['ok@a.com']},
+        ],
+    });
+    const report = await outlook.readBounceReport(ACCOUNT, {daysBack: 14, includeDeletedItems: false});
+    assert.deepEqual(last('collectBouncedRecipients').args[0], {
+        account: ACCOUNT,
+        daysBack: 14,
+        includeDeletedItems: false
+    });
+    assert.equal(last('readSentRecipientGroups').args[0].daysBack, 14);
+    assert.deepEqual(report.bouncedAddresses, ['gone@a.com', 'dead@b.com', 'alias@c.com']);
+    assert.deepEqual(report.sends.map(send => [send.entryId, send.failedRecipients, send.allFailed]), [
+        ['NEW', ['gone@a.com'], false],
+        ['OLD', ['dead@b.com'], true],
+    ]);
+    assert.deepEqual(report.sends[0].recipients, ['gone@a.com', 'ok@a.com']);
+    assert.deepEqual(report.unmatchedAddresses, ['alias@c.com']);
+    assert.equal(report.scannedDays, 14);
 });
 
 test('cleanUndeliverableEmails dry-runs unless deleting is asked for', async () => {
