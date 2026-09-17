@@ -57,7 +57,7 @@ export {
 export type { OutlookErrorCode, NotFoundKind, ScriptRunner } from './errors';
 
 // Platform-neutral helpers, usable without Outlook.
-export { mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from './mail';
+export { hasReplyPrefix, mailFolderRef, splitQuotedOriginal, threadSubject, WELL_KNOWN_FOLDERS } from './mail';
 export {
     composeTemplateBody,
     findTemplateMarkers,

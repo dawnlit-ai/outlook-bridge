@@ -6,10 +6,12 @@ const assert = require('node:assert/strict');
 
 const {
     folderOption,
+    hasReplyPrefix,
     mailFolderRef,
     REPLY_PREFIX,
     splitQuotedOriginal,
     subjectGlobSource,
+    threadSubject,
     WELL_KNOWN_FOLDERS,
 } = require('../dist/mail.js');
 
@@ -73,6 +75,26 @@ test('REPLY_PREFIX recognizes replies and forwards across languages', () => {
     for (const subject of ['Regarding the invoice', 'Fwding soon', 'Rate request']) {
         assert.ok(!REPLY_PREFIX.test(subject), subject);
     }
+});
+
+test('hasReplyPrefix: only a prefix at the start counts', () => {
+    assert.equal(hasReplyPrefix('  re : Rate request'), true);
+    assert.equal(hasReplyPrefix('[EXTERNAL] RE: Rate request'), false);
+    assert.equal(hasReplyPrefix('Rate request re: Savannah'), false);
+    assert.equal(hasReplyPrefix(''), false);
+});
+
+test('threadSubject: strips every stacked prefix, in any language', () => {
+    assert.equal(threadSubject('RE: FW: RE[2]: Rate request'), 'Rate request');
+    assert.equal(threadSubject('回复：RE:Fwd: Rate request'), 'Rate request');
+    assert.equal(threadSubject('AW: SV: TR: Rate request'), 'Rate request');
+});
+
+test('threadSubject: collapses whitespace, keeps case and words that only start like a prefix', () => {
+    assert.equal(threadSubject('  RE:   Inquiry  trucking\trate '), 'Inquiry trucking rate');
+    assert.equal(threadSubject('Regarding the Invoice'), 'Regarding the Invoice');
+    assert.equal(threadSubject('RE: Re: Rate request'), threadSubject('Rate request'));
+    assert.equal(threadSubject('RE:'), '');
 });
 
 test('splitQuotedOriginal: Outlook "-----Original Message-----"', () => {

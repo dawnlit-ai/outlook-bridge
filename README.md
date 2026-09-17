@@ -59,6 +59,10 @@ same defaults and the same validation on both platforms.
 
 Each is documented where it is declared, in `OutlookBridge` (see `dist/types.d.ts`), with every option and default.
 
+A few pure helpers need no Outlook: `threadSubject` (a subject with every stacked reply and forward prefix stripped, in
+any of the languages `RE:`, `AW:` or `回复:` come in — the subject a whole thread shares), `hasReplyPrefix`,
+`splitQuotedOriginal` (the sender's new text apart from the quoted thread) and `mailFolderRef`.
+
 ### Identifying an email
 
 Listings return an `entryId` and a `storeId`. Operations on one email accept an `EmailRef`: the entry id alone, or any

@@ -103,6 +103,29 @@ export const REPLY_PREFIX_SOURCE =
 export const REPLY_PREFIX = new RegExp(REPLY_PREFIX_SOURCE, 'i');
 
 /**
+ * Whether a subject opens on a reply or forward prefix.
+ *
+ * This reads what the subject claims, not how the email was made: a forward
+ * carries a prefix too, and a client can leave one off a real reply.
+ */
+export function hasReplyPrefix(subject: string): boolean {
+    return REPLY_PREFIX.test(subject);
+}
+
+/**
+ * The subject every message in a thread shares: every reply and forward prefix
+ * stripped, however many clients stacked them (`RE: FW: RE[2]: Rate request`
+ * is `Rate request`), and whitespace collapsed. Case is kept, so lower-case
+ * both sides to compare two threads.
+ */
+export function threadSubject(subject: string): string {
+    let rest = subject;
+    // Each pass removes at least the prefix's colon, so this always ends.
+    while (REPLY_PREFIX.test(rest)) rest = rest.replace(REPLY_PREFIX, '');
+    return rest.replace(/\s+/g, ' ').trim();
+}
+
+/**
  * A subject glob as an anchored regex source: `*` matches any run, `?` one
  * character, everything else itself. Written with constructs JavaScript and
  * .NET read identically, so both platforms apply exactly the same test.
