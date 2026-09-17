@@ -1,10 +1,10 @@
-// Unlike Windows (files on disk), Outlook for Mac serves signature content
-// directly through AppleScript, images included (inline data or remote refs).
-import { asEscape, runOsaScript } from './run';
+// Outlook for Mac serves signatures through AppleScript, images included
+// (inline data or remote references), where Windows keeps them as files.
+import { asString, runOsaScript } from './run';
 
-/** Names of the user's Outlook signatures. */
+/** The signature names, sorted. */
 export async function listOutlookSignatures(): Promise<string[]> {
-    const script = `
+    const raw = await runOsaScript(`
 set sigNames to {}
 tell application "Microsoft Outlook"
     try
@@ -14,20 +14,18 @@ tell application "Microsoft Outlook"
     end try
 end tell
 set AppleScript's text item delimiters to linefeed
-return sigNames as string`;
-    const raw = await runOsaScript(script, 15000);
+return sigNames as string`, 'quick');
     return raw.split('\n').map(s => s.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b));
 }
 
-/** Read a named signature's HTML. Returns '' if the signature can't be found. */
+/** A signature's HTML; '' when there is no signature by that name. */
 export async function readOutlookSignatureHtml(name: string): Promise<string> {
-    const script = `
+    return runOsaScript(`
 tell application "Microsoft Outlook"
     try
-        return content of (first signature whose name is "${asEscape(name)}")
+        return content of (first signature whose name is ${asString(name)})
     on error
         return ""
     end try
-end tell`;
-    return runOsaScript(script, 15000);
+end tell`, 'quick');
 }

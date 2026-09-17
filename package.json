@@ -1,7 +1,7 @@
 {
   "name": "@dawnlit/outlook-bridge",
-  "version": "1.1.1",
-  "description": "Desktop Outlook automation for Node — read, send, reply, file, and template mail by driving the real Outlook client.",
+  "version": "2.0.0",
+  "description": "Desktop Outlook automation for Node — read, search, send, reply, file, and template mail by driving the real Outlook client on Windows and macOS.",
   "license": "Apache-2.0",
   "author": "Dawnlit",
   "homepage": "https://github.com/dawnlit-ai/outlook-bridge#readme",
@@ -39,7 +39,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p .",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p .",
     "test": "npm run build && node --test \"test/*.test.js\"",
     "prepare": "npm run build"
   },

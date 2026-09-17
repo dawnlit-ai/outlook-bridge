@@ -1,20 +1,20 @@
-// Process-wide knobs and shared scratch-file handling for the generated
-// PowerShell / AppleScript runs.
+// Settings, and the scratch files every run needs.
 //
-// Every call in this package works by generating a script and shelling out to an
-// interpreter, which leaves a consumer four things they cannot otherwise reach:
-// how long a run may take, how much it may print, how to call it off, and what
-// the script actually said when it failed. Those are the settings here.
+// Each operation generates a script and runs it under an interpreter, which
+// leaves a caller four things they cannot otherwise reach: how long a run may
+// take, how much it may print, how to call it off, and what the script actually
+// said. Those are the settings here — process-wide through `configure()`, or per
+// bridge through `createOutlookBridge()`.
 import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { InvalidRequestError, type ScriptRunner } from './errors';
 
 /** One completed script run, handed to the `debug` hook. */
 export interface BridgeDebugEvent {
-    /** Which interpreter ran it. */
-    runner: 'powershell' | 'osascript';
-    /** The generated script, verbatim — the thing you actually want when a run fails. */
+    runner: ScriptRunner;
+    /** The script exactly as it ran. */
     script: string;
     durationMs: number;
     /** Present only when the run failed. */
@@ -23,91 +23,102 @@ export interface BridgeDebugEvent {
 
 export interface BridgeOptions {
     /**
-     * Default ceiling (ms) on a single script run; 0 disables it. Calls that
-     * already carry a specific budget (a full-mailbox scan, a purge) keep their
-     * own and ignore this.
+     * Ceiling on every script run, in milliseconds, replacing each operation's
+     * own budget; 0 disables timeouts. Leave unset (or pass null to go back) to
+     * let each operation use a budget sized for its work — a minute for a
+     * lookup, up to ten for purging Deleted Items. `editEmailTemplate` waits on
+     * a person and is never timed; cancel it with `signal`.
      */
-    timeoutMs?: number;
+    timeoutMs?: number | null;
     /**
-     * Max bytes a script may write to stdout before the run is killed. A read
-     * that returns message bodies is what pushes against this — raise it before
-     * scanning a mailbox that returns thousands of matches.
+     * Max bytes a script may print before the run is killed with
+     * OUTPUT_TOO_LARGE. Searches that return whole bodies push against this.
+     * Default 8 MiB.
      */
     maxBufferBytes?: number;
-    /** Directory for generated scripts and for saved attachments when the caller
-     *  names no destination. Defaults to the OS temp directory. */
+    /** Directory for generated scripts, and for saved attachments when a call
+     *  names no destination. Default: the OS temp directory. */
     tempDir?: string;
     /**
-     * Cancels in-flight runs: the interpreter is killed and the call rejects with
-     * an `AbortedError`. A timeout only caps a run's length — this is how a UI
-     * with a Cancel button, or a shutting-down process, calls one off early.
-     *
-     * Most useful scoped to the calls you want to cancel rather than set process
-     * wide: `bridge.withOptions({ signal }).searchInboxByFilter(...)`.
+     * Cancels in-flight runs: the interpreter is killed and the call rejects
+     * with ABORTED. Most useful scoped to the calls it should cancel:
+     * `bridge.withOptions({ signal }).searchInboxByFilter(...)`.
      */
     signal?: AbortSignal;
-    /** `true` logs every generated script to stderr; a function receives each run
-     *  instead. Defaults to on when OUTLOOK_BRIDGE_DEBUG is set to a non-empty,
-     *  non-'0' value. */
+    /** `true` logs every script to stderr; a function receives each run
+     *  instead. Default: on when OUTLOOK_BRIDGE_DEBUG is set to anything but '' or '0'. */
     debug?: boolean | ((event: BridgeDebugEvent) => void);
 }
 
-export type ResolvedConfig = Required<Pick<BridgeOptions, 'timeoutMs' | 'maxBufferBytes' | 'tempDir'>>
-    & Pick<BridgeOptions, 'debug' | 'signal'>;
+/** The settings a call runs with, every default applied. */
+export interface ResolvedConfig {
+    /** undefined = each operation's own budget. */
+    readonly timeoutMs: number | undefined;
+    readonly maxBufferBytes: number;
+    readonly tempDir: string;
+    readonly signal: AbortSignal | undefined;
+    readonly debug: boolean | ((event: BridgeDebugEvent) => void);
+}
 
 const envDebug = process.env.OUTLOOK_BRIDGE_DEBUG;
 
-/** The process-wide defaults, as mutated by `configure()`. */
-const globalConfig: ResolvedConfig = {
-    timeoutMs: 120_000,
+/** The process-wide settings, as `configure()` leaves them. */
+let globalConfig: ResolvedConfig = {
+    timeoutMs: undefined,
     maxBufferBytes: 8 * 1024 * 1024,
     tempDir: os.tmpdir(),
+    signal: undefined,
     debug: !!envDebug && envDebug !== '0',
 };
 
 /**
- * Per-instance config, scoped to an async call tree.
+ * Per-bridge settings, scoped to an async call tree.
  *
- * `createOutlookBridge()` hands each instance its own settings, but the platform
- * services are thousands of lines of module-level functions that read
- * `getConfig()` directly. Threading a config parameter through all of them would
- * touch every line for no behavioural gain; an AsyncLocalStorage lets an instance
- * wrap its calls instead, and the store follows across every `await` inside one. Two
- * bridges with different timeouts can then run concurrently in one process,
- * which is the thing a second consumer actually needs and the global could never
- * give them.
+ * The platform code reads its settings through `getConfig()` wherever it needs
+ * them rather than having a config threaded through every function. A bridge
+ * instance runs each call inside `withConfig`, and the store follows every
+ * `await` beneath it — so two bridges with different timeouts can run at once
+ * in one process without seeing each other's.
  */
 const scoped = new AsyncLocalStorage<ResolvedConfig>();
 
-/** Merge caller options over a base, ignoring the keys they left out. */
+/** Caller options merged over a base; keys left out keep the base's value. */
 export function mergeOptions(base: ResolvedConfig, options: BridgeOptions = {}): ResolvedConfig {
-    const next: ResolvedConfig = { ...base };
-    if (options.timeoutMs !== undefined) next.timeoutMs = Math.max(0, options.timeoutMs);
-    if (options.maxBufferBytes !== undefined) next.maxBufferBytes = Math.max(1, options.maxBufferBytes);
+    const next = {...base};
+    if (options.timeoutMs === null) next.timeoutMs = undefined;
+    else if (options.timeoutMs !== undefined) next.timeoutMs = nonNegative(options.timeoutMs, 'timeoutMs');
+    if (options.maxBufferBytes !== undefined) next.maxBufferBytes = Math.max(1, nonNegative(options.maxBufferBytes, 'maxBufferBytes'));
     if (options.tempDir !== undefined) next.tempDir = options.tempDir;
     if (options.signal !== undefined) next.signal = options.signal;
     if (options.debug !== undefined) next.debug = options.debug;
     return next;
 }
 
-/**
- * Override the process-wide defaults. Merges, so naming one option leaves the
- * rest alone. Call before the first automation call.
- *
- * Affects every caller in the process. Prefer `createOutlookBridge(options)` in
- * anything that shares a process with code you don't own.
- */
-export function configure(options: BridgeOptions): void {
-    Object.assign(globalConfig, mergeOptions(globalConfig, options));
+function nonNegative(value: number, name: string): number {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+        throw new InvalidRequestError(`${name} must be a number (got ${String(value)}).`);
+    }
+    return Math.max(0, Math.floor(value));
 }
 
-/** The settings in force for the current call — the enclosing scope's, else global. */
-export function getConfig(): Readonly<ResolvedConfig> {
+/**
+ * Change the process-wide settings. Merges, so naming one option leaves the
+ * rest alone.
+ *
+ * Affects every caller in the process that uses the exported functions. Prefer
+ * `createOutlookBridge(options)` in a process shared with code you don't own.
+ */
+export function configure(options: BridgeOptions): void {
+    globalConfig = mergeOptions(globalConfig, options);
+}
+
+/** The settings in force for the current call: the enclosing bridge's, else the process-wide ones. */
+export function getConfig(): ResolvedConfig {
     return scoped.getStore() ?? globalConfig;
 }
 
-/** The process-wide defaults, ignoring any active scope. */
-export function getGlobalConfig(): Readonly<ResolvedConfig> {
+/** The process-wide settings, ignoring any bridge scope. */
+export function getGlobalConfig(): ResolvedConfig {
     return globalConfig;
 }
 
@@ -116,45 +127,99 @@ export function withConfig<T>(config: ResolvedConfig, fn: () => T): T {
     return scoped.run(config, fn);
 }
 
-/** Report one finished script run to the configured debug hook. */
+/**
+ * How long each kind of run may take when no `timeoutMs` is set.
+ *
+ * Generous on purpose: a budget is a guard against a hung interpreter, not a
+ * performance target, and the first call against an Outlook that isn't running
+ * yet spends much of its budget starting it.
+ */
+export const RUN_BUDGETS = {
+    /** One lookup: accounts, signatures, opening or reading a single email. */
+    quick: 60_000,
+    /** Composing, filing, saving attachments, or reading one folder. */
+    standard: 120_000,
+    /** Walking a mailbox tree, or acting on a batch of items. */
+    scan: 300_000,
+    /** Emptying Deleted Items. */
+    purge: 600_000,
+} as const;
+
+/** A budget name, or 'interactive' for a run that waits on a person and is never timed. */
+export type RunBudget = keyof typeof RUN_BUDGETS | 'interactive';
+
+/** The timeout one run gets: the configured ceiling if there is one, else its budget. */
+export function timeoutFor(budget: RunBudget): number {
+    if (budget === 'interactive') return 0;
+    return getConfig().timeoutMs ?? RUN_BUDGETS[budget];
+}
+
+/** Report one finished run to the configured debug hook. */
 export function reportRun(event: BridgeDebugEvent): void {
-    const { debug } = getConfig();
+    const {debug} = getConfig();
     if (!debug) return;
     if (typeof debug === 'function') {
         debug(event);
         return;
     }
     const outcome = event.error ? `FAILED: ${event.error}` : 'ok';
-    process.stderr.write(
-        `[outlook-bridge] ${event.runner} ${event.durationMs}ms ${outcome}\n${event.script}\n`,
-    );
+    process.stderr.write(`[outlook-bridge] ${event.runner} ${event.durationMs}ms ${outcome}\n${event.script}\n`);
 }
 
 /**
- * Path for a scratch file in the configured temp directory. The random suffix
- * matters: two concurrent calls landing in the same millisecond would otherwise
- * pick the same name and overwrite each other's script mid-run.
+ * A scratch-file path in the configured temp directory. The random part
+ * matters: two concurrent calls in the same millisecond would otherwise pick the
+ * same name and overwrite each other's script mid-run.
  */
 export function tempFile(kind: string, extension: string): string {
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     return path.join(getConfig().tempDir, `outlook-bridge-${kind}-${unique}.${extension}`);
 }
 
-/**
- * A fresh directory for one call's saved attachments.
- *
- * Deliberately per-call rather than one shared folder: attachments are saved
- * under the name the sender gave them, so two emails that both carry
- * "invoice.pdf" would otherwise silently overwrite each other — and so would two
- * unrelated programs using this package on the same machine.
- */
-export function makeAttachmentDir(): string {
-    return fs.mkdtempSync(path.join(getConfig().tempDir, 'outlook-bridge-attachments-'));
+/** Delete a scratch file, ignoring one that is already gone. */
+export function removeTempFile(file: string): void {
+    try {
+        fs.unlinkSync(file);
+    } catch {
+        // The run is over either way; a leftover scratch file isn't worth failing it.
+    }
 }
 
-/** Resolve a caller-supplied destination, creating it when absent. */
-export function resolveDestDir(destDir?: string): string {
-    if (!destDir) return makeAttachmentDir();
-    fs.mkdirSync(destDir, { recursive: true });
-    return destDir;
+/** A destination for saved attachments, and how to undo creating it. */
+export interface AttachmentDestination {
+    dir: string;
+
+    /** Remove the directory if this call created it and left it empty. */
+    discardIfUnused(): void;
+}
+
+/**
+ * Where one call saves its attachments: the caller's directory (created if
+ * absent), or a fresh private directory of its own.
+ *
+ * Private by default because attachments keep the names senders gave them, so
+ * one shared folder means two emails carrying 'invoice.pdf' overwrite each
+ * other — and so do two programs using this package on one machine.
+ */
+export function attachmentDestination(destDir?: string): AttachmentDestination {
+    if (destDir) {
+        const existed = fs.existsSync(destDir);
+        fs.mkdirSync(destDir, {recursive: true});
+        return {
+            dir: destDir,
+            discardIfUnused() {
+                if (!existed) removeIfEmpty(destDir);
+            },
+        };
+    }
+    const dir = fs.mkdtempSync(path.join(getConfig().tempDir, 'outlook-bridge-attachments-'));
+    return {dir, discardIfUnused: () => removeIfEmpty(dir)};
+}
+
+function removeIfEmpty(dir: string): void {
+    try {
+        if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    } catch {
+        // Nothing to undo if it can't be read.
+    }
 }

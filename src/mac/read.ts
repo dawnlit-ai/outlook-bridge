@@ -1,21 +1,23 @@
 // Reading mail on macOS: one folder, one item, a whole Inbox tree, or whatever
 // is selected in the running Outlook.
 //
-// Every reader here is two passes. Pass 1 indexes a folder with bulk property
-// reads (one Apple event each); pass 2 fetches the expensive fields — body,
+// Every reader is two passes. Pass 1 indexes a folder with bulk property reads
+// (one Apple event each); pass 2 fetches the expensive fields — body,
 // attachments, sender — only for the messages that survived. Reading
 // per-message in a loop costs an event per property and is unusably slow on a
 // real mailbox, which is the whole reason for the shape.
 import {
     AS_LIST_SEP,
-    asEscape,
+    asIdList,
+    asInt,
     asRow,
+    asString,
     field,
     runOsaScript,
     splitFields,
     splitList,
     splitRecords,
-    summaryFields,
+    summaryFields
 } from './run';
 import {
     accountLookupSnippet,
@@ -32,58 +34,28 @@ import {
     rootFolderSnippet,
     senderSnippet,
 } from './scripts';
-import {
-    DEFAULT_SCAN_DAYS,
-    folderLeafName,
-    isOutgoingRoot,
-    mailFolderRef,
-    REPLY_PREFIX,
-    splitQuotedOriginal,
-} from '../mail';
-import { NotFoundError } from '../errors';
-import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
-
-/** How much of a body readInboxEmails previews, matching the Windows reader. */
-const PREVIEW_CHARS = 600;
+import { failureTag, NotFoundError } from '../errors';
+import { folderLeafName, isOutgoingRoot, REPLY_PREFIX, subjectGlobSource } from '../mail';
+import type { RawEmail, ReadInboxRequest, SearchRequest } from '../backend';
+import type { EmailLocator, InboxEmail, InboxSearchMatch, SelectedEmail } from '../types';
 
 /**
- * Read recent messages for the given account, newest first.
- *
- * `entryId` here is Outlook for Mac's small integer message id (e.g. "779"), not
- * the MAPI EntryID string Windows returns. The two are not interchangeable, so
- * don't persist one and look it up on the other platform.
+ * Recent mail from the Inbox root or one folder, newest first. Entry ids here
+ * are Outlook for Mac's integer message ids, not Windows EntryIDs.
  */
-export async function readInboxEmails(
-    emailAccount: string,
-    daysBack: number = 60,
-    limit: number = 50,
-    folder?: string,
-): Promise<InboxEmail[]> {
-    const days = Math.max(0, Math.floor(daysBack));
-    const cap = Math.max(0, Math.floor(limit));
-    if (cap === 0) return [];
-    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
-    // A folder argument that trims away to nothing ("\\", "  ") would otherwise
-    // read the Inbox root and look like it had scoped — the exact silent
-    // mis-scoping this parameter exists to prevent. Mirrors the Windows check.
-    if (folder && folder.trim() && ref.segments.length === 0 && ref.rootId === 6
-        && folder.trim().toLowerCase() !== 'inbox') {
-        throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
-    }
-    const acct = await resolveMacAccount(emailAccount);
-    const resolveScope = mailScopeSnippet(acct, ref, folder || '');
-    const folderPath = macFolderPath(emailAccount, ref.rootLabel, ref.segments);
-    const isOutgoing = isOutgoingRoot(ref.rootId);
+export async function readInboxEmails(request: ReadInboxRequest): Promise<InboxEmail[]> {
+    const acct = await resolveMacAccount(request.account);
+    const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
+    const outgoing = isOutgoingRoot(request.folder.rootId);
 
-    // Pass 1 — index the folder. Folder order isn't documented, so sort here
-    // rather than trusting Outlook to hand back newest-first.
-    const indexScript = `tell application "Microsoft Outlook"
+    // Pass 1 — index the folder. Its order isn't documented, so it is sorted here.
+    const index = (await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
-${resolveScope}
-    set cutoff to (current date) - (${days} * days)
+${mailScopeSnippet(acct, request.folder, request.folderLabel)}
+    set cutoff to (current date) - (${asInt(request.daysBack)} * days)
     set idList to id of every message of scopeFolder
     try
-        set timeList to ${dateProperty(ref.rootId)} of every message of scopeFolder
+        set timeList to ${dateProperty(request.folder.rootId)} of every message of scopeFolder
     on error
         set timeList to {}
     end try
@@ -92,78 +64,70 @@ ${resolveScope}
     repeat with i from 1 to (count of idList)
         set d to missing value
         if hasTimes then set d to item i of timeList
-        -- An item carrying no timestamp of its own (an unsent draft filed into a
-        -- mail folder) is skipped rather than crashing the walk, matching what the
-        -- Windows Restrict on the same property does with it.
+        -- An item with no timestamp of its own (an unsent draft filed into a
+        -- mail folder) is skipped, as the Windows date filter skips it.
         if d is not missing value and d is greater than or equal to cutoff then
             set out to out & (item i of idList as string) & tab & my isoDate(d) & linefeed
         end if
     end repeat
     return out
-end tell`;
-
-    const index = (await runOsaScript(indexScript, 60000))
+end tell`, 'standard'))
         .split('\n')
         .map(line => line.trim())
         .filter(Boolean)
         .map(line => {
             const [id, receivedTime] = line.split('\t');
-            return { id, receivedTime: receivedTime || '' };
+            return {id, receivedTime: receivedTime || ''};
         });
-    // 'yyyy-MM-dd HH:mm' is lexicographically ordered, so plain string compare sorts it.
+    // 'yyyy-MM-dd HH:mm' sorts correctly as a string.
     index.sort((a, b) => b.receivedTime.localeCompare(a.receivedTime));
-    const chosen = index.slice(0, cap);
+    const chosen = index.slice(0, request.limit);
     if (chosen.length === 0) return [];
 
-    // Pass 2 — the expensive reads, only for messages we keep.
-    const detailScript = `tell application "Microsoft Outlook"
-    set wanted to {${chosen.map(c => c.id).join(', ')}}
+    // Pass 2 — the expensive reads, only for the messages kept.
+    const preview = request.previewChars > 0
+        ? `            set bodyText to ""
+            try
+                set bodyText to (plain text content of theMsg) as string
+            end try
+            if (length of bodyText) > ${asInt(request.previewChars)} then set bodyText to text 1 thru ${asInt(request.previewChars)} of bodyText`
+        : '            set bodyText to ""';
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
-    repeat with k from 1 to (count of wanted)
+    repeat with theId in ${asIdList(chosen.map(c => c.id))}
         set theMsg to missing value
         try
-            set theMsg to message id (item k of wanted)
+            set theMsg to message id theId
         end try
         if theMsg is not missing value then
             set subj to ""
             try
                 set subj to (subject of theMsg) as string
             end try
-${isOutgoing ? firstRecipientSnippet('theMsg', '            ') : senderSnippet('theMsg', '            ')}
-            set bodyText to ""
-            try
-                set bodyText to (plain text content of theMsg) as string
-            end try
-            if (length of bodyText) > ${PREVIEW_CHARS} then set bodyText to text 1 thru ${PREVIEW_CHARS} of bodyText
+${outgoing ? firstRecipientSnippet('theMsg', '            ') : senderSnippet('theMsg', '            ')}
+${preview}
             set attNames to {}
             try
                 set attNames to name of every attachment of theMsg
             end try
-            set out to out & ${asRow([
-        '(id of theMsg as string)',
-        'subj',
-        'sndName',
-        'sndAddr',
-        'bodyText',
-        'my sanitizeList(attNames)',
-    ])}
+            set out to out & ${asRow(['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'bodyText', 'my sanitizeList(attNames)'])}
         end if
     end repeat
     return out
-end tell`;
+end tell`, 'standard');
 
-    const byId = new Map(chosen.map(c => [c.id, c.receivedTime]));
-    return splitRecords(await runOsaScript(detailScript, 120000)).map(record => {
+    const receivedById = new Map(chosen.map(c => [c.id, c.receivedTime]));
+    return splitRecords(raw).map(record => {
         const parts = splitFields(record);
         const id = field(parts, 0);
         const attachmentNames = splitList(field(parts, 5));
         return {
             entryId: id,
-            storeId: '', // macOS AppleScript has no StoreID equivalent
+            storeId: '',
             subject: field(parts, 1).trim(),
             senderName: field(parts, 2),
             senderEmail: field(parts, 3),
-            receivedTime: byId.get(id) || '',
+            receivedTime: receivedById.get(id) || '',
             bodyPreview: field(parts, 4),
             attachmentNames,
             attachmentCount: attachmentNames.length,
@@ -173,112 +137,44 @@ end tell`;
 }
 
 /**
- * Read one email's full plain-text body by message id.
- *
- * `storeId` is accepted for signature parity and ignored: macOS has no StoreID,
- * and `message id N` resolves against the application rather than one folder, so
- * the message is found wherever it currently sits — including a subfolder.
- *
- * Uses `plain text content`, matching the Windows reader's use of `.Body`: the
- * same tradeoff applies, so an HTML table's rows flatten and tabular figures are
- * better read from an attachment.
+ * One email's full plain-text body. `storeId` has no macOS meaning: `message id
+ * N` resolves against the application, wherever the message sits.
  */
-export async function readEmailBody(
-    entryId: string,
-    _storeId?: string,
-    maxChars: number = 8000,
-    includeQuoted: boolean = false,
-): Promise<EmailBodyResult> {
-    const id = macMessageId(entryId);
-    const script = `tell application "Microsoft Outlook"
+export async function readEmailBody(email: EmailLocator): Promise<RawEmail> {
+    const id = macMessageId(email.entryId);
+    const parts = summaryFields(await runOsaScript(`tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
 ${messageDetailSnippet(true)}
     return ${asRow(messageDetailFields(true))}
-end tell`;
-
-    // The body is emitted LAST so a stray separator in earlier fields can't shift it.
-    const parts = summaryFields(await runOsaScript(script, 60000));
-    const attachmentNames = splitList(field(parts, MessageDetail.attachmentNames));
-    const { body, quoted, separator } = splitQuotedOriginal(field(parts, MessageDetail.body));
-    // The quoted thread is context, never the priced content, so it is capped
-    // harder than the reply itself — matching the Windows reader.
-    const quotedCap = Math.min(maxChars, 4000);
+end tell`, 'quick'));
     return {
         entryId: field(parts, MessageDetail.id) || id,
         subject: field(parts, MessageDetail.subject).trim(),
         senderName: field(parts, MessageDetail.senderName),
         senderEmail: field(parts, MessageDetail.senderEmail),
         receivedTime: field(parts, MessageDetail.receivedTime),
-        body: body.length > maxChars ? body.slice(0, maxChars) : body,
-        truncated: body.length > maxChars,
-        bodyLength: body.length,
-        quoteSeparator: separator,
-        quotedLength: quoted.length,
-        quotedOriginal: includeQuoted ? quoted.slice(0, quotedCap) : '',
-        attachmentNames,
-        attachmentCount: attachmentNames.length,
+        body: field(parts, MessageDetail.body),
+        attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
     };
 }
 
 /**
- * Translate a Restrict-style `like` pattern to a regex.
+ * Walk every folder under the Inbox for the mail matching the request.
  *
- * Windows hands `subjectLike` to Outlook's server-side Restrict; AppleScript has
- * no equivalent, so the same pattern is applied here instead. `%` and `*` are
- * the any-run wildcards, `_` and `?` match one character, and the match is
- * anchored because that is what SQL `like` means.
+ * The filtering happens here rather than in Outlook: there is no AppleScript
+ * counterpart to COM's server-side `Items.Restrict`, so each folder is indexed in
+ * bulk reads and the subject and date tests run on the index. The results match
+ * Windows; the cost doesn't, and a wide window over a big tree is heavier here.
  */
-function likePattern(pattern: string): RegExp {
-    let source = '';
-    for (const ch of pattern) {
-        if (ch === '%' || ch === '*') source += '.*';
-        else if (ch === '_' || ch === '?') source += '.';
-        else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-    return new RegExp(`^${source}$`, 'i');
-}
-
-/**
- * Walk every folder under the Inbox (recursively) for one account and return the
- * emails matching `filter` — full body included, attachments listed by name but
- * not saved.
- *
- * The filtering happens here rather than in Outlook: `Items.Restrict` is a COM
- * facility with no AppleScript counterpart, so the folder walk indexes each
- * folder in two bulk reads and the subject/date tests run on the index. The
- * observable contract is the same; the cost profile is not, and a `daysBack` of
- * 0 over a large mailbox tree is correspondingly heavier here.
- *
- * `subjectPattern` is applied case-insensitively regardless of the RegExp's own
- * flags, matching PowerShell's `-match`.
- */
-export async function searchInboxByFilter(
-    emailAccount: string,
-    filter: InboxSearchFilter = {},
-    daysBack = 0,
-): Promise<InboxSearchMatch[]> {
-    // No unbounded mode: a caller naming no window gets the default one rather
-    // than a sweep whose reach depends on the mailbox it happens to land on.
-    const days = daysBack > 0 ? Math.max(1, Math.floor(daysBack)) : DEFAULT_SCAN_DAYS;
-    const acct = await resolveMacAccount(emailAccount);
+export async function searchInboxByFilter(request: SearchRequest): Promise<InboxSearchMatch[]> {
+    const acct = await resolveMacAccount(request.account);
+    // AppleScript reaches a child folder by name, so a path entry narrows to its leaf.
+    const asNameList = (list: readonly string[]) => `{${list.map(folderLeafName).filter(Boolean).map(asString).join(', ')}}`;
+    const rootInScope = request.includeFolders.length === 0 ? 'true' : 'false';
     // Sent, Drafts, Deleted and Junk hang UNDER the Inbox on an IMAP profile, so
-    // the walk below would otherwise hand back mail the operator already sent or
-    // threw away as though it had just arrived. Their ids are collected up front
-    // and the recursion refuses to descend into them — the profile's own id where
-    // it records one, the account probe where it does not.
-    // AppleScript reaches a child folder by name, not by the Windows-style path,
-    // so a path entry narrows to its leaf here. Named in the type's contract.
-    const asNameList = (list?: string[]) => (list ?? [])
-        .map(folderLeafName)
-        .filter(Boolean)
-        .map(name => `"${asEscape(name)}"`)
-        .join(', ');
-    const skipNames = asNameList(filter.excludeFolders);
-    const onlyNames = asNameList(filter.includeFolders);
-    // Empty means no include filter, so the root starts in scope; otherwise it is
-    // in scope only when the caller named it.
-    const rootInScope = (filter.includeFolders ?? []).length === 0 ? "true" : "false";
-    const skipIdSnippet = ['sent items', 'deleted items', 'drafts', 'junk mail']
+    // their ids are collected first and the walk never descends into them — by
+    // the profile's own id where it records one, through the account otherwise.
+    const skipIds = ['sent items', 'deleted items', 'drafts', 'junk mail']
         .map(term => {
             const id = acct.folderIds?.[term];
             return id !== undefined
@@ -288,14 +184,15 @@ export async function searchInboxByFilter(
     end try`;
         })
         .join('\n');
+
     // Pass 1 — index every folder under the Inbox: path, id, subject, received.
-    const indexScript = `on scanFolder(theFolder, prefix, cutoff, useCutoff, skipIds, skipNames, onlyNames, inScope)
+    const indexed = splitRecords(await runOsaScript(`on scanFolder(theFolder, prefix, cutoff, skipIds, skipNames, onlyNames, inScope)
     set out to ""
     set idList to {}
     set subjList to {}
     set timeList to {}
-    -- A folder the walk only passes through to reach a nested one nobody asked
-    -- for is never read: the bulk property reads are the expensive part here.
+    -- A folder the walk only passes through is never read: the bulk reads are
+    -- the expensive part.
     if inScope then
         tell application "Microsoft Outlook"
             set idList to id of every message of theFolder
@@ -314,20 +211,10 @@ export async function searchInboxByFilter(
     repeat with i from 1 to (count of idList)
         set d to missing value
         if hasTimes then set d to item i of timeList
-        -- An item carrying no readable receive time is kept whatever the window
-        -- says: dropping those would make a folder of them look exactly like an
-        -- empty folder, and the Windows reader keeps them for the same reason.
-        set keep to true
-        if d is not missing value and useCutoff and d is less than cutoff then
-            set keep to false
-        end if
-        if keep then
-            set out to out & ${asRow([
-        'prefix',
-        '(item i of idList as string)',
-        '(item i of subjList)',
-        'my isoDate(d)',
-    ])}
+        -- An item with no readable receive time is kept whatever the window
+        -- says; dropping it would make a folder of them look empty.
+        if d is missing value or d is not less than cutoff then
+            set out to out & ${asRow(['prefix', '(item i of idList as string)', '(item i of subjList)', 'my isoDate(d)'])}
         end if
     end repeat
     repeat with f in subs
@@ -347,7 +234,7 @@ export async function searchInboxByFilter(
             try
                 if onlyNames contains childName then set childScope to true
             end try
-            set out to out & my scanFolder(f, prefix & ${AS_LIST_SEP} & childName, cutoff, useCutoff, skipIds, skipNames, onlyNames, childScope)
+            set out to out & my scanFolder(f, prefix & ${AS_LIST_SEP} & childName, cutoff, skipIds, skipNames, onlyNames, childScope)
         end if
     end repeat
     return out
@@ -358,47 +245,56 @@ ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'inbox', 'rootInbox')}
     set rootName to (name of rootInbox) as string
     set skipIds to {}
-${skipIdSnippet}
-    set skipNames to {${skipNames}}
-    set onlyNames to {${onlyNames}}
+${skipIds}
+    set skipNames to ${asNameList(request.excludeFolders)}
+    set onlyNames to ${asNameList(request.includeFolders)}
 end tell
-set cutoff to (current date) - (${days} * days)
-return my scanFolder(rootInbox, rootName, cutoff, true, skipIds, skipNames, onlyNames, ${rootInScope})`;
+set cutoff to (current date) - (${asInt(request.daysBack)} * days)
+return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames, ${rootInScope})`, 'scan'));
 
-    const likeRe = filter.subjectLike ? likePattern(filter.subjectLike) : null;
-    // PowerShell's -match is case-insensitive by default, so the pattern is
-    // rebuilt with `i` regardless of the flags the caller's RegExp carries.
-    const patternRe = filter.subjectPattern
-        ? new RegExp(filter.subjectPattern.source, 'i')
-        : null;
-    const candidates = splitRecords(await runOsaScript(indexScript, 300000))
+    const subjectFiltered = !!(request.subjectLike || request.subjectPattern || request.excludeReplies);
+    const likeRe = request.subjectLike ? new RegExp(subjectGlobSource(request.subjectLike), 'i') : null;
+    // PowerShell's -match is case-insensitive, so the Windows test is too.
+    const patternRe = request.subjectPattern ? new RegExp(request.subjectPattern.source, 'i') : null;
+    const candidates = indexed
         .map(record => {
             const parts = splitFields(record);
             const segments = splitList(field(parts, 0));
             return {
-                folderPath: macFolderPath(emailAccount, segments[0] || 'Inbox', segments.slice(1)),
+                folderPath: macFolderPath(request.account, segments[0] || 'Inbox', segments.slice(1)),
                 id: field(parts, 1),
                 subject: field(parts, 2).trim(),
                 receivedTime: field(parts, 3),
             };
         })
         .filter(candidate => {
-            if (!candidate.subject) return false;
+            if (subjectFiltered && !candidate.subject) return false;
             if (likeRe && !likeRe.test(candidate.subject)) return false;
             if (patternRe && !patternRe.test(candidate.subject)) return false;
-            if (filter.excludeReplies && REPLY_PREFIX.test(candidate.subject)) return false;
+            if (request.excludeReplies && REPLY_PREFIX.test(candidate.subject)) return false;
             return true;
         });
     if (candidates.length === 0) return [];
 
-    // Pass 2 — bodies, senders and attachment names for the survivors only.
-    const detailScript = `tell application "Microsoft Outlook"
-    set wanted to {${candidates.map(c => c.id).join(', ')}}
+    // Pass 2 — senders, attachment names and (when asked) bodies, for the survivors only.
+    const body = request.includeBody
+        ? `            set bodyText to ""
+            try
+                set bodyText to (plain text content of theMsg) as string
+            end try`
+        : '            set bodyText to ""';
+    const details = new Map<string, {
+        senderName: string;
+        senderEmail: string;
+        attachmentNames: string[];
+        body: string
+    }>();
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
-    repeat with k from 1 to (count of wanted)
+    repeat with theId in ${asIdList(candidates.map(c => c.id))}
         set theMsg to missing value
         try
-            set theMsg to message id (item k of wanted)
+            set theMsg to message id theId
         end try
         if theMsg is not missing value then
 ${senderSnippet('theMsg', '            ')}
@@ -406,29 +302,13 @@ ${senderSnippet('theMsg', '            ')}
             try
                 set attNames to name of every attachment of theMsg
             end try
-            set bodyText to ""
-            try
-                set bodyText to (plain text content of theMsg) as string
-            end try
-            set out to out & ${asRow([
-        '(id of theMsg as string)',
-        'sndName',
-        'sndAddr',
-        'my sanitizeList(attNames)',
-        'bodyText',
-    ])}
+${body}
+            set out to out & ${asRow(['(id of theMsg as string)', 'sndName', 'sndAddr', 'my sanitizeList(attNames)', 'bodyText'])}
         end if
     end repeat
     return out
-end tell`;
-
-    const details = new Map<string, {
-        senderName: string;
-        senderEmail: string;
-        attachmentNames: string[];
-        body: string
-    }>();
-    for (const record of splitRecords(await runOsaScript(detailScript, 300000))) {
+end tell`, 'scan');
+    for (const record of splitRecords(raw)) {
         const parts = splitFields(record);
         details.set(field(parts, 0), {
             senderName: field(parts, 1),
@@ -442,12 +322,11 @@ end tell`;
     for (const candidate of candidates) {
         const detail = details.get(candidate.id);
         if (!detail) continue;
-        // requireAttachment can only be answered once the attachment names are in
-        // hand, so it filters here rather than during the index pass.
-        if (filter.requireAttachment && detail.attachmentNames.length === 0) continue;
+        // Attachment names only arrive with the details, so this test waits for them.
+        if (request.requireAttachment && detail.attachmentNames.length === 0) continue;
         matches.push({
             entryId: candidate.id,
-            storeId: '', // macOS AppleScript has no StoreID equivalent
+            storeId: '',
             subject: candidate.subject,
             senderName: detail.senderName,
             senderEmail: detail.senderEmail,
@@ -461,31 +340,25 @@ end tell`;
 }
 
 /**
- * Read the email currently selected (or open) in Outlook — full body,
- * attachments listed by name but not saved.
- *
- * `current messages` covers both cases the Windows reader handles separately
- * (an explorer selection and an open item), so there is no second lookup here.
+ * The email currently selected — or open — in Outlook. `current messages`
+ * covers both cases the Windows reader handles separately.
  */
 export async function readSelectedEmail(): Promise<SelectedEmail> {
-    const script = `tell application "Microsoft Outlook"
+    const records = splitRecords(await runOsaScript(`tell application "Microsoft Outlook"
     set sel to {}
     try
         set sel to current messages
     end try
-    if (count of sel) is 0 then error "No email is selected in Outlook. Open Outlook, select (or open) an email, then try again."
+    if (count of sel) is 0 then error ${asString(`${failureTag('NOT_FOUND', 'email')}No email is selected in Outlook. Select or open an email, then try again.`)}
     set theMsg to item 1 of sel
 ${messageDetailSnippet(true)}
     return ${asRow(messageDetailFields(true))}
-end tell`;
-    const records = splitRecords(await runOsaScript(script, 30000));
-    if (records.length === 0) {
-        throw new NotFoundError('email', 'Failed to read the selected Outlook email.');
-    }
+end tell`, 'quick'));
+    if (records.length === 0) throw new NotFoundError('email', 'Outlook reported no selected email.');
     const parts = splitFields(records[0]);
     return {
         entryId: field(parts, MessageDetail.id),
-        storeId: '', // macOS AppleScript has no StoreID equivalent
+        storeId: '',
         subject: field(parts, MessageDetail.subject).trim(),
         senderName: field(parts, MessageDetail.senderName),
         senderEmail: field(parts, MessageDetail.senderEmail),
@@ -495,16 +368,13 @@ end tell`;
     };
 }
 
-/** Open an email in Outlook by its message id, and bring Outlook forward.
- *  `_storeId` is accepted for parity with Windows and ignored — macOS
- *  AppleScript has no StoreID (see `readEmailBody`). */
-export async function openOutlookEmail(entryId: string, _storeId?: string): Promise<void> {
-    const id = macMessageId(entryId);
-    const script = `
+/** Open an email in Outlook and bring Outlook forward. */
+export async function openOutlookEmail(email: EmailLocator): Promise<void> {
+    const id = macMessageId(email.entryId);
+    await runOsaScript(`
 tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
     open theMsg
     activate
-end tell`;
-    await runOsaScript(script, 30000);
+end tell`, 'quick');
 }

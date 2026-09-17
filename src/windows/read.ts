@@ -1,293 +1,217 @@
 // Reading mail: one folder, one item, a whole Inbox tree, or whatever is
 // selected in the running Outlook.
-import { psBool, psEscape, psList, requireWindows, runPowerShell } from './run';
-import { accountScript, getItemScript, mailScopeScript, namedStoreScript, SENDER_SMTP_PS } from './scripts';
-import { parseArray, parseObject, record, str, toArray } from '../shared/json';
+import { psArray, psBool, psInt, psString, runPowerShell, runPowerShellJson } from './run';
 import {
-    DEFAULT_SCAN_DAYS,
-    isOutgoingRoot,
-    mailFolderRef,
-    NON_INCOMING_ROOTS,
-    REPLY_PREFIX_SOURCE,
-    splitQuotedOriginal,
-    WELL_KNOWN_FOLDERS,
-} from '../mail';
-import { NotFoundError } from '../errors';
-import type { EmailBodyResult, InboxEmail, InboxSearchFilter, InboxSearchMatch, SelectedEmail, } from '../types';
+    accountScript,
+    cutoffScript,
+    itemLookupScript,
+    itemsSinceScript,
+    mailScopeScript,
+    NAMED_STORE_PS,
+    SENDER_SMTP_PS,
+    SESSION_PS,
+} from './scripts';
+import { base64Text, record, str, strList, toArray } from '../shared/json';
+import { FolderId, isOutgoingRoot, NON_INCOMING_ROOTS, REPLY_PREFIX_SOURCE, subjectGlobSource } from '../mail';
+import { failureTag } from '../errors';
+import type { RawEmail, ReadInboxRequest, SearchRequest } from '../backend';
+import type { EmailLocator, InboxEmail, InboxSearchMatch, SelectedEmail } from '../types';
 
 /**
- * An arbitrary email body crosses the PowerShell boundary base64'd: it carries
- * quotes, control characters and non-ASCII that would otherwise have to survive
- * both the console codepage and JSON string escaping intact.
+ * The COM property carrying each kind of folder's timestamp. Sent Items and
+ * Drafts have no ReceivedTime, and filtering them on it returns an empty set
+ * that looks exactly like an empty folder.
  */
-function decodeBody(value: unknown): string {
-    return Buffer.from(str(value), 'base64').toString('utf8');
+function dateProperty(rootId: number): string {
+    if (rootId === FolderId.Drafts) return 'LastModificationTime';
+    return isOutgoingRoot(rootId) ? 'SentOn' : 'ReceivedTime';
 }
 
-// Outgoing roots keep their timestamp under a different COM property; anything
-// else carries ReceivedTime.
-const OUTGOING_DATE_PROPS: Record<number, string> = {
-    [WELL_KNOWN_FOLDERS['sent items']]: 'SentOn',
-    [WELL_KNOWN_FOLDERS.outbox]: 'SentOn',
-    [WELL_KNOWN_FOLDERS.drafts]: 'LastModificationTime',
-};
-
 /**
- * Read recent emails from the Outlook inbox for the given account.
- * No subject filtering — returns everything within the date window, up to the limit.
- * Does NOT download attachments; returns attachment names only.
- *
- * `folder` scopes the read to one folder under the Inbox instead of the Inbox
- * root. Without it, mail already filed away (Inbox\\Invoices) is unreachable —
- * which is the normal state of any mailbox its owner keeps tidy. Segments are
- * matched as direct children; a bare name that isn't a direct child falls back to
- * the same recursive by-name search moveOutlookEmails uses, so one folder string
- * works in both. Only the named folder is read — its own subfolders are not.
+ * Bodies cross the PowerShell boundary base64-encoded: they carry quotes,
+ * control characters and non-ASCII that would otherwise have to survive JSON
+ * escaping in two languages intact.
  */
-export async function readInboxEmails(
-    emailAccount: string,
-    daysBack: number = 60,
-    limit: number = 50,
-    folder?: string,
-): Promise<InboxEmail[]> {
-    if (process.platform !== 'win32') return [];
-    const ref = folder ? mailFolderRef(folder) : { rootId: 6, rootLabel: 'Inbox', segments: [] };
-    // A folder argument that trims away to nothing ("\\", "  ") would otherwise
-    // read the Inbox root and look like it had scoped — the exact silent
-    // mis-scoping this parameter exists to prevent. A bare well-known name
-    // ("Sent Items") legitimately has no segments, so it is not that case.
-    if (folder && folder.trim() && ref.segments.length === 0 && ref.rootId === 6
-        && !Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, folder.trim().toLowerCase())) {
-        throw new NotFoundError('folder', `Folder '${folder}' does not name a folder under the Inbox.`);
-    }
-    // Which timestamp the folder's items actually carry (see the note in the script).
-    const dateProp = OUTGOING_DATE_PROPS[ref.rootId] ?? 'ReceivedTime';
-    const isOutgoing = psBool(isOutgoingRoot(ref.rootId));
-    const script = `${accountScript(emailAccount)}
-${namedStoreScript(emailAccount)}
-${mailScopeScript(ref, folder || '')}
-$scopePath = $scope.FolderPath
-$cutoff = (Get-Date).AddDays(-${daysBack}).ToString('MM/dd/yyyy HH:mm')
-# Sent Items and Drafts carry no ReceivedTime, so restricting on it there returns
-# an empty set that looks exactly like an empty folder. Filter each on the date
-# property it actually has.
-$filtered = $scope.Items.Restrict("[${dateProp}] >= '$cutoff'")
+const BODY_B64_PS = `[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$bodyRaw))`;
+
+/** Recent mail from the Inbox root or one folder, newest first. */
+export async function readInboxEmails(request: ReadInboxRequest): Promise<InboxEmail[]> {
+    const dateProp = dateProperty(request.folder.rootId);
+    const outgoing = isOutgoingRoot(request.folder.rootId);
+    const output = await runPowerShellJson(`${accountScript(request.account)}
+${NAMED_STORE_PS}
+${mailScopeScript(request.folder, request.folderLabel)}
+$scopePath = [string]$scope.FolderPath
+${cutoffScript(request.daysBack)}
+${itemsSinceScript('scope', dateProp, 'filtered')}
 $filtered.Sort('[${dateProp}]', $true)
-$results = @()
-$cap = [Math]::Min($filtered.Count, ${limit})
-for ($i = 1; $i -le $cap; $i++) {
-    $item = $filtered.Item($i)
-    $subj = if ($item.Subject) { $item.Subject.Trim() } else { '' }
-    $bodyText = if ($item.Body) { $item.Body } else { '' }
-    $bodyPreview = if ($bodyText.Length -gt 600) { $bodyText.Substring(0, 600) } else { $bodyText }
-    $attNames = @()
-    foreach ($att in $item.Attachments) { $attNames += $att.FileName }
-    $stamp = ''
-    try { $stamp = $item.${dateProp}.ToString('yyyy-MM-dd HH:mm') } catch {}
-    # Outgoing mail has no meaningful sender line of its own — report who it is TO,
-    # or a Sent Items listing reads as a folder of mail from yourself.
+$limit = ${psInt(request.limit)}
+$previewChars = ${psInt(request.previewChars)}
+$rows = @()
+$count = $filtered.Count
+for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
+    $item = $null
+    try { $item = $filtered.Item($i) } catch {}
+    if ($item -eq $null) { continue }
+    $stamp = $null
+    try { $stamp = $item.${dateProp} } catch {}
+    # Sorted newest first, so the first item older than the window ends it.
+    if ($stamp -ne $null -and $stamp -lt $cutoff) { break }
+    $preview = ''
+    if ($previewChars -gt 0) {
+        $bodyText = ''
+        try { $bodyText = [string]$item.Body } catch {}
+        $preview = if ($bodyText.Length -gt $previewChars) { $bodyText.Substring(0, $previewChars) } else { $bodyText }
+    }
+    $attachmentNames = @()
+    try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
     $who = ''
-    try { $who = if ($item.To) { $item.To } else { '' } } catch {}
-    $results += [PSCustomObject]@{
-        entryId       = $item.EntryID
-        storeId       = $storeId
-        folderPath    = $scopePath
-        subject       = $subj
-        senderName    = if (${isOutgoing}) { $who } elseif ($item.SenderName) { $item.SenderName } else { '' }
-        senderEmail   = if (${isOutgoing}) { $who } elseif ($item.SenderEmailAddress) { $item.SenderEmailAddress } else { '' }
-        receivedTime  = $stamp
-        bodyPreview   = $bodyPreview
-        attachmentNames = $attNames
-        attachmentCount = $item.Attachments.Count
+    $whoEmail = ''
+    if (${psBool(outgoing)}) {
+        # Outgoing mail reports who it went TO; "from" is always the mailbox itself.
+        try { $who = [string]$item.To } catch {}
+        $whoEmail = $who
+    } else {
+        try { $who = [string]$item.SenderName } catch {}
+        try { $whoEmail = [string]$item.SenderEmailAddress } catch {}
+    }
+    $rows += [PSCustomObject]@{
+        entryId         = [string]$item.EntryID
+        storeId         = $storeId
+        folderPath      = $scopePath
+        subject         = ([string]$item.Subject).Trim()
+        senderName      = $who
+        senderEmail     = $whoEmail
+        receivedTime    = if ($stamp -ne $null) { $stamp.ToString('yyyy-MM-dd HH:mm') } else { '' }
+        bodyPreview     = $preview
+        attachmentNames = @($attachmentNames)
     }
 }
-ConvertTo-Json $results -Depth 3
-`;
-    return parseArray(await runPowerShell(script, 30000)).map(item => {
-        const e = record(item);
+ConvertTo-Json -Depth 4 -InputObject @($rows)
+`, 'standard');
+    return toArray(output).map(row => {
+        const e = record(row);
+        const attachmentNames = toArray(e.attachmentNames).map(str);
         return {
             entryId: str(e.entryId),
             storeId: str(e.storeId),
-            folderPath: str(e.folderPath),
             subject: str(e.subject),
             senderName: str(e.senderName),
             senderEmail: str(e.senderEmail),
             receivedTime: str(e.receivedTime),
             bodyPreview: str(e.bodyPreview),
-            attachmentNames: toArray(e.attachmentNames).map(str),
-            attachmentCount: typeof e.attachmentCount === 'number' ? e.attachmentCount : 0,
+            attachmentNames,
+            attachmentCount: attachmentNames.length,
+            folderPath: str(e.folderPath),
         };
     });
 }
 
 /**
- * Read one email's full plain-text body by EntryID.
+ * One email's full plain-text body, by id.
  *
- * Uses `MailItem.Body`, not `HTMLBody`: Outlook's own plain-text rendering is
- * what every other reader here consumes, and the markup costs an order of
- * magnitude more for the same sentences. The tradeoff is that HTML tables
- * flatten, so figures broken out in a table lose their row/column pairing — read
- * those from the attachment where there is one.
- *
- * Exists because `readInboxEmails` caps its preview at 600 chars, and a reply
- * whose first 600 chars read as complete can still carry a material detail below
- * the cut. Nothing detects that from the preview alone.
- *
- * `includeQuoted` is off by default — see splitQuotedOriginal for why the
- * quoted thread is a hazard to a caller reading figures out of a reply.
- * `quotedLength` is reported either way so a caller can tell it exists and ask again.
+ * `Body`, not `HTMLBody`: Outlook's own plain-text rendering is what every other
+ * reader here consumes, and markup costs an order of magnitude more for the same
+ * sentences. The tradeoff is that an HTML table's rows flatten.
  */
-export async function readEmailBody(
-    entryId: string,
-    storeId?: string,
-    maxChars: number = 8000,
-    includeQuoted: boolean = false,
-): Promise<EmailBodyResult> {
-    requireWindows();
-    const script = `
-$outlook = New-Object -ComObject Outlook.Application
-$ns = $outlook.GetNamespace('mapi')
-$ns.Logon()
-${getItemScript(entryId, storeId)}
-if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
-$cls = 0
-try { $cls = [int]$item.Class } catch {}
-if ($cls -ne 43 -and $cls -ne 46) { throw "The item for this EntryID is not an email (Class=$cls). Re-run readInboxEmails for a current EntryID." }
+export async function readEmailBody(email: EmailLocator): Promise<RawEmail> {
+    const output = await runPowerShellJson(`${SESSION_PS}
+${itemLookupScript(email)}
+$class = 0
+try { $class = [int]$item.Class } catch {}
+# 43 = olMail, 46 = olReport (a non-delivery report is still worth reading).
+if ($class -ne 43 -and $class -ne 46) {
+    throw "${failureTag('NOT_FOUND', 'email')}The item with entry id '$lookupId' is not an email (class $class)."
+}
 $bodyRaw = ''
-try { if ($item.Body) { $bodyRaw = [string]$item.Body } } catch {}
-$attNames = @()
-try { foreach ($att in $item.Attachments) { $attNames += $att.FileName } } catch {}
+try { $bodyRaw = [string]$item.Body } catch {}
+$attachmentNames = @()
+try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
 ${SENDER_SMTP_PS}
 $received = ''
 try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
-$out = [PSCustomObject]@{
-    entryId         = $item.EntryID
-    subject         = if ($item.Subject) { $item.Subject.Trim() } else { '' }
-    senderName      = if ($item.SenderName) { $item.SenderName } else { '' }
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
+    entryId         = [string]$item.EntryID
+    subject         = ([string]$item.Subject).Trim()
+    senderName      = [string]$item.SenderName
     senderEmail     = $senderSmtp
     receivedTime    = $received
-    body            = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bodyRaw))
-    attachmentNames = $attNames
-}
-ConvertTo-Json $out -Depth 3 -Compress
-`;
-    const raw = await runPowerShell(script, 20000);
-    if (!raw || !raw.trim()) throw new NotFoundError('email', 'Failed to read email body.');
-    const parsed = parseObject(raw);
-    const { body, quoted, separator } = splitQuotedOriginal(decodeBody(parsed.body));
-    const attachmentNames = toArray(parsed.attachmentNames).map(str);
-    // The quoted thread is context, never the sender's own answer, so it is capped
-    // harder than the reply itself — its useful part (what was asked) is at the
-    // top of it.
-    const quotedCap = Math.min(maxChars, 4000);
+    body            = ${BODY_B64_PS}
+    attachmentNames = @($attachmentNames)
+})
+`, 'quick');
+    const e = record(output);
     return {
-        entryId: str(parsed.entryId),
-        subject: str(parsed.subject),
-        senderName: str(parsed.senderName),
-        senderEmail: str(parsed.senderEmail),
-        receivedTime: str(parsed.receivedTime),
-        body: body.length > maxChars ? body.slice(0, maxChars) : body,
-        truncated: body.length > maxChars,
-        bodyLength: body.length,
-        quoteSeparator: separator,
-        quotedLength: quoted.length,
-        quotedOriginal: includeQuoted ? quoted.slice(0, quotedCap) : '',
-        attachmentNames,
-        attachmentCount: attachmentNames.length,
+        entryId: str(e.entryId) || email.entryId,
+        subject: str(e.subject),
+        senderName: str(e.senderName),
+        senderEmail: str(e.senderEmail),
+        receivedTime: str(e.receivedTime),
+        body: base64Text(e.body),
+        attachmentNames: toArray(e.attachmentNames).map(str),
     };
 }
 
 /**
- * Walk every folder under the Inbox (recursively) for one account and return
- * the emails matching `filter` — full body included, attachments listed by
- * name but not saved.
- *
- * Built for a scan that doesn't know in advance which subfolder holds what
- * it's after; `readInboxEmails` covers the cheaper "one known folder" case.
- *
- * `daysBack` bounds the scan to items received within that many days — what a
- * daily batch run wants, since a subject filter alone walks the whole Inbox tree
- * and would otherwise return every match ever received. 0 means the caller named
- * no window and takes `DEFAULT_SCAN_DAYS`; there is no unbounded mode, and a
- * caller that wants a year asks for 365.
+ * Walk every folder under the Inbox for the mail matching the request.
  *
  * The window is enforced twice — a date Restrict per folder, then a per-item
- * re-check — because Restrict is not reliable across stores, and the failure it
- * used to produce was silent and store-dependent rather than loud. `subjectLike`
- * still drives a server-side prefilter, but purely as an optimization now: a
- * store that cannot answer it (an IMAP mailbox accepts the query and then
- * matches nothing) returns the same set, slower, never a wider one.
+ * check — because Restrict is not reliable across stores, and a scan that
+ * silently widens on some mailboxes is the failure this guards against.
+ * `subjectLike` also drives a server-side prefilter, purely as an optimization:
+ * every subject is re-checked, so a store that can't run the query (IMAP stores
+ * accept it and match nothing) returns the same set, only slower.
  */
-export async function searchInboxByFilter(
-    emailAccount: string,
-    filter: InboxSearchFilter = {},
-    daysBack = 0,
-): Promise<InboxSearchMatch[]> {
-    if (process.platform !== 'win32') return [];
-    // Resolved here rather than in the script, so a caller that names no window
-    // gets the default one instead of whatever the store's indexing allows.
-    const days = daysBack > 0 ? Math.max(1, Math.floor(daysBack)) : DEFAULT_SCAN_DAYS;
-    const subjectLike = filter.subjectLike ? psEscape(filter.subjectLike) : '';
-    // DASL's `like` takes SQL wildcards, so the glob the filter is written in is
-    // translated for the server-side prefilter. The client-side re-check keeps
-    // the glob form, which is what PowerShell's own -like reads.
-    const subjectDasl = filter.subjectLike
-        ? psEscape(filter.subjectLike.replace(/\*/g, '%').replace(/\?/g, '_'))
-        : '';
-    const subjectPatternSrc = filter.subjectPattern ? psEscape(filter.subjectPattern.source) : '';
-    const replyPattern = filter.excludeReplies ? REPLY_PREFIX_SOURCE : '';
-    const clean = (list?: string[]) => (list ?? []).map(name => name.trim()).filter(Boolean);
-    const excludeFolders = clean(filter.excludeFolders);
-    const includeFolders = clean(filter.includeFolders);
-    const script = `
-$subjLike = '${subjectLike}'
-$subjDasl = '${subjectDasl}'
-${accountScript(emailAccount)}
-${namedStoreScript(emailAccount)}
-$inbox = $store.GetDefaultFolder(6)
-$results = @()
-$seen = @{}
+export async function searchInboxByFilter(request: SearchRequest): Promise<InboxSearchMatch[]> {
+    const subjectFiltered = !!(request.subjectLike || request.subjectPattern || request.excludeReplies);
+    // The server-side prefilter speaks DASL, whose `like` wildcards are % and _.
+    // A literal % or _ in the glob is left as a wildcard there: that can only
+    // widen the prefilter, and the exact test below narrows it again.
+    const subjectDasl = request.subjectLike ? request.subjectLike.replace(/\*/g, '%').replace(/\?/g, '_') : '';
+    const output = await runPowerShellJson(`${accountScript(request.account)}
+${NAMED_STORE_PS}
+$inbox = $store.GetDefaultFolder(${psInt(FolderId.Inbox)})
+$subjectLike = ${psString(request.subjectLike ? subjectGlobSource(request.subjectLike) : '')}
+$subjectDasl = ${psString(subjectDasl)}
+$subjectPattern = ${psString(request.subjectPattern?.source ?? '')}
+$replyPattern = ${psString(request.excludeReplies ? REPLY_PREFIX_SOURCE : '')}
+$requireSubject = ${psBool(subjectFiltered)}
+$requireAttachment = ${psBool(request.requireAttachment)}
+$includeBody = ${psBool(request.includeBody)}
+${cutoffScript(request.daysBack)}
 # Sent, Drafts, Deleted and Junk are siblings of the Inbox on an Exchange profile
-# and CHILDREN of it on an IMAP one, where this walk would otherwise hand back
-# mail the operator already sent or threw away as though it had just arrived.
-# Cut by EntryID, which holds whatever the profile's own language calls them, and
-# cut before the queue so each one's whole subtree goes with it.
+# and CHILDREN of it on an IMAP one. They are cut by id — their names are
+# localized — before the walk, so each takes its whole subtree with it.
 $skipIds = @{}
-foreach ($wellKnown in @(${NON_INCOMING_ROOTS.join(', ')})) {
+foreach ($role in @(${NON_INCOMING_ROOTS.map(psInt).join(', ')})) {
     try {
-        $wkFolder = $store.GetDefaultFolder($wellKnown)
-        if ($wkFolder -ne $null) { $skipIds[$wkFolder.EntryID] = $true }
+        $roleFolder = $store.GetDefaultFolder($role)
+        if ($roleFolder -ne $null) { $skipIds[[string]$roleFolder.EntryID] = $true }
     } catch {}
 }
-# The operator's own folders, by full path or by bare name. These are ordinary
-# user folders — an archive of sent copies, a "handled" pile — so nothing about
-# the store identifies them and only the operator can say which is which.
-$skipNames = @(${psList(excludeFolders)})
-$onlyNames = @(${psList(includeFolders)})
-function Test-FolderNamed($name, $path, $list) {
+$skipNames = ${psArray(request.excludeFolders)}
+$onlyNames = ${psArray(request.includeFolders)}
+function Test-FolderNamed([string]$name, [string]$path, $list) {
     foreach ($entry in $list) {
         if ($name -ieq $entry -or $path -ieq $entry) { return $true }
     }
     return $false
 }
-# Traversal and scanning are separate, and the two lists are not symmetric.
-# An excluded folder is never queued, so its whole subtree goes with it — the
-# walk cannot prune a folder and still reach what is under it. An INCLUDED
-# folder is only a filter on a folder that WAS reached: the walk still passes
-# through folders nobody asked for to get to a nested one they did, and each
-# survivor carries a flag for whether it is itself named. Naming a folder says
-# nothing about its children, so a caller wanting a subtree lists it.
+# Traversal and scanning are separate, and the two lists are not symmetric: an
+# excluded folder is never queued, so its subtree goes with it, while an
+# included one only marks a folder the walk reached anyway — the walk still
+# passes through folders nobody named to reach a nested one somebody did.
 $rootName = ''
 try { $rootName = [string]$inbox.Name } catch {}
 $rootPath = ''
 try { $rootPath = [string]$inbox.FolderPath } catch {}
 $folders = [System.Collections.ArrayList]@($inbox)
 $inScope = [System.Collections.ArrayList]@(($onlyNames.Count -eq 0) -or (Test-FolderNamed $rootName $rootPath $onlyNames))
-$fi = 0
-while ($fi -lt $folders.Count) {
+$walked = 0
+while ($walked -lt $folders.Count) {
     try {
-        foreach ($sub in $folders[$fi].Folders) {
-            if ($skipIds.ContainsKey($sub.EntryID)) { continue }
+        foreach ($sub in $folders[$walked].Folders) {
+            if ($skipIds.ContainsKey([string]$sub.EntryID)) { continue }
             $subName = ''
             try { $subName = [string]$sub.Name } catch {}
             $subPath = ''
@@ -297,83 +221,70 @@ while ($fi -lt $folders.Count) {
             [void]$inScope.Add(($onlyNames.Count -eq 0) -or (Test-FolderNamed $subName $subPath $onlyNames))
         }
     } catch {}
-    $fi++
+    $walked++
 }
-# The subject prefilter is a DASL property query rather than Outlook's Jet
-# syntax: "[Subject] like '...'" is rejected outright by some stores — an IMAP
-# mailbox answers "Condition is not valid" — while DASL is accepted wherever
-# Restrict is. The two syntaxes cannot be mixed in one filter string, so the
-# date clause stays Jet and the subject one is applied as a second Restrict on
-# top of it. The pattern is CONCATENATED into the query, never interpolated:
-# interpolating would let a caller's $(...) run, and would break the query
-# outright on an apostrophe.
-$subjQuery = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' like ' + [char]39 + $subjDasl + [char]39
-$cutoff = (Get-Date).AddDays(-${days}).ToString('MM/dd/yyyy HH:mm')
-$cutoffDate = (Get-Date).AddDays(-${days})
+# The subject prefilter is DASL rather than Jet: some stores reject Jet's
+# "[Subject] like" outright, while DASL is accepted wherever Restrict is. The
+# two syntaxes can't share one filter, so it is a second Restrict on top of the
+# date one. The pattern is concatenated into the query, never interpolated.
+$subjectQuery = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' like ' + [char]39 + $subjectDasl.Replace("'", "''") + [char]39
+# A list, not an array: += copies the whole array per row, and a wide scan returns thousands.
+$rows = New-Object System.Collections.ArrayList
+$seen = @{}
 for ($fx = 0; $fx -lt $folders.Count; $fx++) {
-    # Walked to get here, but not asked for.
     if (-not $inScope[$fx]) { continue }
     $folder = $folders[$fx]
-    # Unconditional. This restrict used to be skipped whenever the caller asked
-    # for an unbounded scan, which left the subject prefilter below deciding the
-    # window: where the store could answer that query the scan reached back
-    # forever, and where it could not a 60-day fallback quietly took over. One
-    # mailbox, one call, two answers, depending on how the store was set up.
-    $filtered = $folder.Items.Restrict("[ReceivedTime] >= '$cutoff'")
-${subjectLike ? `    # Narrowing on the subject server-side is what keeps this cheap — a date-only
-    # restrict hands back every item in the window for every folder in the tree,
-    # which is thousands of COM round-trips on a busy mailbox. It is ONLY an
-    # optimization: every subject is re-checked below, so a store that cannot run
-    # the query returns the same answer, slower — never a different window.
-    try {
-        $candidate = $filtered.Restrict($subjQuery)
-        if ($candidate.Count -gt 0) { $filtered = $candidate }
-    } catch {}
-` : ''}    $fCount = $filtered.Count
-    for ($i = 1; $i -le $fCount; $i++) {
-        $item = $filtered.Item($i)
-        if ($seen.ContainsKey($item.EntryID)) { continue }
-        $seen[$item.EntryID] = $true
-        $subject = $item.Subject
-        if (-not $subject) { continue }
-        $subject = $subject.Trim()
-        ${subjectLike ? `if ($subject -notlike $subjLike) { continue }` : ''}
-        ${subjectPatternSrc ? `if ($subject -notmatch '${subjectPatternSrc}') { continue }` : ''}
-        ${filter.excludeReplies ? `if ($subject -imatch '${replyPattern}') { continue }` : ''}
-        # Re-checked per item rather than trusted to Restrict alone: a store
-        # that cannot run the date query hands back everything it holds, and a
-        # scan that silently widens is the whole failure this guards against.
-        $rt = $null
-        try { $rt = $item.ReceivedTime } catch {}
-        if ($rt -ne $null -and $rt -lt $cutoffDate) { continue }
-        ${filter.requireAttachment ? `if ($item.Attachments.Count -eq 0) { continue }` : ''}
-        $attNames = @()
-        foreach ($att in $item.Attachments) { $attNames += $att.FileName }
-        $bodyRaw = if ($item.Body) { $item.Body } else { '' }
-        $bodyB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bodyRaw))
+    ${itemsSinceScript('folder', 'ReceivedTime', 'filtered').trim()}
+    if ($subjectDasl) {
+        try {
+            $candidate = $filtered.Restrict($subjectQuery)
+            if ($candidate.Count -gt 0) { $filtered = $candidate }
+        } catch {}
+    }
+    $folderPath = ''
+    try { $folderPath = [string]$folder.FolderPath } catch {}
+    $count = $filtered.Count
+    for ($i = 1; $i -le $count; $i++) {
+        $item = $null
+        try { $item = $filtered.Item($i) } catch {}
+        # A restricted collection can hand back nothing for an index, and an item
+        # with no id can't be acted on by anything this package does.
+        if ($item -eq $null) { continue }
+        $entryId = [string]$item.EntryID
+        if (-not $entryId -or $seen.ContainsKey($entryId)) { continue }
+        $seen[$entryId] = $true
+        $subject = ''
+        try { $subject = ([string]$item.Subject).Trim() } catch {}
+        if ($requireSubject -and -not $subject) { continue }
+        if ($subjectLike -and $subject -notmatch $subjectLike) { continue }
+        if ($subjectPattern -and $subject -notmatch $subjectPattern) { continue }
+        if ($replyPattern -and $subject -imatch $replyPattern) { continue }
+        $received = $null
+        try { $received = $item.ReceivedTime } catch {}
+        if ($received -ne $null -and $received -lt $cutoff) { continue }
+        $attachmentNames = @()
+        try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+        if ($requireAttachment -and $attachmentNames.Count -eq 0) { continue }
+        $bodyRaw = ''
+        if ($includeBody) { try { $bodyRaw = [string]$item.Body } catch {} }
 ${SENDER_SMTP_PS}
-        $received = ''
-        try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
-        $results += [PSCustomObject]@{
-            entryId = $item.EntryID
-            storeId = $storeId
-            subject = $item.Subject.Trim()
-            senderName = if ($item.SenderName) { $item.SenderName } else { '' }
-            senderEmail = $senderSmtp
-            receivedTime = $received
-            body = $bodyB64
-            attachmentNames = $attNames
-            folderPath = $folder.FolderPath
-        }
+        [void]$rows.Add([PSCustomObject]@{
+            entryId         = $entryId
+            storeId         = $storeId
+            subject         = $subject
+            senderName      = [string]$item.SenderName
+            senderEmail     = $senderSmtp
+            receivedTime    = if ($received -ne $null) { $received.ToString('yyyy-MM-dd HH:mm') } else { '' }
+            body            = ${BODY_B64_PS}
+            attachmentNames = @($attachmentNames)
+            folderPath      = $folderPath
+        })
     }
 }
-ConvertTo-Json $results -Depth 3
-`;
-    // Returns whole message bodies, so this is the call most likely to push against
-    // the stdout cap — raise `maxBufferBytes` via configure() before a scan that
-    // matches thousands of emails.
-    return parseArray(await runPowerShell(script, 300000)).map(item => {
-        const e = record(item);
+ConvertTo-Json -Depth 4 -InputObject @($rows)
+`, 'scan');
+    return toArray(output).map(row => {
+        const e = record(row);
         return {
             entryId: str(e.entryId),
             storeId: str(e.storeId),
@@ -381,65 +292,55 @@ ConvertTo-Json $results -Depth 3
             senderName: str(e.senderName),
             senderEmail: str(e.senderEmail),
             receivedTime: str(e.receivedTime),
-            body: decodeBody(e.body),
+            body: base64Text(e.body),
             attachmentNames: toArray(e.attachmentNames).map(str),
             folderPath: str(e.folderPath),
         };
     });
 }
 
-/**
- * Read the email currently selected (or open) in Outlook — full body,
- * attachments listed by name but not saved.
- */
+/** The email currently selected — or open — in Outlook. */
 export async function readSelectedEmail(): Promise<SelectedEmail> {
-    requireWindows();
-    const script = `
+    const output = await runPowerShellJson(`
 $outlook = New-Object -ComObject Outlook.Application
 $item = $null
 try {
     $explorer = $outlook.ActiveExplorer()
-    if ($explorer -ne $null) {
-        $sel = $explorer.Selection
-        if ($sel -ne $null -and $sel.Count -ge 1) { $item = $sel.Item(1) }
-    }
+    if ($explorer -ne $null -and $explorer.Selection.Count -ge 1) { $item = $explorer.Selection.Item(1) }
 } catch {}
 if ($item -eq $null) {
     try {
-        $insp = $outlook.ActiveInspector()
-        if ($insp -ne $null) { $item = $insp.CurrentItem }
+        $inspector = $outlook.ActiveInspector()
+        if ($inspector -ne $null) { $item = $inspector.CurrentItem }
     } catch {}
 }
-if ($item -eq $null) { throw 'No email is selected in Outlook. Open Outlook, select (or open) an email, then try again.' }
-if ($item.MessageClass -notlike 'IPM.Note*') { throw 'The selected Outlook item is not an email.' }
-$attNames = @()
-foreach ($att in $item.Attachments) { $attNames += $att.FileName }
-$subject = ''
-if ($item.Subject) { $subject = $item.Subject.Trim() }
-$bodyRaw = if ($item.Body) { $item.Body } else { '' }
-$bodyB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($bodyRaw))
+if ($item -eq $null) {
+    throw "${failureTag('NOT_FOUND', 'email')}No email is selected in Outlook. Select or open an email, then try again."
+}
+if ([string]$item.MessageClass -notlike 'IPM.Note*') {
+    throw "${failureTag('INVALID_REQUEST')}The item selected in Outlook is not an email."
+}
+$attachmentNames = @()
+try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+$bodyRaw = ''
+try { $bodyRaw = [string]$item.Body } catch {}
 $storeId = ''
-try { $storeId = $item.Parent.Store.StoreID } catch {}
+try { $storeId = [string]$item.Parent.Store.StoreID } catch {}
 ${SENDER_SMTP_PS}
 $received = ''
 try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
-$result = [PSCustomObject]@{
-    entryId = $item.EntryID
-    storeId = $storeId
-    subject = $subject
-    senderName = if ($item.SenderName) { $item.SenderName } else { '' }
-    senderEmail = $senderSmtp
-    receivedTime = $received
-    body = $bodyB64
-    attachmentNames = $attNames
-}
-ConvertTo-Json $result -Depth 3
-`;
-    const raw = await runPowerShell(script, 30000);
-    if (!raw || raw.trim() === '' || raw.trim() === 'null') {
-        throw new NotFoundError('email', 'Failed to read the selected Outlook email.');
-    }
-    const e = parseObject(raw);
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
+    entryId         = [string]$item.EntryID
+    storeId         = $storeId
+    subject         = ([string]$item.Subject).Trim()
+    senderName      = [string]$item.SenderName
+    senderEmail     = $senderSmtp
+    receivedTime    = $received
+    body            = ${BODY_B64_PS}
+    attachmentNames = @($attachmentNames)
+})
+`, 'quick');
+    const e = record(output);
     return {
         entryId: str(e.entryId),
         storeId: str(e.storeId),
@@ -447,35 +348,21 @@ ConvertTo-Json $result -Depth 3
         senderName: str(e.senderName),
         senderEmail: str(e.senderEmail),
         receivedTime: str(e.receivedTime),
-        body: decodeBody(e.body),
-        attachmentNames: toArray(e.attachmentNames).map(str),
+        body: base64Text(e.body),
+        attachmentNames: strList(e.attachmentNames),
     };
 }
 
 /**
- * Open an email in Outlook by its EntryID.
+ * Open an email in Outlook.
  *
- * `storeId` disambiguates across mailboxes — without one, `GetItemFromID` only
- * looks in the default store, so an id from a shared or secondary mailbox
- * simply isn't found. It's tried first and the bare lookup is the fallback, so
- * a caller holding a stale StoreID (or none) still resolves whatever it can.
- *
- * EntryIDs are rewritten when an item MOVES between folders, so an id recorded
- * before its mail was filed can resolve to nothing — or, worse, to a different
- * message. The caller is the one that knows what the email was supposed to be;
- * this throws a plain not-found rather than guessing.
+ * Entry ids are rewritten when an item MOVES between folders, so an id recorded
+ * before its mail was filed can stop resolving. That fails as NOT_FOUND rather
+ * than guessing — the caller is the one who knows what the email was.
  */
-export async function openOutlookEmail(entryId: string, storeId?: string): Promise<void> {
-    requireWindows();
-    const script = `
-$outlook = New-Object -ComObject Outlook.Application
-$ns = $outlook.GetNamespace('mapi')
-$ns.Logon()
-$item = $null
-${storeId ? `try { ${getItemScript(entryId, storeId)} } catch { $item = $null }` : ''}
-if ($item -eq $null) { try { ${getItemScript(entryId)} } catch { $item = $null } }
-if ($item -eq $null) { throw "Email not found for EntryID '${psEscape(entryId)}'" }
+export async function openOutlookEmail(email: EmailLocator): Promise<void> {
+    await runPowerShell(`${SESSION_PS}
+${itemLookupScript(email)}
 $item.Display()
-`;
-    await runPowerShell(script);
+`, 'quick');
 }

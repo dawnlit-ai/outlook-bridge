@@ -1,28 +1,22 @@
 // The package's error taxonomy.
 //
-// Every failure used to be a bare `new Error(string)`, which left a consumer
-// only one way to tell "this machine can't do that" from "that account doesn't
-// exist" from "the script blew up": matching on the message text. Message text
-// is not an API — rewording one sentence here would silently break a caller's
-// branch — so the distinctions a caller actually acts on carry a stable `code`.
-//
-// Every error this package throws on purpose is an `OutlookError`. A caller that
-// wants one branch for "expected failure" and another for "bug" can switch on
-// `err instanceof OutlookError` alone.
+// Every failure the package raises on purpose is an `OutlookError` carrying a
+// stable `code`. The codes are the API; the messages beside them are not — a
+// caller branches on `error.code`, never on message text, so a message can be
+// reworded without breaking anyone. `err instanceof OutlookError` alone
+// separates an expected failure from a bug.
 
 /**
- * Stable discriminants. These are the API; the messages beside them are not.
+ * Stable discriminants.
  *
- * - `UNSUPPORTED_PLATFORM` — no Outlook automation exists on this OS at all.
- * - `NOT_IMPLEMENTED` — the platform could do this, but the port isn't written.
- *   Distinct from UNSUPPORTED_PLATFORM on purpose: this one is a gap that may
- *   close in a later release, so a caller may reasonably feature-detect and
- *   degrade rather than refuse outright.
- * - `ACCOUNT_NOT_FOUND` — no configured account matches that SMTP address.
- * - `NOT_FOUND` — a named folder, template, signature or item didn't resolve.
- * - `INVALID_REQUEST` — the arguments can't produce a call; nothing was attempted.
- * - `SCRIPT_FAILED` — the interpreter ran and reported failure.
- * - `TIMEOUT` — the run exceeded its budget and was killed.
+ * - `UNSUPPORTED_PLATFORM` — no Outlook automation exists on this OS.
+ * - `NOT_IMPLEMENTED` — the platform could do this, but this corner isn't written.
+ * - `ACCOUNT_NOT_FOUND` — no mailbox in the Outlook profile matches the address.
+ * - `NOT_FOUND` — a folder, email, attachment, template, signature or file didn't resolve.
+ * - `INVALID_REQUEST` — the arguments can't produce a call.
+ * - `SCRIPT_FAILED` — the automation script ran and failed.
+ * - `OUTPUT_TOO_LARGE` — the script printed more than `maxBufferBytes` and was killed.
+ * - `TIMEOUT` — the run exceeded its time budget and was killed.
  * - `ABORTED` — the caller's AbortSignal fired.
  */
 export type OutlookErrorCode =
@@ -32,8 +26,17 @@ export type OutlookErrorCode =
     | 'NOT_FOUND'
     | 'INVALID_REQUEST'
     | 'SCRIPT_FAILED'
+    | 'OUTPUT_TOO_LARGE'
     | 'TIMEOUT'
     | 'ABORTED';
+
+/** The interpreter a script ran under. */
+export type ScriptRunner = 'powershell' | 'osascript';
+
+/** What a NOT_FOUND error failed to find. */
+export type NotFoundKind = 'folder' | 'email' | 'attachment' | 'template' | 'signature' | 'file';
+
+const NOT_FOUND_KINDS: readonly NotFoundKind[] = ['folder', 'email', 'attachment', 'template', 'signature', 'file'];
 
 /** Base class for every error this package raises deliberately. */
 export class OutlookError extends Error {
@@ -43,64 +46,62 @@ export class OutlookError extends Error {
     readonly cause?: unknown;
 
     constructor(code: OutlookErrorCode, message: string, options?: { cause?: unknown }) {
-        // Declared as a field rather than passed to `super`'s `cause` option: an
-        // own enumerable property is what puts it in a JSON dump of the error,
-        // which is where a consumer logging a failure actually looks for it.
+        // `cause` is an own enumerable field rather than `super`'s option: that
+        // is what puts it in a JSON dump of the error, which is where someone
+        // logging a failure looks for it.
         super(message);
         if (options && 'cause' in options) this.cause = options.cause;
         this.code = code;
-        // `name` is what shows up in an unhandled-rejection dump, so make it the
-        // subclass rather than a uniform "Error".
+        // `name` is what an unhandled-rejection dump shows, so make it the subclass.
         this.name = new.target.name;
     }
 }
 
-/** This OS has no Outlook automation backend. */
+/** This OS has no Outlook automation. */
 export class UnsupportedPlatformError extends OutlookError {
     /** The platform that was asked, i.e. `process.platform` at the time. */
     readonly platform: string;
 
-    constructor(platform: string, detail = 'Outlook automation is only supported on Windows and macOS.') {
-        super('UNSUPPORTED_PLATFORM', `${detail} (running on '${platform}')`);
+    constructor(platform: string) {
+        super('UNSUPPORTED_PLATFORM', `Outlook automation is only supported on Windows and macOS (running on '${platform}').`);
         this.platform = platform;
     }
 }
 
-/** The platform supports this, but the port isn't written yet. */
+/** The platform could do this, but this corner isn't written. */
 export class NotImplementedError extends OutlookError {
-    /** The bridge function that isn't ported. */
+    /** What isn't implemented. */
     readonly operation: string;
     readonly platform: string;
 
     constructor(operation: string, platform: string) {
-        super('NOT_IMPLEMENTED', `'${operation}' is not implemented for Outlook on ${platform} yet.`);
+        super('NOT_IMPLEMENTED', `${operation} is not implemented for Outlook on ${platform}.`);
         this.operation = operation;
         this.platform = platform;
     }
 }
 
-/** No configured Outlook account matches the requested address. */
+/** No mailbox in the Outlook profile matches the requested address. */
 export class AccountNotFoundError extends OutlookError {
     readonly account: string;
 
-    constructor(account: string) {
-        super('ACCOUNT_NOT_FOUND', `Outlook account '${account}' not found.`);
+    constructor(account: string, message = `Outlook account '${account}' not found.`) {
+        super('ACCOUNT_NOT_FOUND', message);
         this.account = account;
     }
 }
 
-/** A named folder, template, signature or item didn't resolve. */
+/** A named folder, email, attachment, template, signature or file didn't resolve. */
 export class NotFoundError extends OutlookError {
-    /** What kind of thing was looked up — 'folder', 'template', 'signature', 'email'. */
-    readonly kind: string;
+    readonly kind: NotFoundKind;
 
-    constructor(kind: string, message: string) {
+    constructor(kind: NotFoundKind, message: string) {
         super('NOT_FOUND', message);
         this.kind = kind;
     }
 }
 
-/** The arguments can't produce a call; nothing was attempted. */
+/** The arguments can't produce a call. */
 export class InvalidRequestError extends OutlookError {
     constructor(message: string) {
         super('INVALID_REQUEST', message);
@@ -108,41 +109,63 @@ export class InvalidRequestError extends OutlookError {
 }
 
 /**
- * The interpreter ran and failed.
+ * The script ran and failed.
  *
- * Carries the generated script verbatim. That is the single most useful thing
- * when one of these fires and it is otherwise unreachable — the `debug` hook
- * only fires if the consumer wired one up ahead of time, whereas this arrives
- * attached to the failure itself.
+ * Carries the generated script verbatim — the most useful thing to have when
+ * one of these fires, and otherwise reachable only through a debug hook wired
+ * up in advance.
  */
 export class ScriptError extends OutlookError {
-    readonly runner: 'powershell' | 'osascript';
+    readonly runner: ScriptRunner;
     readonly script: string;
     readonly stderr: string;
     readonly durationMs: number;
+    /** The line of `script` the failure was raised on, when the runner reports one. */
+    readonly line?: number;
 
     constructor(init: {
-        runner: 'powershell' | 'osascript';
+        runner: ScriptRunner;
         script: string;
         stderr: string;
         durationMs: number;
+        message?: string;
+        line?: number;
         cause?: unknown;
     }) {
-        super('SCRIPT_FAILED', init.stderr || `${init.runner} failed with no output.`, { cause: init.cause });
+        super('SCRIPT_FAILED', init.message || init.stderr || `${init.runner} failed with no output.`, {cause: init.cause});
         this.runner = init.runner;
         this.script = init.script;
         this.stderr = init.stderr;
         this.durationMs = init.durationMs;
+        if (init.line !== undefined) this.line = init.line;
     }
 }
 
-/** The run exceeded its budget and was killed. */
+/** The script printed more than `maxBufferBytes` and was killed. */
+export class OutputTooLargeError extends OutlookError {
+    readonly runner: ScriptRunner;
+    readonly maxBufferBytes: number;
+    readonly script: string;
+
+    constructor(init: { runner: ScriptRunner; maxBufferBytes: number; script: string }) {
+        super(
+            'OUTPUT_TOO_LARGE',
+            `${init.runner} output exceeded maxBufferBytes (${init.maxBufferBytes}). `
+            + 'Raise maxBufferBytes, or narrow the request.',
+        );
+        this.runner = init.runner;
+        this.maxBufferBytes = init.maxBufferBytes;
+        this.script = init.script;
+    }
+}
+
+/** The run exceeded its time budget and was killed. */
 export class TimeoutError extends OutlookError {
-    readonly runner: 'powershell' | 'osascript';
+    readonly runner: ScriptRunner;
     readonly timeoutMs: number;
     readonly script: string;
 
-    constructor(init: { runner: 'powershell' | 'osascript'; timeoutMs: number; script: string }) {
+    constructor(init: { runner: ScriptRunner; timeoutMs: number; script: string }) {
         super('TIMEOUT', `${init.runner} run exceeded its ${init.timeoutMs}ms budget and was killed.`);
         this.runner = init.runner;
         this.timeoutMs = init.timeoutMs;
@@ -152,52 +175,113 @@ export class TimeoutError extends OutlookError {
 
 /** The caller's AbortSignal fired. */
 export class AbortedError extends OutlookError {
-    readonly runner: 'powershell' | 'osascript';
+    readonly runner: ScriptRunner;
 
-    constructor(runner: 'powershell' | 'osascript', reason?: unknown) {
-        super('ABORTED', `${runner} run was aborted by the caller.`, { cause: reason });
+    constructor(runner: ScriptRunner, reason?: unknown) {
+        super('ABORTED', `${runner} run was aborted by the caller.`, {cause: reason});
         this.runner = runner;
     }
 }
 
-/**
- * Both platform scripts signal a bad sending account by `throw`ing a string the
- * interpreter then prints. Recognising it here is what turns the most common
- * operational mistake — a typo'd or freshly-removed account — into a code a
- * caller can branch on, instead of a SCRIPT_FAILED they'd have to grep.
- *
- * Deliberately narrow: it only matches the sentence our own scripts emit.
- */
-const ACCOUNT_NOT_FOUND_RE = /Account '([^']*)' not found/i;
+// ── Typed failures from inside a script ─────────────────────────────────
+//
+// A generated script can only fail by printing a message, so a script that
+// knows WHY it failed — the folder isn't there, the id resolves to nothing —
+// says so by starting the message with a tag: `[outlook-bridge:NOT_FOUND:folder]`.
+// The runner turns a tagged message into the matching error class and strips
+// the tag, so a caller can branch on NOT_FOUND without reading the sentence.
+
+/** The codes a script may raise by tagging its failure message. */
+export type ScriptFailureCode = 'ACCOUNT_NOT_FOUND' | 'NOT_FOUND' | 'INVALID_REQUEST';
 
 /**
- * Upgrade a raw interpreter failure to the most specific error we can prove.
+ * The tag that opens a typed script failure, ready to be followed by the
+ * human-readable message. Plain ASCII with no quote or `$`, so it can sit
+ * inside a PowerShell or AppleScript string literal unescaped.
+ */
+export function failureTag(code: 'ACCOUNT_NOT_FOUND' | 'INVALID_REQUEST'): string;
+export function failureTag(code: 'NOT_FOUND', kind: NotFoundKind): string;
+export function failureTag(code: ScriptFailureCode, kind?: NotFoundKind): string {
+    return `[outlook-bridge:${code}${kind ? `:${kind}` : ''}] `;
+}
+
+const FAILURE_TAG = /\[outlook-bridge:(ACCOUNT_NOT_FOUND|NOT_FOUND|INVALID_REQUEST)(?::([a-z]+))?\]\s*/;
+
+/** A script's account-not-found message names the address in single quotes. */
+const QUOTED_ACCOUNT = /'(.*)'/;
+
+/**
+ * The typed error a tagged script message stands for, or null when the
+ * message carries no tag.
+ */
+export function errorFromTaggedMessage(message: string): OutlookError | null {
+    const match = FAILURE_TAG.exec(message);
+    if (!match) return null;
+    const text = (message.slice(0, match.index) + message.slice(match.index + match[0].length)).trim();
+    switch (match[1]) {
+        case 'ACCOUNT_NOT_FOUND':
+            return new AccountNotFoundError(QUOTED_ACCOUNT.exec(text)?.[1] ?? '', text);
+        case 'NOT_FOUND': {
+            const kind = NOT_FOUND_KINDS.find(k => k === match[2]) ?? 'email';
+            return new NotFoundError(kind, text);
+        }
+        default:
+            return new InvalidRequestError(text);
+    }
+}
+
+/** Remove any failure tags from a message meant for display — e.g. a per-item error. */
+export function stripFailureTags(message: string): string {
+    return message.replace(new RegExp(FAILURE_TAG.source, 'g'), '').trim();
+}
+
+/**
+ * Turn a failed run into the most specific error that can be proven.
  *
- * Order matters. Abort and timeout both kill the child with SIGTERM, so they are
- * indistinguishable from the exit status alone — the signal's own state is what
- * separates them, and it is checked first. Only then is stderr worth reading:
- * a killed process may have printed a partial, misleading message before dying.
+ * Order matters. An abort and a timeout both kill the child, so the signal's
+ * own state is checked before the kill; an overflow kills it too, and is told
+ * apart by its error code. Only then is the script's message worth reading — a
+ * process killed mid-write may have printed a partial, misleading one.
  */
 export function classifyRunFailure(init: {
-    runner: 'powershell' | 'osascript';
+    runner: ScriptRunner;
     script: string;
+    /** Everything the run wrote to stderr. */
     stderr: string;
+    /** The script's own failure message, when the runner could isolate one. */
+    message?: string;
+    /** The script line the failure was raised on, when known. */
+    line?: number;
     durationMs: number;
-    /** The error `execFile` handed back, when the failure came from the child. */
+    /** The error `execFile` handed back. */
     nodeError?: (Error & { killed?: boolean; code?: string | number | null }) | null;
-    /** The budget in force, for the TIMEOUT message. */
+    /** The time budget in force, for the TIMEOUT message. */
     timeoutMs?: number;
+    /** The stdout cap in force, for the OUTPUT_TOO_LARGE message. */
+    maxBufferBytes?: number;
     signal?: AbortSignal;
 }): OutlookError {
-    const { runner, script, stderr, durationMs, nodeError, timeoutMs, signal } = init;
+    const {runner, script, stderr, durationMs, nodeError, timeoutMs, signal} = init;
 
     if (signal?.aborted || nodeError?.name === 'AbortError' || nodeError?.code === 'ABORT_ERR') {
         return new AbortedError(runner, signal?.reason);
     }
-    if (nodeError?.killed && timeoutMs) {
-        return new TimeoutError({ runner, timeoutMs, script });
+    if (nodeError?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        return new OutputTooLargeError({runner, maxBufferBytes: init.maxBufferBytes ?? 0, script});
     }
-    const match = ACCOUNT_NOT_FOUND_RE.exec(stderr);
-    if (match) return new AccountNotFoundError(match[1]);
-    return new ScriptError({ runner, script, stderr, durationMs, cause: nodeError ?? undefined });
+    if (nodeError?.killed && timeoutMs) {
+        return new TimeoutError({runner, timeoutMs, script});
+    }
+    const message = (init.message ?? '').trim() || stderr.trim() || nodeError?.message || '';
+    const typed = errorFromTaggedMessage(message);
+    if (typed) return typed;
+    return new ScriptError({
+        runner,
+        script,
+        stderr,
+        durationMs,
+        message,
+        line: init.line,
+        cause: nodeError ?? undefined
+    });
 }

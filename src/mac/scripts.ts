@@ -1,61 +1,52 @@
 // The AppleScript fragments more than one macOS operation is built from.
-import { asBool, asEscape } from './run';
+import { asString } from './run';
 import { readProfileAccounts } from './profile';
-import { InvalidRequestError, NotImplementedError } from '../errors';
-import type { MailFolderRef } from '../types';
-import { isOutgoingRoot } from '../mail';
+import { failureTag, InvalidRequestError, NotImplementedError } from '../errors';
+import { FolderId, isOutgoingRoot } from '../mail';
+import type { ItemFailure, MailFolderRef } from '../types';
 
 /**
- * An account as the generated AppleScript will reach it.
+ * An account as the generated AppleScript reaches it.
  *
  * `folderIds` carries what Outlook's profile database knows about the mailbox's
- * well-known folders — the only handle there is on a mailbox the dictionary
- * publishes no account object for (see profile.ts). It is filled in for every
- * account the profile lists, including the ones the probe below resolves
- * perfectly well, because the generated script picks between the two at run
- * time. Nothing here has to predict which kinds of account a given Outlook build
- * chooses to expose.
+ * well-known folders — the only handle on a mailbox the dictionary publishes no
+ * account object for (see profile.ts). It is filled in for every account the
+ * profile lists, because the generated script chooses between the account
+ * object and the folder id at run time; nothing here has to predict which kinds
+ * of account a given Outlook build exposes.
  */
 export interface MacAccount {
     readonly emailAccount: string;
     readonly folderIds?: Readonly<Record<string, number>>;
 }
 
-/** Look an address up in Outlook's profile database, for the ids it can add. */
+/** Look an address up in Outlook's profile database, for the folder ids it can add. */
 export async function resolveMacAccount(emailAccount: string): Promise<MacAccount> {
     const wanted = emailAccount.trim().toLowerCase();
     const found = (await readProfileAccounts())
         .find(account => account.emailAccount.trim().toLowerCase() === wanted);
-    return found ? { emailAccount, folderIds: found.folderIds } : { emailAccount };
+    return found ? {emailAccount, folderIds: found.folderIds} : {emailAccount};
 }
 
 /**
- * Resolve the account whose SMTP address matches, or raise. Emitted into a
- * `tell application "Microsoft Outlook"` block; binds `targetAcct`.
+ * Resolve the account whose address matches into `targetAcct`, inside a
+ * `tell application "Microsoft Outlook"` block.
  *
- * `every account` errors even in legacy mode, so probe the typed classes. A
- * `whose email address is ...` filter can't be used either: `email address` is
- * also a class name, and AppleScript resolves it as one ("into type specifier").
+ * `every account` errors even in legacy mode, so the typed classes are probed.
+ * A `whose email address is …` filter can't be used either: `email address` is
+ * also a class name, and AppleScript resolves it as one.
  *
  * A mailbox the dictionary publishes no account object for leaves `targetAcct`
- * as `missing value` rather than failing here, provided `rootFolderSnippet` has
- * a folder id to reach it by instead. `needsAccountObject` is for the operations
- * that cannot work without the object itself — composing mail is the whole of
- * that list, because the account a message is sent from can only be set from it,
- * and a message composed without it goes out from whichever mailbox Outlook
- * considers default.
- *
- * The "not found" sentence is the one `classifyRunFailure` recognises to raise
- * `AccountNotFoundError`, so its wording is load-bearing. The sentence for a
- * mailbox that resolved but cannot compose deliberately is not: that account was
- * found, and reporting it missing would send the caller hunting the wrong thing.
+ * as `missing value` rather than failing, provided the profile gave a folder id
+ * to reach it by. `needsAccountObject` is for composing mail, which can't work
+ * without the object: the account a message is sent from can only be set from
+ * it, and a message composed without it goes out from the default mailbox.
  */
 export function accountLookupSnippet(acct: MacAccount, needsAccountObject = false): string {
-    const address = asEscape(acct.emailAccount);
     const probe = `    set targetAcct to missing value
     try
         repeat with a in (exchange accounts & imap accounts & pop accounts)
-            if (email address of a as string) is "${address}" then
+            if (email address of a as string) is ${asString(acct.emailAccount)} then
                 set targetAcct to a
                 exit repeat
             end if
@@ -63,22 +54,18 @@ export function accountLookupSnippet(acct: MacAccount, needsAccountObject = fals
     end try`;
     if (acct.folderIds && !needsAccountObject) return probe;
     const complaint = acct.folderIds
-        ? `Outlook publishes no account object for '${address}', so the account a `
-        + `message is sent from cannot be set. Its folders can be read; mail cannot `
-        + `be composed from it.`
-        : `Account '${address}' not found`;
+        ? `${failureTag('INVALID_REQUEST')}Outlook publishes no account object for '${acct.emailAccount}', `
+        + 'so the account a message is sent from cannot be set. Its folders can be read; mail cannot be composed from it.'
+        : `${failureTag('ACCOUNT_NOT_FOUND')}Account '${acct.emailAccount}' not found in Outlook.`;
     return `${probe}
-    if targetAcct is missing value then error "${asEscape(complaint)}"`;
+    if targetAcct is missing value then error ${asString(complaint)}`;
 }
 
 /**
- * Bind `variable` to one of the account's well-known folders.
- *
- * Two ways in, chosen at run time: through the account object when the probe
- * found one, and by the folder's own id when it didn't. `mail folder id N`
- * resolves against the application rather than through an account, which is what
- * makes the second way possible at all — and N is the same integer Outlook's
- * profile database records for that folder.
+ * Bind `variable` to one of the account's well-known folders: through the
+ * account object when the probe found one, else by the folder's own id. `mail
+ * folder id N` resolves against the application rather than an account, and N is
+ * the id Outlook's profile database records for that folder.
  */
 export function rootFolderSnippet(acct: MacAccount, term: string, variable: string): string {
     const viaAccount = `    set ${variable} to ${term} of targetAcct`;
@@ -91,161 +78,144 @@ ${viaAccount}
     end if`;
     }
     // The profile listed the mailbox but not this root, so the probe is the only
-    // way left in — and it is the one that may have come up empty. Say which
-    // folder is out of reach rather than let `<term> of missing value` say it.
+    // way in — and it may have come up empty. Name the folder out of reach
+    // rather than let `<term> of missing value` say it.
     if (acct.folderIds) {
-        return `    if targetAcct is missing value then error "Account '${asEscape(acct.emailAccount)}' has no ${term} folder that AppleScript can reach"
+        const complaint = `${failureTag('NOT_FOUND', 'folder')}Account '${acct.emailAccount}' has no ${term} folder AppleScript can reach.`;
+        return `    if targetAcct is missing value then error ${asString(complaint)}
 ${viaAccount}`;
     }
     return viaAccount;
 }
 
 /**
- * Outlook for Mac's dictionary term for each well-known root, keyed by the
- * olDefaultFolders id `mailFolderRef` resolves.
- *
- * Verified against the running app. The terms are NOT the ones the Windows ids
- * suggest — `sent mail` and `junk email` do not compile at all, while
- * `sent items` and `junk mail` do, and a bad term fails the whole script at
- * compile time rather than at the offending line.
+ * Outlook for Mac's dictionary term for each well-known root, by olDefaultFolders
+ * id. Verified against the running app: the terms are NOT what the Windows names
+ * suggest — `sent mail` and `junk email` don't compile, `sent items` and `junk
+ * mail` do — and one bad term fails the whole script at compile time.
  */
-export const MAC_ROOT_TERMS: Record<number, string> = {
-    6: 'inbox',
-    5: 'sent items',
-    16: 'drafts',
-    3: 'deleted items',
-    4: 'outbox',
-    23: 'junk mail',
+export const MAC_ROOT_TERMS: Readonly<Record<number, string>> = {
+    [FolderId.Inbox]: 'inbox',
+    [FolderId.SentMail]: 'sent items',
+    [FolderId.Drafts]: 'drafts',
+    [FolderId.DeletedItems]: 'deleted items',
+    [FolderId.Outbox]: 'outbox',
+    [FolderId.Junk]: 'junk mail',
 };
 
-/** The date property a folder's items actually carry. */
+/** The date property a root's items carry. */
 export function dateProperty(rootId: number): string {
     return isOutgoingRoot(rootId) ? 'time sent' : 'time received';
 }
 
 /**
- * The Windows `FolderPath` shape (`\\mailbox\Inbox\Invoices`), built here rather
- * than in AppleScript — escaping backslashes through a template literal and then
- * an AppleScript literal is unreadable, and TS already knows the parts.
+ * The Windows folder-path shape (`\\mailbox\Inbox\Invoices`), assembled in
+ * TypeScript: escaping backslashes through a template literal and then an
+ * AppleScript literal is unreadable, and the parts are known here anyway.
  */
-export function macFolderPath(emailAccount: string, rootLabel: string, segments: string[]): string {
+export function macFolderPath(emailAccount: string, rootLabel: string, segments: readonly string[]): string {
     return ['\\\\' + emailAccount, rootLabel, ...segments].join('\\');
 }
 
-/** The dictionary term for a root, or a NOT_IMPLEMENTED naming what was asked. */
+/** The dictionary term for a root, or NOT_IMPLEMENTED naming what was asked. */
 export function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
     const term = MAC_ROOT_TERMS[ref.rootId];
     if (!term) {
         const asked = folderLabel ? ` (asked for '${folderLabel}')` : '';
         throw new NotImplementedError(
-            `folder root '${ref.rootLabel}'${asked}`,
-            `macOS — readable roots are ${Object.values(MAC_ROOT_TERMS).join(', ')}`,
+            `Reading the '${ref.rootLabel}' folder${asked}`,
+            `macOS, whose readable roots are ${Object.values(MAC_ROOT_TERMS).join(', ')}`,
         );
     }
     return term;
 }
 
 /**
- * Emit the AppleScript that resolves `scopeFolder` from `targetAcct`, walking a
- * well-known root down through any further path segments. Also binds
- * `scopeCreated`.
+ * Resolve `scopeFolder` from `targetAcct`: a well-known root walked down through
+ * any further segments. Also binds `scopeCreated`.
  *
- * Folder names are compared with `is`, which is case-insensitive in AppleScript —
- * matching the Windows walk's `-ieq` so 'invoices' finds 'Invoices' on both.
- * A missing segment errors by name instead of falling back to the root: silently
- * returning the Inbox for a caller that scoped to one folder hands back the wrong
- * emails under a name that says otherwise. `createMissing` builds the whole
- * chain instead, so a nested destination is one call.
+ * Names compare with `is`, which is case-insensitive in AppleScript, matching
+ * the Windows walk. A missing segment fails as NOT_FOUND rather than falling
+ * back to the root; `createMissing` builds the chain instead.
  */
-export function mailScopeSnippet(
-    acct: MacAccount,
-    ref: MailFolderRef,
-    folderLabel = '',
-    createMissing = false,
-): string {
+export function mailScopeSnippet(acct: MacAccount, ref: MailFolderRef, folderLabel = '', createMissing = false): string {
     const term = rootTerm(ref, folderLabel);
-    const walk = ref.segments.map(seg => `
+    const walk = ref.segments.map(segment => {
+        const complaint = `${failureTag('NOT_FOUND', 'folder')}Folder '${segment}' not found under '${ref.rootLabel}'.`;
+        const create = createMissing
+            ? `        set foundFolder to (make new mail folder at scopeFolder with properties {name:${asString(segment)}})
+        set scopeCreated to true`
+            : `        error ${asString(complaint)}`;
+        return `
     set foundFolder to missing value
     repeat with sf in (mail folders of scopeFolder)
-        if (name of sf as string) is "${asEscape(seg)}" then
+        if (name of sf as string) is ${asString(segment)} then
             set foundFolder to sf
             exit repeat
         end if
     end repeat
     if foundFolder is missing value then
-        if ${asBool(createMissing)} then
-            set foundFolder to (make new mail folder at scopeFolder with properties {name:"${asEscape(seg)}"})
-            set scopeCreated to true
-        else
-            error "Folder '${asEscape(seg)}' not found under '${asEscape(ref.rootLabel)}'"
-        end if
+${create}
     end if
-    set scopeFolder to foundFolder`).join('');
+    set scopeFolder to foundFolder`;
+    }).join('');
     return `    set scopeCreated to false
 ${rootFolderSnippet(acct, term, 'scopeFolder')}${walk}`;
 }
 
 /**
- * The message-id text for a script, or an InvalidRequestError.
+ * The message id text for a script, or INVALID_REQUEST.
  *
- * Outlook for Mac ids are small integers; a Windows MAPI EntryID is rejected up
- * front rather than left to fail as a confusing "not found", because a caller
- * that persisted one from a Windows run needs to be told exactly that.
+ * Outlook for Mac ids are small integers; a Windows EntryID is refused up front
+ * rather than left to fail as a confusing "not found", because a caller that
+ * persisted one from a Windows run needs to be told exactly that.
  */
 export function macMessageId(entryId: string): string {
     const id = String(entryId ?? '').trim();
     if (!/^\d+$/.test(id)) {
         throw new InvalidRequestError(
             `'${entryId}' is not an Outlook for Mac message id. Mac ids are small integers `
-            + `(e.g. "1263") returned by readInboxEmails on this machine; a Windows MAPI `
-            + `EntryID cannot be resolved here.`,
+            + '(e.g. "1263") listed on this machine; a Windows EntryID cannot be resolved here.',
         );
     }
     return id;
 }
 
 /**
- * Split ids into the ones a script can look up and the ones that can only fail.
- *
- * The per-id operations report failures rather than throwing, so an unusable id
- * belongs in the result's `failed` list beside a genuine lookup miss — not as an
- * exception that discards the ids that would have worked.
+ * Split ids into those a script can look up and those that can only fail. A
+ * batch reports an unusable id beside a genuine miss rather than throwing and
+ * discarding the ids that would have worked.
  */
-export function partitionMessageIds(entryIds: readonly string[]): {
-    valid: string[];
-    invalid: { entryId: string; error: string }[];
-} {
+export function partitionMessageIds(entryIds: readonly string[]): { valid: string[]; invalid: ItemFailure[] } {
     const valid: string[] = [];
-    const invalid: { entryId: string; error: string }[] = [];
+    const invalid: ItemFailure[] = [];
     for (const entryId of entryIds) {
         try {
             valid.push(macMessageId(entryId));
         } catch (error) {
-            invalid.push({ entryId: String(entryId), error: (error as Error).message });
+            invalid.push({entryId: String(entryId), subject: '', error: (error as Error).message});
         }
     }
-    return { valid, invalid };
+    return {valid, invalid};
 }
 
 /**
- * Resolve `theMsg` from a macOS message id, or raise.
- *
- * `message id N` resolves against the application rather than one folder, so the
- * message is found wherever it currently sits — including a subfolder.
+ * Resolve `variable` from a message id, or fail as NOT_FOUND. `message id N`
+ * resolves against the application, so the message is found wherever it sits.
  */
 export function messageLookupSnippet(id: string, variable = 'theMsg'): string {
+    const complaint = `${failureTag('NOT_FOUND', 'email')}No email found for message id '${id}'. It may have been deleted - list the mail again for a current id.`;
     return `    set ${variable} to missing value
     try
         set ${variable} to message id ${id}
     end try
-    if ${variable} is missing value then error "Email not found for message id '${id}'"`;
+    if ${variable} is missing value then error ${asString(complaint)}`;
 }
 
 /**
- * The sender's display name and address, as `sndName` / `sndAddr`.
- *
- * `sender` yields a record, and `address of sender of m` fails to coerce, so the
- * record has to be bound first. `name` is absent when there is no display name.
+ * The sender's display name and address as `sndName` / `sndAddr`. `sender` is a
+ * record, and `address of sender of m` doesn't coerce, so the record is bound
+ * first.
  */
 export function senderSnippet(messageVariable = 'theMsg', indent = '    '): string {
     return `${indent}set sndName to ""
@@ -262,18 +232,10 @@ ${indent}end try`;
 }
 
 /**
- * Everything a reader wants off ONE message already bound to `theMsg`, and the
- * row it produces — emitted together so the read order and the positions the
- * TypeScript decoders index into cannot drift apart.
- *
- * Three callers share it (`readEmailBody`, `readSelectedEmail`, and the
- * attachment resolver) and differ only in how they bind `theMsg`. They used to
- * share it by copy: thirty lines repeated, with the `time received` → `time sent`
- * fallback and the field order restated each time, so a dictionary fix reached
- * one reader and not the others.
- *
- * `bodyText` is emitted LAST when asked for, so a stray separator in an earlier
- * field cannot shift it.
+ * Everything a reader wants off one message bound to `theMsg`, emitted together
+ * with the row it produces (see `messageDetailFields`) so the read order and the
+ * positions the decoders index into cannot drift apart. `bodyText` is emitted
+ * LAST when asked for, so a stray separator in an earlier field can't shift it.
  */
 export function messageDetailSnippet(withBody = false, indent = '    '): string {
     return `${indent}set subj to ""
@@ -299,24 +261,14 @@ ${indent}    set bodyText to (plain text content of theMsg) as string
 ${indent}end try` : '');
 }
 
-/**
- * The fields `messageDetailSnippet` fills, in row order. The decoders read them
- * back by the positions in `MessageDetail`.
- */
+/** The fields `messageDetailSnippet` fills, in row order — see `MessageDetail`. */
 export function messageDetailFields(withBody = false): string[] {
-    const fields = [
-        '(id of theMsg as string)',
-        'subj',
-        'sndName',
-        'sndAddr',
-        'recvd',
-        'my sanitizeList(attNames)',
-    ];
+    const fields = ['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'recvd', 'my sanitizeList(attNames)'];
     if (withBody) fields.push('bodyText');
     return fields;
 }
 
-/** Where each of those fields lands in the emitted row. */
+/** Where each of those fields lands in the row. */
 export const MessageDetail = {
     id: 0,
     subject: 1,
@@ -328,9 +280,8 @@ export const MessageDetail = {
 } as const;
 
 /**
- * The first recipient's name and address, as `sndName` / `sndAddr` — what
- * outgoing mail reports in place of a sender, matching the Windows reader's
- * contract for Sent Items (a folder of mail from yourself is unreadable).
+ * The first recipient's name and address as `sndName` / `sndAddr` — what
+ * outgoing mail reports in place of a sender.
  */
 export function firstRecipientSnippet(messageVariable = 'theMsg', indent = '    '): string {
     return `${indent}set sndName to ""
@@ -349,20 +300,15 @@ ${indent}    end if
 ${indent}end try`;
 }
 
-/**
- * Every SMTP address a message was addressed to, as the list `addrList`.
- *
- * `every recipient` covers To, CC and BCC — the full set, which is the whole
- * point of readSentRecipientGroups.
- */
+/** Every address a message was sent to — To, CC and BCC — as the list `addrList`. */
 export function allRecipientsSnippet(messageVariable = 'theMsg', indent = '    '): string {
     return `${indent}set addrList to {}
 ${indent}try
 ${indent}    repeat with r in (every recipient of ${messageVariable})
 ${indent}        try
-${indent}            -- The record has to be bound before its field is read: a nested
-${indent}            -- 'address of (email address of r)' does not coerce, and fails
-${indent}            -- inside the try as an empty recipient list rather than an error.
+${indent}            -- The record is bound before its field is read: a nested
+${indent}            -- 'address of (email address of r)' doesn't coerce, and fails
+${indent}            -- inside the try as an empty list rather than an error.
 ${indent}            set ea to email address of r
 ${indent}            set oneAddr to (address of ea) as string
 ${indent}            if oneAddr is not "" then set end of addrList to oneAddr
@@ -372,9 +318,8 @@ ${indent}end try`;
 }
 
 /**
- * Recursive folder-by-name search from `startFolder`, case-insensitive and
- * depth-capped — the macOS counterpart of the Windows Find-FolderByName, used to
- * resolve a template folder anywhere in the mailbox tree.
+ * Recursive, case-insensitive, depth-capped folder search from `startFolder` —
+ * the macOS counterpart of the Windows Find-FolderByName.
  */
 export const FIND_FOLDER_HANDLER = `
 on findFolderByName(startFolder, wantedName, depth)
@@ -394,9 +339,8 @@ end findFolderByName
 `;
 
 /**
- * Account enumeration only works when Outlook runs in legacy mode; New Outlook
- * errors on `every account` and returns empty lists for the typed classes, so
- * each class is probed independently and failures are ignored.
+ * Enumerate the accounts, probing each class separately: legacy Outlook errors
+ * on `every account`, and New Outlook returns empty lists for the classes.
  */
 export const LIST_ACCOUNTS_SNIPPET = `
 set acctList to {}

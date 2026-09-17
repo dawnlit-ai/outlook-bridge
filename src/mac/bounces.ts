@@ -1,17 +1,15 @@
-// Bounce-backs: finding them, filing them away, and mining them for the
+// Bounce-backs: finding them, clearing them away, and mining them for the
 // addresses that failed.
 //
-// Windows classifies inside the generated PowerShell, where Restrict has already
-// narrowed the set server-side. AppleScript has no Restrict, so the folder is
-// indexed with bulk property reads and the SAME rules — imported from
-// shared/bounceRules — are applied here in TypeScript. Only messages that match
-// have their bodies read, which is the property that keeps either version
-// affordable on a real inbox.
-import { asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords } from './run';
-import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet, } from './scripts';
+// Windows classifies inside PowerShell, after Restrict has narrowed the set.
+// AppleScript has no Restrict, so a folder is indexed with bulk property reads
+// and the SAME rules (shared/bounceRules) run here in TypeScript. Only matches
+// have their bodies read, which keeps either version affordable.
+import { asIdList, asInt, asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords } from './run';
+import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet } from './scripts';
 import { bounceReason, failedRecipients } from '../shared/bounceRules';
-import { clamp } from '../mail';
-import type { CleanUndeliverableResult, SentRecipientGroup, UndeliverableEmail } from '../types';
+import type { CleanUndeliverableRequest, CollectBouncesRequest, SentGroupsRequest } from '../backend';
+import type { CleanUndeliverableResult, ItemFailure, SentRecipientGroup, UndeliverableEmail } from '../types';
 
 interface IndexedMessage {
     id: string;
@@ -23,18 +21,12 @@ interface IndexedMessage {
 
 /**
  * Index one well-known folder's messages within the window: everything the
- * bounce classifier needs, and nothing that costs a per-message event.
+ * classifier needs, in bulk reads — `sender of every message` hands back a list
+ * of records AppleScript reads locally, so the whole index is four Apple events.
  */
-async function indexFolder(
-    emailAccount: string,
-    folderTerm: string,
-    days: number,
-): Promise<IndexedMessage[]> {
-    // Sender is a record, and a bulk `sender of every message` read hands back a
-    // list of them that AppleScript then reads locally — so the whole index costs
-    // four Apple events rather than one per message.
+async function indexFolder(emailAccount: string, folderTerm: string, daysBack: number): Promise<IndexedMessage[]> {
     const acct = await resolveMacAccount(emailAccount);
-    const script = `tell application "Microsoft Outlook"
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
     set idList to id of every message of scanFolder
@@ -49,7 +41,7 @@ ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
     on error
         set sndList to {}
     end try
-    set cutoff to (current date) - (${days} * days)
+    set cutoff to (current date) - (${asInt(daysBack)} * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
@@ -66,18 +58,12 @@ ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
                     set sndName to (name of snd) as string
                 end try
             end if
-            set out to out & ${asRow([
-        '(item i of idList as string)',
-        '(item i of subjList)',
-        'sndName',
-        'sndAddr',
-        'my isoDate(stamp)',
-    ])}
+            set out to out & ${asRow(['(item i of idList as string)', '(item i of subjList)', 'sndName', 'sndAddr', 'my isoDate(stamp)'])}
         end if
     end repeat
     return out
-end tell`;
-    return splitRecords(await runOsaScript(script, 300000)).map(record => {
+end tell`, 'scan');
+    return splitRecords(raw).map(record => {
         const parts = splitFields(record);
         return {
             id: field(parts, 0),
@@ -89,12 +75,13 @@ end tell`;
     });
 }
 
-/** Read the plain-text bodies of the given messages, keyed by id. */
+/** The plain-text bodies of the given messages, by id. */
 async function readBodies(ids: readonly string[]): Promise<Map<string, string>> {
-    if (ids.length === 0) return new Map();
-    const script = `tell application "Microsoft Outlook"
+    const bodies = new Map<string, string>();
+    if (ids.length === 0) return bodies;
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
-    repeat with theId in {${ids.join(', ')}}
+    repeat with theId in ${asIdList(ids)}
         set theMsg to missing value
         try
             set theMsg to message id theId
@@ -108,9 +95,8 @@ async function readBodies(ids: readonly string[]): Promise<Map<string, string>> 
         end if
     end repeat
     return out
-end tell`;
-    const bodies = new Map<string, string>();
-    for (const record of splitRecords(await runOsaScript(script, 300000))) {
+end tell`, 'scan');
+    for (const record of splitRecords(raw)) {
         const parts = splitFields(record);
         bodies.set(field(parts, 0), field(parts, 1));
     }
@@ -118,16 +104,13 @@ end tell`;
 }
 
 /** Classify an index, then fill each match's failed recipients from its body. */
-async function collectBounces(
-    indexed: readonly IndexedMessage[],
-    accountAddress: string,
-): Promise<UndeliverableEmail[]> {
+async function collectBounces(indexed: readonly IndexedMessage[], accountAddress: string): Promise<UndeliverableEmail[]> {
     const matched = indexed
-        .map(message => ({ message, reason: bounceReason(message) }))
+        .map(message => ({message, reason: bounceReason(message)}))
         .filter(entry => entry.reason !== '');
     if (matched.length === 0) return [];
     const bodies = await readBodies(matched.map(entry => entry.message.id));
-    return matched.map(({ message, reason }) => ({
+    return matched.map(({message, reason}) => ({
         entryId: message.id,
         subject: message.subject,
         senderName: message.senderName,
@@ -139,33 +122,19 @@ async function collectBounces(
 }
 
 /**
- * Scan an account's inbox for bounce-back / non-delivery messages — mail-daemon
- * and postmaster rejections, and "Message blocked"-style failure notices — and,
- * unless previewing, move each to Deleted Items (recoverable).
- *
- * Classification is deliberately conservative so ordinary mail that merely
- * mentions "delivery" is never caught: an item matches only when its sender
- * fingerprints as a mail-delivery daemon/postmaster or its subject contains a
- * specific bounce phrase. macOS has no MessageClass, so the NDR-report signal
- * Windows can also use is unavailable here — an Exchange NDR still matches on
- * its "Undeliverable:" subject, which is what it carries.
+ * Find bounce-backs in the Inbox and, unless dry-running, move each to Deleted
+ * Items. macOS has no MessageClass, so the NDR-class signal Windows also uses is
+ * unavailable — an Exchange NDR still matches on its "Undeliverable:" subject.
  */
-export async function cleanUndeliverableEmails(
-    emailAccount: string,
-    daysBack = 30,
-    dryRun = true,
-): Promise<CleanUndeliverableResult> {
-    const days = clamp(daysBack, 1, 365);
-    const indexed = await indexFolder(emailAccount, 'inbox', days);
-    const matched = await collectBounces(indexed, emailAccount);
-
+export async function cleanUndeliverableEmails(request: CleanUndeliverableRequest): Promise<CleanUndeliverableResult> {
+    const matched = await collectBounces(await indexFolder(request.account, 'inbox', request.daysBack), request.account);
     let deletedCount = 0;
-    const failed: { subject: string; error: string }[] = [];
-    if (!dryRun && matched.length > 0) {
-        const script = `tell application "Microsoft Outlook"
+    const failed: ItemFailure[] = [];
+    if (!request.dryRun && matched.length > 0) {
+        const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set deletedCount to 0
     set out to ""
-    repeat with theId in {${matched.map(m => m.entryId).join(', ')}}
+    repeat with theId in ${asIdList(matched.map(m => m.entryId))}
         set subj to ""
         try
             set theMsg to missing value
@@ -179,23 +148,22 @@ export async function cleanUndeliverableEmails(
             delete theMsg
             set deletedCount to deletedCount + 1
         on error errText
-            set out to out & ${asRow(['subj', 'errText'])}
+            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
         end try
     end repeat
     return ${asRow(['(deletedCount as string)'])} & out
-end tell`;
-        const records = splitRecords(await runOsaScript(script, 300000));
-        deletedCount = intField(splitFields(records[0] || ''), 0);
+end tell`, 'scan');
+        const records = splitRecords(raw);
+        deletedCount = intField(splitFields(records[0] ?? ''), 0);
         for (const record of records.slice(1)) {
             const parts = splitFields(record);
-            failed.push({ subject: field(parts, 0), error: field(parts, 1) });
+            failed.push({entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2)});
         }
     }
-
     return {
-        account: emailAccount,
-        scannedDays: days,
-        dryRun,
+        account: request.account,
+        scannedDays: request.daysBack,
+        dryRun: request.dryRun,
         matchedCount: matched.length,
         deletedCount,
         matched,
@@ -203,25 +171,12 @@ end tell`;
     };
 }
 
-/**
- * Read-only scan of an account's Inbox (and, when scanDeleted, its Deleted Items)
- * for bounce messages, returning just the deduped set of failed recipient
- * addresses. Uses the same conservative classifier as cleanUndeliverableEmails.
- *
- * Deleted Items is included so this still works after cleanUndeliverableEmails has
- * already filed the bounces there — the blacklist step doesn't depend on running
- * before the cleanup. This never deletes anything.
- */
-export async function collectBouncedRecipients(
-    emailAccount: string,
-    daysBack = 30,
-    scanDeleted = true,
-): Promise<string[]> {
-    const days = clamp(daysBack, 1, 365);
-    const terms = scanDeleted ? ['inbox', 'deleted items'] : ['inbox'];
+/** The deduplicated addresses bounce-backs report as failed. Never deletes anything. */
+export async function collectBouncedRecipients(request: CollectBouncesRequest): Promise<string[]> {
+    const terms = request.includeDeletedItems ? ['inbox', 'deleted items'] : ['inbox'];
     const found = new Set<string>();
     for (const term of terms) {
-        const bounces = await collectBounces(await indexFolder(emailAccount, term, days), emailAccount);
+        const bounces = await collectBounces(await indexFolder(request.account, term, request.daysBack), request.account);
         for (const bounce of bounces) {
             for (const address of bounce.failedRecipients) found.add(address);
         }
@@ -230,24 +185,13 @@ export async function collectBouncedRecipients(
 }
 
 /**
- * Read the account's Sent Items within the window, returning each mail with the
- * full SMTP address set it was sent to (To + CC + BCC), newest first. This is how
- * the "was every address for this contact tried?" question gets answered: where a
- * blast sends one email per organization addressed to all of its addresses, a sent
- * message's recipient set IS that organization's full address set.
+ * Sent Items within the window, each message with every address it went to,
+ * newest first. Indexed on `time sent` — outgoing mail's own stamp; indexing on
+ * `time received` yields an empty set that looks exactly like an empty folder.
  */
-export async function readSentRecipientGroups(
-    emailAccount: string,
-    daysBack = 30,
-    limit = 3000,
-): Promise<SentRecipientGroup[]> {
-    const days = clamp(daysBack, 1, 365);
-    const cap = clamp(limit, 1, 10000);
-    // Pass 1 — index Sent Items on `time sent`, which is the stamp outgoing mail
-    // actually carries; indexing it on `time received` yields an empty set that
-    // looks exactly like an empty folder.
-    const acct = await resolveMacAccount(emailAccount);
-    const indexScript = `tell application "Microsoft Outlook"
+export async function readSentRecipientGroups(request: SentGroupsRequest): Promise<SentRecipientGroup[]> {
+    const acct = await resolveMacAccount(request.account);
+    const indexed = splitRecords(await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
     set idList to id of every message of sentFolder
@@ -257,63 +201,50 @@ ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
         set timeList to {}
     end try
     set subjList to subject of every message of sentFolder
-    set cutoff to (current date) - (${days} * days)
+    set cutoff to (current date) - (${asInt(request.daysBack)} * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
         if (count of timeList) is (count of idList) then set stamp to item i of timeList
         if stamp is missing value or stamp is greater than or equal to cutoff then
-            set out to out & ${asRow([
-        '(item i of idList as string)',
-        '(item i of subjList)',
-        'my isoDate(stamp)',
-    ])}
+            set out to out & ${asRow(['(item i of idList as string)', '(item i of subjList)', 'my isoDate(stamp)'])}
         end if
     end repeat
     return out
-end tell`;
-
-    const indexed = splitRecords(await runOsaScript(indexScript, 300000)).map(record => {
+end tell`, 'scan')).map(record => {
         const parts = splitFields(record);
-        return { id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2) };
+        return {id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2)};
     });
     indexed.sort((a, b) => b.sentOn.localeCompare(a.sentOn));
-    const chosen = indexed.slice(0, cap);
+    const chosen = indexed.slice(0, request.limit);
     if (chosen.length === 0) return [];
 
-    // Pass 2 — recipients, which can only be read per message.
-    const detailScript = `tell application "Microsoft Outlook"
+    // Pass 2 — recipients, which can only be read message by message.
+    const recipientsById = new Map<string, string[]>();
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
-    repeat with theId in {${chosen.map(row => row.id).join(', ')}}
+    repeat with theId in ${asIdList(chosen.map(row => row.id))}
         set theMsg to missing value
         try
             set theMsg to message id theId
         end try
         if theMsg is not missing value then
 ${allRecipientsSnippet('theMsg', '            ')}
-            set out to out & ${asRow([
-        '(theId as string)',
-        'my sanitizeList(addrList)',
-    ])}
+            set out to out & ${asRow(['(theId as string)', 'my sanitizeList(addrList)'])}
         end if
     end repeat
     return out
-end tell`;
-
-    const recipientsById = new Map<string, string[]>();
-    for (const record of splitRecords(await runOsaScript(detailScript, 300000))) {
+end tell`, 'scan');
+    for (const record of splitRecords(raw)) {
         const parts = splitFields(record);
-        recipientsById.set(
-            field(parts, 0),
-            splitList(field(parts, 1)).map(address => address.toLowerCase()),
-        );
+        recipientsById.set(field(parts, 0), splitList(field(parts, 1)).map(address => address.toLowerCase()));
     }
-
-    const groups: SentRecipientGroup[] = [];
-    for (const row of chosen) {
-        const recipients = recipientsById.get(row.id) || [];
-        if (recipients.length === 0) continue;
-        groups.push({ entryId: row.id, subject: row.subject, sentOn: row.sentOn, recipients });
-    }
-    return groups;
+    return chosen
+        .map(row => ({
+            entryId: row.id,
+            subject: row.subject,
+            sentOn: row.sentOn,
+            recipients: recipientsById.get(row.id) ?? []
+        }))
+        .filter(group => group.recipients.length > 0);
 }

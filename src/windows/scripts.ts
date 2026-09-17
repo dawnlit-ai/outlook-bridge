@@ -1,49 +1,45 @@
 // The PowerShell fragments more than one Windows operation is built from.
 //
-// A fragment lives here once at least two modules emit it; one used by a single
-// operation stays beside that operation, where its rules are readable next to
-// the code that depends on them.
-import { psEscape } from './run';
-import type { MailFolderRef } from '../types';
+// A fragment lives here once two modules emit it; one used by a single
+// operation stays beside that operation, where its rules read next to the code
+// relying on them. Every fragment follows run.ts's escaping rule: caller text
+// only ever appears as a psString literal.
+import { psInt, psString } from './run';
+import { failureTag } from '../errors';
+import type { EmailLocator, MailFolderRef } from '../types';
 
 /**
- * Open a MAPI session. `$outlook` and `$ns` are what every later fragment reads.
+ * Open the MAPI session, binding `$outlook` and `$ns`.
  *
- * `Logon()` is a no-op against an Outlook that is already running and starts one
- * that isn't, so it costs nothing and removes a class of "works only when
- * Outlook happens to be open" failure.
+ * `Logon()` is a no-op against an Outlook that is already running and starts
+ * one that isn't, which removes a class of "works only while Outlook is open"
+ * failure.
  */
-const PS_PRELUDE = `
-$ErrorActionPreference = 'Stop'
+export const SESSION_PS = `
 $outlook = New-Object -ComObject Outlook.Application
-$ns = $outlook.GetNamespace('mapi')
+$ns = $outlook.GetNamespace('MAPI')
 $ns.Logon()
 `;
 
 /**
- * Session plus the mailbox the address names; binds `$target`, `$account` and
- * `$storeFolder`.
+ * The session plus the mailbox an address names; binds `$target`, `$account`
+ * and `$storeFolder`.
  *
- * An address can name a mailbox two different ways, and only one of them is an
- * Account. A mailbox opened as a secondary store has no Account object, so
- * resolving through Accounts alone closes every operation to it — including the
- * reads, which never needed an Account in the first place. Both are resolved
- * here and EITHER is enough: `$account` is null for a store-only mailbox, and
- * the operations that genuinely require an identity to act as (sending) check
- * for it themselves rather than being denied the mailbox up front.
+ * An address can name a mailbox two ways, and only one is an Account. A mailbox
+ * mounted as a secondary store — a shared mailbox, or one added after Outlook
+ * started — has no Account object, so both are resolved and EITHER is enough:
+ * `$account` is null for a store-only mailbox, and the operations that need an
+ * identity to act as (sending) check for it themselves.
  *
- * Fails rather than falling back to the default account. A bad address must
- * never silently send from — or read — the wrong mailbox, and the thrown
- * sentence is the one `classifyRunFailure` recognises to raise
- * `AccountNotFoundError`, so the wording is load-bearing.
+ * Never falls back to the default account: a bad address must not silently
+ * read or send from the wrong mailbox.
  *
- * The store is matched on the target address BEFORE the account's display name,
- * which is what keeps the named-store route (see `namedStoreScript`) selecting
- * the folders it selected before on a profile where the two differ.
+ * The store is matched on the address BEFORE the account's display name, so a
+ * profile where the two differ selects the same folders it always has.
  */
 export function accountScript(emailAccount: string): string {
-    return `${PS_PRELUDE}
-$target = '${psEscape(emailAccount)}'
+    return `${SESSION_PS}
+$target = ${psString(emailAccount)}
 $account = $null
 foreach ($a in $ns.Accounts) {
     if ($a.SmtpAddress -ieq $target) { $account = $a; break }
@@ -57,16 +53,18 @@ if ($storeFolder -eq $null -and $account -ne $null) {
         if ($f.Name -ieq $account.DisplayName) { $storeFolder = $f; break }
     }
 }
-if ($account -eq $null -and $storeFolder -eq $null) { throw "Account '$target' not found" }
+if ($account -eq $null -and $storeFolder -eq $null) {
+    throw "${failureTag('ACCOUNT_NOT_FOUND')}Account '$target' not found in this Outlook profile."
+}
 `;
 }
 
 /**
- * The mailbox's own store, as `$store`. Requires `accountScript`.
+ * The mailbox's store as `$store` (and its id as `$storeId`), reached through
+ * the account's delivery store. Requires `accountScript`.
  *
- * Falls back to the resolved store folder because a store-only mailbox has no
- * account to read a DeliveryStore off — reaching through `$account` directly is
- * what makes an operation fail on exactly those mailboxes.
+ * Falls back to the resolved store folder, because a store-only mailbox has no
+ * account to read a delivery store off.
  */
 export const DELIVERY_STORE_PS = `
 $store = if ($account -ne $null) { $account.DeliveryStore } else { $storeFolder.Store }
@@ -74,59 +72,61 @@ $storeId = $store.StoreID
 `;
 
 /**
- * The store `accountScript` resolved through the namespace's top-level folders,
- * as `$store`.
+ * The mailbox's store as `$store`, reached through the namespace's top-level
+ * folder for it. Requires `accountScript`.
  *
- * Kept alongside `DELIVERY_STORE_PS` rather than replaced by it: the reading
- * operations resolve the store this way, and on a profile where a mailbox is
- * open under a display name that differs from the delivery store's, the two do
- * not select the same folders. Changing which one a reader uses changes what it
- * returns, so each keeps the route it was verified against.
- *
- * The folder search itself now lives in `accountScript`, which has to attempt it
- * anyway to resolve a mailbox that has no account. This throws when it found
- * nothing, which is the case where the address named an account whose store is
- * not open in this profile.
+ * Kept beside DELIVERY_STORE_PS rather than replaced by it: the readers resolve
+ * their store this way, and on a profile where a mailbox is open under a display
+ * name that differs from its delivery store's, the two routes do not select the
+ * same folders. Each operation keeps the route it was verified against.
  */
-export function namedStoreScript(emailAccount: string): string {
-    return `
-if ($storeFolder -eq $null) { throw "Store folder not found for account '${psEscape(emailAccount)}'" }
+export const NAMED_STORE_PS = `
+if ($storeFolder -eq $null) {
+    throw "${failureTag('ACCOUNT_NOT_FOUND')}Account '$target' has no mailbox open in this Outlook profile."
+}
 $store = $storeFolder.Store
 $storeId = $store.StoreID
+`;
+
+/**
+ * Resolve one email into `$<variable>`, or fail as NOT_FOUND.
+ *
+ * The StoreID is tried first, since it lets an id from any mounted mailbox
+ * resolve; the bare lookup (default store) is the fallback for a caller holding
+ * a stale StoreID or none.
+ */
+export function itemLookupScript(email: EmailLocator, variable = 'item'): string {
+    const byStore = email.storeId
+        ? `try { $${variable} = $ns.GetItemFromID($lookupId, ${psString(email.storeId)}) } catch { $${variable} = $null }`
+        : '';
+    return `
+$lookupId = ${psString(email.entryId)}
+$${variable} = $null
+${byStore}
+if ($${variable} -eq $null) { try { $${variable} = $ns.GetItemFromID($lookupId) } catch { $${variable} = $null } }
+if ($${variable} -eq $null) {
+    throw "${failureTag('NOT_FOUND', 'email')}No email found for entry id '$lookupId'. It may have been moved or deleted - list the mail again for a current id."
+}
 `;
 }
 
 /**
- * Resolve one item into `$item`. A StoreID disambiguates across mailboxes, so
- * pass it whenever the listing that produced the id carried one.
- */
-export function getItemScript(entryId: string, storeId?: string): string {
-    return storeId
-        ? `$item = $ns.GetItemFromID('${psEscape(entryId)}', '${psEscape(storeId)}')`
-        : `$item = $ns.GetItemFromID('${psEscape(entryId)}')`;
-}
-
-/**
- * The sender's real SMTP address, as `$senderSmtp`. Requires `$item`.
+ * The sender's SMTP address as `$senderSmtp`. Requires `$item`.
  *
- * An Exchange sender's `SenderEmailAddress` is an X500 DN rather than an
- * address; a caller that means to reply to it, or correlate it with anything,
- * needs the address it resolves to.
+ * An Exchange sender's SenderEmailAddress is an X.500 DN, not an address; a
+ * caller replying to it or matching it against anything needs the address.
  */
 export const SENDER_SMTP_PS = `
 $senderSmtp = ''
 try {
-    if ($item.SenderEmailType -eq 'EX') { $senderSmtp = $item.Sender.GetExchangeUser().PrimarySmtpAddress }
+    if ($item.SenderEmailType -eq 'EX') { $senderSmtp = [string]$item.Sender.GetExchangeUser().PrimarySmtpAddress }
 } catch {}
-if (-not $senderSmtp) { $senderSmtp = if ($item.SenderEmailAddress) { $item.SenderEmailAddress } else { '' } }
+if (-not $senderSmtp) { try { $senderSmtp = [string]$item.SenderEmailAddress } catch {} }
 `;
 
-/**
- * Recursive folder-by-name search. Case-insensitive, depth-capped so a huge
- * mailbox tree can't hang the scan.
- */
+/** Recursive, case-insensitive folder search by name, depth-capped so a huge tree can't hang it. */
 export const FIND_FOLDER_PS = `
-function Find-FolderByName($root, $name, $depth) {
+function Find-FolderByName($root, [string]$name, [int]$depth) {
     foreach ($f in $root.Folders) {
         if ($f.Name -ieq $name) { return $f }
     }
@@ -140,24 +140,51 @@ function Find-FolderByName($root, $name, $depth) {
 `;
 
 /**
- * Emit the PowerShell that resolves `$scope` from `$store`, walking a well-known
- * root down through any further segments. Also binds `$scopeCreated`.
+ * `$cutoff`, the moment `daysBack` days ago, and `$cutoffFilter`, that moment
+ * as a date string for an `Items.Restrict` filter.
  *
- * Split out so the emitted script can be parse-checked without an Outlook
- * session — the folder walk is the only part that varies per call, and a syntax
- * error in it would only ever surface as a failed live run.
- *
- * `folderLabel` is the caller's original string, used verbatim in the error so
- * the message names what they typed rather than the parsed segments. Set
- * `createMissing` to build absent segments instead of throwing — the whole
- * chain, so a nested destination can be created in one call.
+ * Restrict parses date strings in the machine's own regional format, so the
+ * string is formatted in it ('g': short date and time) rather than a fixed
+ * pattern — 'MM/dd/yyyy' reads as a different day on a day-first locale. Every
+ * reader re-checks each item against `$cutoff` too, so the window holds even
+ * where a store reads the filter loosely.
  */
-export function mailScopeScript(ref: MailFolderRef, folderLabel = '', createMissing = false): string {
-    const root = `$store.GetDefaultFolder(${ref.rootId})`;
+export function cutoffScript(daysBack: number): string {
+    return `
+$cutoff = (Get-Date).AddDays(-${psInt(daysBack)})
+$cutoffFilter = $cutoff.ToString('g').Replace("'", "''")
+`;
+}
+
+/**
+ * `$<variable>` = the items of `$<folderVariable>` with `property` on or after
+ * `$cutoff`. Requires `cutoffScript`. A store that rejects the filter outright
+ * yields every item instead, which the per-item re-check then narrows.
+ */
+export function itemsSinceScript(folderVariable: string, property: string, variable: string): string {
+    return `
+$${variable} = $null
+try { $${variable} = $${folderVariable}.Items.Restrict("[${property}] >= '$cutoffFilter'") } catch { $${variable} = $${folderVariable}.Items }
+`;
+}
+
+/**
+ * Resolve `$scope` from `$store`: a well-known root walked down through any
+ * further segments. Also binds `$scopeCreated`.
+ *
+ * Segments match direct children; a bare name that isn't a direct child falls
+ * back to a recursive search, so one folder string works across operations. A
+ * missing folder fails as NOT_FOUND naming what the caller typed and what the
+ * deepest folder reached does hold — never a silent fall back to the root. With
+ * `createMissing`, the whole missing chain is created instead.
+ */
+export function mailScopeScript(ref: MailFolderRef, folderLabel: string, createMissing = false): string {
+    const root = `$store.GetDefaultFolder(${psInt(ref.rootId)})`;
     if (ref.segments.length === 0) return `$scope = ${root}\n$scopeCreated = $false`;
     return `
 ${FIND_FOLDER_PS}
-$segments = @(${ref.segments.map(s => `'${psEscape(s)}'`).join(',')})
+$folderLabel = ${psString(folderLabel)}
+$segments = @(${ref.segments.map(psString).join(', ')})
 $scopeRoot = ${root}
 $scope = $scopeRoot
 $deepest = $scopeRoot
@@ -168,13 +195,11 @@ foreach ($seg in $segments) {
     if ($next -eq $null) { $deepest = $scope; $scope = $null; break }
     $scope = $next
 }
-# A bare name that isn't a direct child still resolves by recursive search, so one
-# folder string keeps working across tools.
 if ($scope -eq $null -and $segments.Count -eq 1) {
     $scope = Find-FolderByName $scopeRoot $segments[0] 3
 }
 if ($scope -eq $null -and ${createMissing ? '$true' : '$false'}) {
-    # Rebuild the whole chain from the root, creating only what is genuinely absent.
+    # Rebuild the chain from the root, creating only what is genuinely absent.
     $scope = $scopeRoot
     foreach ($seg in $segments) {
         $next = $null
@@ -186,6 +211,6 @@ if ($scope -eq $null -and ${createMissing ? '$true' : '$false'}) {
 if ($scope -eq $null) {
     $names = @()
     foreach ($f in $deepest.Folders) { $names += $f.Name }
-    throw "Folder '${psEscape(folderLabel)}' not found. Folders under '$($deepest.Name)': $($names -join ', ')"
+    throw "${failureTag('NOT_FOUND', 'folder')}Folder '$folderLabel' not found. Folders under '$($deepest.Name)': $($names -join ', ')"
 }`;
 }

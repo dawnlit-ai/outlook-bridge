@@ -1,12 +1,10 @@
-// The generated scripts themselves.
+// The script fragments themselves.
 //
-// Neither platform's scripts can be run in CI, but they can be checked, and the
-// two failure modes worth catching are exactly the ones a live run reports
-// badly. A PowerShell folder walk that emits the wrong shape only shows up as a
-// failed run against a real mailbox; an AppleScript with one bad dictionary term
-// fails the WHOLE script at compile time rather than at the offending line, so
-// on a Mac with Outlook installed every fragment is put through osacompile here
-// — no Outlook session, no mailbox touched, just terminology resolution.
+// Neither platform's automation can run in CI, but its scripts can be checked.
+// The PowerShell fragments are checked for shape and escaping here (and every
+// whole script is parsed in windowsScripts.test.js); on a Mac with Outlook, the
+// AppleScript fragments go through osacompile, which resolves dictionary terms
+// without opening a session or touching a mailbox.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -14,91 +12,91 @@ const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
 
-const {accountScript, mailScopeScript} = require('../dist/windows/index.js');
+const {accountScript, itemLookupScript, mailScopeScript} = require('../dist/windows/scripts.js');
+const {buildScript, psEscape, psInt} = require('../dist/windows/run.js');
 const {mailFolderRef} = require('../dist/mail.js');
+const {errorFromTaggedMessage} = require('../dist/errors.js');
 const macScripts = require('../dist/mac/scripts.js');
 const macRun = require('../dist/mac/run.js');
 
-// -- The Windows mailbox resolver --------------------------------------
+// ── PowerShell ───────────────────────────────────────────────────────────
 
-// A mailbox open as a secondary store has no Account object. Resolving through
-// Accounts alone made every operation unreachable for it, so both routes are
-// tried and either one is enough.
-test('a mailbox resolves through Accounts or through Stores', () => {
+test('psEscape doubles every quote PowerShell accepts as a single quote', () => {
+    assert.equal(psEscape("o'brien"), "o''brien");
+    assert.equal(psEscape('\u2018a\u2019 \u201Ab\u201B'), '\u2018\u2018a\u2019\u2019 \u201A\u201Ab\u201B\u201B');
+    assert.equal(psEscape('$(Get-Date) "x"'), '$(Get-Date) "x"', 'nothing else is special in a single-quoted literal');
+});
+
+test('psInt refuses anything but a whole number', () => {
+    assert.equal(psInt(42), '42');
+    for (const bad of [1.5, NaN, '7', Infinity]) assert.throws(() => psInt(bad), error => error.code === 'INVALID_REQUEST');
+});
+
+test('every script runs inside a catch that reports one JSON failure line', () => {
+    const script = buildScript('$x = 1');
+    assert.match(script, /\$ErrorActionPreference = 'Stop'/);
+    assert.match(script, /try \{\s*\$x = 1\s*\} catch \{/);
+    assert.match(script, /ConvertTo-Json -Compress @\{ message = \$message; line = \$line \}/);
+});
+
+test('a mailbox resolves through Accounts or through store folders', () => {
     const script = accountScript('team@example.com');
     assert.match(script, /\$a\.SmtpAddress -ieq \$target/);
     assert.match(script, /\$f\.Name -ieq \$target/);
     assert.match(script, /if \(\$account -eq \$null -and \$storeFolder -eq \$null\)/);
+    // The address is matched before the account's display name.
+    assert.ok(script.indexOf('$f.Name -ieq $target') < script.indexOf('$f.Name -ieq $account.DisplayName'));
 });
 
-// classifyRunFailure recognises this exact sentence to raise AccountNotFoundError.
-// Reword it and the most common operational mistake degrades to SCRIPT_FAILED.
-test('the not-found sentence stays the one the error classifier matches', () => {
-    assert.match(accountScript('nobody@example.com'), /throw "Account '\$target' not found"/);
+test('a missing account fails with a tag the classifier reads as ACCOUNT_NOT_FOUND', () => {
+    const thrown = /throw "([^"]*)"/.exec(accountScript('nobody@example.com'))[1].replace('$target', 'nobody@example.com');
+    const error = errorFromTaggedMessage(thrown);
+    assert.equal(error.code, 'ACCOUNT_NOT_FOUND');
+    assert.equal(error.account, 'nobody@example.com');
 });
 
-// The address is matched before the account's display name, which is what keeps
-// the named-store route selecting the folders it selected before on a profile
-// where the two differ.
-test('the target address is matched before the account display name', () => {
-    const script = accountScript('team@example.com');
-    const byTarget = script.indexOf('$f.Name -ieq $target');
-    const byDisplay = script.indexOf('$f.Name -ieq $account.DisplayName');
-    assert.ok(byTarget > -1 && byDisplay > -1);
-    assert.ok(byTarget < byDisplay, 'target match must come first');
-});
-
-// Caller text goes into a single-quoted PowerShell literal; a quote in it would
-// otherwise close the string and run whatever followed.
-test('the target address is escaped into its literal', () => {
+test('caller text only ever appears in a single-quoted literal', () => {
     assert.match(accountScript("o'brien@example.com"), /\$target = 'o''brien@example\.com'/);
+    const lookup = itemLookupScript({entryId: "$(evil)'", storeId: 'S'});
+    assert.match(lookup, /\$lookupId = '\$\(evil\)'''/);
+    assert.doesNotMatch(lookup, /"[^"]*\$\(evil\)/, 'never inside a double-quoted string');
 });
 
-
-// ── The Windows folder-scope emitter ─────────────────────────────────────
 test('a bare well-known root needs no walk', () => {
-    const script = mailScopeScript(mailFolderRef('Sent Items'));
+    const script = mailScopeScript(mailFolderRef('Sent Items'), 'Sent Items');
     assert.match(script, /\$scope = \$store\.GetDefaultFolder\(5\)/);
     assert.match(script, /\$scopeCreated = \$false/);
-    assert.doesNotMatch(script, /Find-FolderByName/, 'no recursive search is needed');
+    assert.doesNotMatch(script, /Find-FolderByName/);
 });
 
-test('a path under a root walks its segments and names the caller string on failure', () => {
-    const script = mailScopeScript(mailFolderRef('Inbox\\Clients\\Acme'), 'Inbox\\Clients\\Acme');
-    assert.match(script, /\$segments = @\('Clients','Acme'\)/);
-    assert.match(script, /GetDefaultFolder\(6\)/);
-    assert.match(script, /Folder 'Inbox\\Clients\\Acme' not found/);
+test('a folder path walks its segments and names the caller string on failure, by variable', () => {
+    const script = mailScopeScript(mailFolderRef('Inbox\\Clients\\$(evil)'), 'Inbox\\Clients\\$(evil)');
+    assert.match(script, /\$segments = @\('Clients', '\$\(evil\)'\)/);
+    assert.match(script, /\$folderLabel = 'Inbox\\Clients\\\$\(evil\)'/);
+    assert.match(script, /Folder '\$folderLabel' not found/);
+    assert.doesNotMatch(script, /throw "[^"]*\$\(evil\)/);
 });
 
 test('createMissing rebuilds the whole chain rather than only the leaf', () => {
-    const withCreate = mailScopeScript(mailFolderRef('Clients\\Acme\\2026'), 'Clients\\Acme\\2026', true);
-    // The creation branch is emitted either way and gated on a literal, so what
-    // distinguishes the two calls is the gate — not the presence of Folders.Add.
-    assert.match(withCreate, /if \(\$scope -eq \$null -and \$true\)/);
-    assert.match(withCreate, /foreach \(\$seg in \$segments\)[\s\S]*\$scope\.Folders\.Add\(\$seg\)/);
-    const without = mailScopeScript(mailFolderRef('Clients\\Acme\\2026'), 'Clients\\Acme\\2026', false);
-    assert.match(without, /if \(\$scope -eq \$null -and \$false\)/);
+    const ref = mailFolderRef('Clients\\Acme\\2026');
+    assert.match(mailScopeScript(ref, 'x', true), /if \(\$scope -eq \$null -and \$true\)/);
+    assert.match(mailScopeScript(ref, 'x', true), /\$scope\.Folders\.Add\(\$seg\)/);
+    assert.match(mailScopeScript(ref, 'x', false), /if \(\$scope -eq \$null -and \$false\)/);
 });
 
-test('a folder name carrying an apostrophe stays inside its literal', () => {
-    // The single-quote doubling is the whole defence for caller text in a
-    // generated script; a name like "Bob's mail" must not close the literal.
-    const script = mailScopeScript(mailFolderRef("Inbox\\Bob's mail"), "Inbox\\Bob's mail");
-    assert.match(script, /'Bob''s mail'/);
-});
+// ── AppleScript ──────────────────────────────────────────────────────────
 
-// ── The macOS fragments, compiled ────────────────────────────────────────
 const OUTLOOK_APP = '/Applications/Microsoft Outlook.app';
 const canCompile = process.platform === 'darwin' && fs.existsSync(OUTLOOK_APP);
+const macOnly = {skip: !canCompile && 'needs macOS with Outlook installed'};
 
 /** Compile (never run) a script, returning osacompile's complaint or ''. */
 function compileError(source) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-osa-'));
     const input = path.join(dir, 'fragment.applescript');
-    const output = path.join(dir, 'fragment.scpt');
     fs.writeFileSync(input, source, 'utf-8');
     try {
-        execFileSync('osacompile', ['-o', output, input], {stdio: 'pipe'});
+        execFileSync('osacompile', ['-o', path.join(dir, 'fragment.scpt'), input], {stdio: 'pipe'});
         return '';
     } catch (error) {
         return String(error.stderr || error.message);
@@ -107,7 +105,7 @@ function compileError(source) {
     }
 }
 
-/** Wrap a snippet in the tell block its terms are resolved against. */
+/** A snippet inside the tell block its terms resolve against. */
 function inTell(body) {
     return `${macRun.AS_HANDLERS}
 tell application "Microsoft Outlook"
@@ -115,20 +113,10 @@ ${body}
 end tell`;
 }
 
-test('the shared AppleScript handlers compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    assert.equal(compileError(macRun.AS_HANDLERS), '');
-    assert.equal(compileError(macScripts.FIND_FOLDER_HANDLER), '');
-    assert.equal(compileError(macScripts.LIST_ACCOUNTS_SNIPPET), '');
-});
-
-/** An account only the AppleScript probe can reach — no profile folder ids. */
+/** An account only the AppleScript probe can reach. */
 const PROBED = {emailAccount: 'someone@example.com'};
 
-/**
- * An account the profile database also describes, which is the only handle on a
- * mailbox Outlook publishes no account object for. Every root is present, since
- * that is what the profile reports for a mailbox in normal shape.
- */
+/** An account the profile database also describes, by folder id. */
 const PROFILED = {
     emailAccount: 'someone@example.com',
     folderIds: {
@@ -137,103 +125,83 @@ const PROFILED = {
         'deleted items': 146,
         'drafts': 147,
         'junk mail': 150,
-        'root folder': 142,
+        'root folder': 142
     },
 };
 
-test('the account and message lookups compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+test('the shared AppleScript handlers compile', macOnly, () => {
+    assert.equal(compileError(macRun.AS_HANDLERS), '');
+    assert.equal(compileError(macScripts.FIND_FOLDER_HANDLER), '');
+    assert.equal(compileError(macScripts.LIST_ACCOUNTS_SNIPPET), '');
+});
+
+test('the account and message lookups compile', macOnly, () => {
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROBED))), '');
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED))), '');
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED, true))), '');
     assert.equal(compileError(inTell(macScripts.messageLookupSnippet('123'))), '');
 });
 
-// classifyRunFailure recognises this exact sentence to raise AccountNotFoundError,
-// and only a mailbox that genuinely isn't there should produce it. One the profile
-// can reach by folder id is found — it just can't be composed from, which is a
-// different failure and says so.
-test('only a genuinely absent account emits the not-found sentence', () => {
-    assert.match(macScripts.accountLookupSnippet(PROBED), /error "Account '[^']*' not found"/);
-    assert.doesNotMatch(macScripts.accountLookupSnippet(PROFILED), /not found/);
-    const composing = macScripts.accountLookupSnippet(PROFILED, true);
-    assert.doesNotMatch(composing, /not found/);
-    assert.match(composing, /publishes no account object/);
+test('only a genuinely absent account raises ACCOUNT_NOT_FOUND', () => {
+    const tagged = snippet => {
+        const literal = /error "((?:[^"\\]|\\.)*)"/.exec(snippet);
+        return literal && errorFromTaggedMessage(literal[1]);
+    };
+    assert.equal(tagged(macScripts.accountLookupSnippet(PROBED)).code, 'ACCOUNT_NOT_FOUND');
+    assert.equal(tagged(macScripts.accountLookupSnippet(PROFILED)), null, 'a profiled mailbox is found by folder id');
+    assert.equal(tagged(macScripts.accountLookupSnippet(PROFILED, true)).code, 'INVALID_REQUEST', 'found, but cannot compose');
 });
 
-test('a well-known root resolves by account, by id, or refuses', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+test('a well-known root resolves by account, by id, or names the folder out of reach', macOnly, () => {
     for (const term of Object.values(macScripts.MAC_ROOT_TERMS)) {
         for (const acct of [PROBED, PROFILED]) {
             const source = inTell(`    set targetAcct to item 1 of imap accounts
 ${macScripts.rootFolderSnippet(acct, term, 'f')}`);
-            assert.equal(compileError(source), '', `${term} (${acct === PROBED ? 'probed' : 'profiled'})`);
+            assert.equal(compileError(source), '', term);
         }
     }
-    // The probe is the only way in, and it is the one that may have come up
-    // empty — so the folder that is out of reach gets named.
+});
+
+test('a root the profile has no id for is reported as a missing folder', () => {
     const partial = {emailAccount: 'someone@example.com', folderIds: {'inbox': 148}};
-    assert.match(macScripts.rootFolderSnippet(partial, 'drafts', 'f'), /has no drafts folder/);
+    assert.match(macScripts.rootFolderSnippet(partial, 'drafts', 'f'), /NOT_FOUND:folder.*has no drafts folder/);
     assert.match(macScripts.rootFolderSnippet(PROFILED, 'drafts', 'f'), /mail folder id 147/);
     assert.doesNotMatch(macScripts.rootFolderSnippet(PROBED, 'drafts', 'f'), /mail folder id/);
 });
 
-test('the per-message field snippets compile', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    for (const snippet of [
-        macScripts.senderSnippet(),
-        macScripts.firstRecipientSnippet(),
-        macScripts.allRecipientsSnippet(),
-    ]) {
+test('the per-message field snippets compile', macOnly, () => {
+    for (const snippet of [macScripts.senderSnippet(), macScripts.firstRecipientSnippet(), macScripts.allRecipientsSnippet()]) {
         assert.equal(compileError(inTell(`    set theMsg to missing value\n${snippet}`)), '');
     }
 });
 
-test('every well-known root term Outlook actually accepts', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    // A wrong term here is the expensive kind of mistake: it fails the whole
-    // script at compile time, so the error never names the folder that caused it.
-    for (const [rootId, term] of Object.entries(macScripts.MAC_ROOT_TERMS)) {
-        const source = inTell(`    set targetAcct to item 1 of imap accounts
-    set f to ${term} of targetAcct`);
-        assert.equal(compileError(source), '', `root ${rootId} (${term})`);
-    }
-});
-
-test('a folder scope compiles for every root, walked and created', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
+test('a folder scope compiles for every root, walked and created', macOnly, () => {
     for (const acct of [PROBED, PROFILED]) {
-        const how = acct === PROBED ? 'probed' : 'profiled';
         for (const rootId of Object.keys(macScripts.MAC_ROOT_TERMS)) {
             const ref = {rootId: Number(rootId), rootLabel: 'Root', segments: []};
             assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(acct, ref)}`)), '', `root ${rootId} (${how})`);
+${macScripts.mailScopeSnippet(acct, ref)}`)), '', `root ${rootId}`);
         }
         const nested = {rootId: 6, rootLabel: 'Inbox', segments: ['Clients', 'Acme']};
-        assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(acct, nested, 'Inbox\\Clients\\Acme')}`)), '', how);
-        assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
-${macScripts.mailScopeSnippet(acct, nested, 'Inbox\\Clients\\Acme', true)}`)), '', `createMissing (${how})`);
+        for (const create of [false, true]) {
+            assert.equal(compileError(inTell(`    set targetAcct to item 1 of imap accounts
+${macScripts.mailScopeSnippet(acct, nested, 'Inbox\\Clients\\Acme', create)}`)), '');
+        }
     }
 });
 
 test('an unsupported root is refused in TypeScript, not by a broken script', () => {
-    // olDefaultFolders ids with no Outlook-for-Mac term must fail as
-    // NOT_IMPLEMENTED naming the folder, rather than emitting a script that
-    // cannot compile.
     assert.throws(
         () => macScripts.mailScopeSnippet(PROBED, {rootId: 99, rootLabel: 'Journal', segments: []}, 'Journal'),
-        (error) => {
-            assert.equal(error.code, 'NOT_IMPLEMENTED');
-            assert.match(error.message, /Journal/);
-            return true;
-        },
+        error => error.code === 'NOT_IMPLEMENTED' && /Journal/.test(error.message),
     );
 });
 
-test('an emitted row compiles and round-trips through the splitters', {skip: !canCompile && 'needs macOS with Outlook installed'}, () => {
-    const row = macRun.asRow(['"alpha"', '"beta"', 'my joinList({"x", "y"}, ' + macRun.AS_LIST_SEP + ')']);
-    assert.equal(compileError(`${macRun.AS_HANDLERS}\nreturn ${row}`), '');
+test('asEscape keeps caller text inside its AppleScript literal', () => {
+    assert.equal(macRun.asEscape('He said "hi" \\ then\nleft'), 'He said \\"hi\\" \\\\ then\\nleft');
 });
 
 test('the framing survives a body that contains the separators', () => {
-    // sanitize() strips these inside AppleScript; this pins the TypeScript half
-    // of the contract — that a record splits into exactly the fields emitted.
     const raw = ['one', 'two', ['a', 'b'].join(macRun.LIST_SEP)].join(macRun.FIELD_SEP) + macRun.RECORD_SEP;
     const records = macRun.splitRecords(raw);
     assert.equal(records.length, 1);

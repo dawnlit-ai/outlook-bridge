@@ -1,11 +1,13 @@
-// Public API surface. Deliberately explicit (rather than `export *`) so the
-// package only ever exposes what it means to support; `package.json`'s `exports`
-// map closes the deep-import path that would otherwise reach around this.
-export {
+// The public API. Listed explicitly rather than `export *`, so the package
+// exposes only what it means to support; the `exports` map in package.json
+// closes the deep-import path around it.
+import { defaultBridge } from './bridge';
+
+// Every operation as a plain function, running under the process-wide settings.
+export const {
     getOutlookAccounts,
     sendOutlookEmail,
     replyOutlookEmail,
-    sendAllDrafts,
     readInboxEmails,
     searchInboxByFilter,
     readSelectedEmail,
@@ -14,12 +16,12 @@ export {
     listInboxFolders,
     moveOutlookEmails,
     listOutlookDrafts,
-    deleteOutlookDrafts,
     sendDrafts,
+    sendAllDrafts,
+    deleteOutlookDrafts,
     deleteOutlookEmails,
     purgeDeletedItems,
     saveEmailAttachment,
-    saveEmailAttachmentDetailed,
     saveEmailAttachments,
     cleanUndeliverableEmails,
     collectBouncedRecipients,
@@ -29,18 +31,14 @@ export {
     readTemplateEmails,
     saveTemplateEmail,
     editEmailTemplate,
-} from './OutlookService';
+} = defaultBridge;
 
-// A bridge with its own settings, isolated from every other caller in the
-// process — and capability discovery, so a consumer can ask what works here
-// instead of finding out by calling.
-export { createOutlookBridge, capabilities, supports } from './OutlookService';
-export type { OutlookBridgeInstance } from './OutlookService';
+// A bridge with its own settings, and asking what works on this machine.
+export { createOutlookBridge, capabilities, supports } from './bridge';
+export type { OutlookBridgeInstance } from './bridge';
 
-// Process-wide settings: run timeouts, the stdout cap, cancellation, where
-// scratch files and saved attachments go, and a hook that hands you every
-// generated script. Prefer createOutlookBridge in shared processes.
-export { configure, getConfig } from './runtime';
+// Process-wide settings.
+export { configure } from './runtime';
 export type { BridgeOptions, BridgeDebugEvent, ResolvedConfig } from './runtime';
 
 // Failures carry a stable `code`; the messages beside them are not an API.
@@ -52,57 +50,68 @@ export {
     NotFoundError,
     InvalidRequestError,
     ScriptError,
+    OutputTooLargeError,
     TimeoutError,
     AbortedError,
 } from './errors';
-export type { OutlookErrorCode } from './errors';
+export type { OutlookErrorCode, NotFoundKind, ScriptRunner } from './errors';
 
-// Platform-neutral helpers, usable without an Outlook session — and the two
-// pieces of parsing a caller most often needs to reproduce.
+// Platform-neutral helpers, usable without Outlook.
 export { mailFolderRef, splitQuotedOriginal, WELL_KNOWN_FOLDERS } from './mail';
+export {
+    composeTemplateBody,
+    findTemplateMarkers,
+    findTokens,
+    findUnfilledTokens,
+    removeTokenLine,
+    replaceToken,
+} from './templateBody';
+export type { ComposeOptions, TemplateMarkers } from './templateBody';
 
 export type {
     OutlookBridge,
     BridgeCapability,
     CapabilityMap,
+    EmailLocator,
+    EmailRef,
+    Recipients,
     SendEmailParams,
     ReplyEmailParams,
     ReplyEmailResult,
-    DraftSendFailure,
-    SendAllDraftsResult,
-    OutlookDraft,
-    ListDraftsResult,
-    DeleteDraftsResult,
-    SendDraftsFailure,
-    SendDraftsResult,
-    DeleteMailOptions,
-    DeleteMailOutcome,
-    DeleteMailResult,
-    PurgeDeletedItemsResult,
-    UndeliverableEmail,
-    CleanUndeliverableResult,
-    SentRecipientGroup,
+    ItemFailure,
+    ReadInboxOptions,
     InboxEmail,
     InboxSearchFilter,
     InboxSearchMatch,
     SelectedEmail,
+    ReadEmailBodyOptions,
     EmailBodyResult,
     MailFolderRef,
+    ListFoldersOptions,
     InboxFolderInfo,
+    MoveEmailsOptions,
     MoveEmailsResult,
+    ListDraftsOptions,
+    ListDraftsResult,
+    OutlookDraft,
+    SendDraftsResult,
+    DeleteDraftsResult,
+    DeleteMailOptions,
+    DeleteMailOutcome,
+    DeleteMailResult,
+    PurgeDeletedItemsOptions,
+    PurgeDeletedItemsResult,
+    SaveAttachmentOptions,
     SavedAttachment,
+    CleanUndeliverableOptions,
+    CleanUndeliverableResult,
+    UndeliverableEmail,
+    CollectBouncedRecipientsOptions,
+    SentRecipientGroupsOptions,
+    SentRecipientGroup,
+    ReadTemplatesOptions,
     TemplateEmail,
     TemplateFolderResult,
+    SaveTemplateParams,
     SaveTemplateResult,
 } from './types';
-
-export {
-    findTemplateMarkers,
-    replaceToken,
-    removeTokenLine,
-    findTokens,
-    findUnfilledTokens,
-    composeTemplateBody,
-} from './outlookTemplateSections';
-
-export type { TemplateMarkers, ComposeOptions } from './outlookTemplateSections';

@@ -1,8 +1,10 @@
 // Deleting mail, and emptying what was already deleted.
 import {
     asBool,
-    asEscape,
+    asIdList,
+    asInt,
     asRow,
+    asString,
     boolField,
     field,
     intField,
@@ -17,29 +19,29 @@ import {
     macFolderPath,
     partitionMessageIds,
     resolveMacAccount,
-    rootFolderSnippet,
+    rootFolderSnippet
 } from './scripts';
 import { PROTECTED_MAIL_REASON } from '../mail';
-import type { DeleteMailOptions, DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult, } from '../types';
+import type { DeleteEmailsRequest, PurgeRequest } from '../backend';
+import type { DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult } from '../types';
+
+const OUTCOME_STATUSES: readonly DeleteMailOutcome['status'][] = ['deleted', 'would-delete', 'refused', 'failed'];
 
 /**
- * Walk a folder's `container` chain to the top, as the list `chainNames`
- * (nearest first). Requires `theFolder`.
+ * Walk a folder's `container` chain to the top as the list `chainNames`,
+ * nearest first. Requires `theFolder`.
  *
- * This is what makes the Inbox/Sent Items refusal cover their SUBFOLDERS too: a
- * filed subfolder is still received mail. The chain's last element is the folder
- * directly under the account, and an account cannot hold two top-level folders
- * of one name, so comparing that name is exact rather than a guess.
+ * This is what extends the Inbox/Sent Items refusal to their SUBFOLDERS. The
+ * chain's last element is the folder directly under the account, and an account
+ * can't hold two top-level folders of one name, so comparing that name is exact.
  */
 function folderChainSnippet(indent: string): string {
     return `${indent}set chainNames to {}
 ${indent}set cur to theFolder
 ${indent}set guard to 0
 ${indent}repeat while cur is not missing value and guard < 25
-${indent}    -- The account's own root folder has a 'name' of missing value, and coercing
-${indent}    -- that yields the STRING "missing value" — which sailed past an empty
-${indent}    -- check and became the chain's root, so nothing was ever recognised as
-${indent}    -- living under the Inbox. Test before coercing.
+${indent}    -- The account's root folder has a name of missing value, and coercing
+${indent}    -- that yields the STRING "missing value" — so test before coercing.
 ${indent}    set rawName to missing value
 ${indent}    try
 ${indent}        set rawName to name of cur
@@ -58,48 +60,30 @@ ${indent}end repeat`;
 }
 
 /**
- * Delete mail by message id from anywhere in the account. `delete` files each
- * item in Deleted Items, so this is recoverable — purgeDeletedItems is what
- * destroys.
- *
- * ⚠️ This is the one tool here that can reach received mail. Three things hold
- * the line, exactly as on Windows:
- *
- *  - **Inbox and Sent Items are refused by default, INCLUDING their subfolders** —
- *    a filed subfolder is still received mail. `allowProtected` lifts that, and is
- *    the caller explicitly taking responsibility.
- *  - **`dryRun` resolves and reports without deleting**, so the exact subjects and
- *    folders can be shown to the user before anything happens. Use it first.
- *  - **Every outcome echoes the subject and folderPath** of the item actually
- *    resolved, so a wrong id is visible after the fact rather than silent.
+ * Delete mail by message id from anywhere in the account, into Deleted Items.
+ * Inbox and Sent Items (and their subfolders) are refused unless
+ * `allowProtected`; `dryRun` reports without deleting; every outcome names the
+ * subject and folder of the item that actually resolved.
  */
-export async function deleteOutlookEmails(
-    emailAccount: string,
-    entryIds: string[],
-    options: DeleteMailOptions = {},
-): Promise<DeleteMailResult> {
-    const { allowProtected = false, dryRun = false } = options;
-    if (entryIds.length === 0) {
-        return { dryRun, deleted: 0, refused: 0, failed: 0, items: [] };
-    }
-    const { valid, invalid } = partitionMessageIds(entryIds);
+export async function deleteOutlookEmails(request: DeleteEmailsRequest): Promise<DeleteMailResult> {
+    const {valid, invalid} = partitionMessageIds(request.entryIds);
     const items: DeleteMailOutcome[] = invalid.map(bad => ({
         entryId: bad.entryId,
         subject: '',
         folderPath: '',
-        status: 'failed' as const,
+        status: 'failed',
         reason: bad.error,
     }));
     if (valid.length > 0) {
-        const acct = await resolveMacAccount(emailAccount);
-        const script = `tell application "Microsoft Outlook"
+        const acct = await resolveMacAccount(request.account);
+        const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'inbox', 'inboxFolder')}
 ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
     set inboxName to (name of inboxFolder) as string
     set sentName to (name of sentFolder) as string
     set out to ""
-    repeat with theId in {${valid.join(', ')}}
+    repeat with theId in ${asIdList(valid)}
         set subj to ""
         set pathText to ""
         try
@@ -120,15 +104,9 @@ ${folderChainSnippet('            ')}
             set pathText to my sanitizeList(my reverseList(chainNames))
             set rootName to item (count of chainNames) of chainNames
             set isProtected to (rootName is inboxName) or (rootName is sentName)
-            if isProtected and not ${asBool(allowProtected)} then
-                set out to out & ${asRow([
-            '(theId as string)',
-            'subj',
-            'pathText',
-            '"refused"',
-            `"${asEscape(PROTECTED_MAIL_REASON)}"`,
-        ])}
-            else if ${asBool(dryRun)} then
+            if isProtected and not ${asBool(request.allowProtected)} then
+                set out to out & ${asRow(['(theId as string)', 'subj', 'pathText', '"refused"', asString(PROTECTED_MAIL_REASON)])}
+            else if ${asBool(request.dryRun)} then
                 set out to out & ${asRow(['(theId as string)', 'subj', 'pathText', '"would-delete"', '""'])}
             else
                 delete theMsg
@@ -147,24 +125,22 @@ on reverseList(lst)
         set end of out to item i of lst
     end repeat
     return out
-end reverseList`;
+end reverseList`, 'scan');
 
-        for (const record of splitRecords(await runOsaScript(script, 300000))) {
+        for (const record of splitRecords(raw)) {
             const parts = splitFields(record);
             const segments = splitList(field(parts, 2));
             items.push({
                 entryId: field(parts, 0),
                 subject: field(parts, 1).trim(),
-                folderPath: segments.length
-                    ? macFolderPath(emailAccount, segments[0], segments.slice(1))
-                    : '',
-                status: (field(parts, 3) || 'failed') as DeleteMailOutcome['status'],
+                folderPath: segments.length ? macFolderPath(request.account, segments[0], segments.slice(1)) : '',
+                status: OUTCOME_STATUSES.find(s => s === field(parts, 3)) ?? 'failed',
                 reason: field(parts, 4),
             });
         }
     }
     return {
-        dryRun,
+        dryRun: request.dryRun,
         deleted: items.filter(i => i.status === 'deleted').length,
         refused: items.filter(i => i.status === 'refused').length,
         failed: items.filter(i => i.status === 'failed').length,
@@ -173,24 +149,14 @@ end reverseList`;
 }
 
 /**
- * Permanently remove items from the account's Deleted Items folder. This is the
- * ONE genuinely irreversible operation here — nothing recovers from it — which
- * is why it is folder-scoped rather than keyed on a message id: it can only ever
- * destroy what the user already threw away.
- *
- * `olderThanDays` keeps recent items (0 = purge everything). The folder is
- * indexed first and destroyed by id afterwards, so deleting can't shift the
- * collection out from under the walk.
+ * Permanently remove items from the account's Deleted Items. The folder is
+ * indexed first and items destroyed by id afterwards, so deleting can't shift
+ * the collection out from under the walk.
  */
-export async function purgeDeletedItems(
-    emailAccount: string,
-    olderThanDays = 0,
-    dryRun = false,
-): Promise<PurgeDeletedItemsResult> {
-    const days = Math.max(0, Math.floor(olderThanDays));
-    const folderPath = macFolderPath(emailAccount, 'Deleted Items', []);
-    const acct = await resolveMacAccount(emailAccount);
-    const indexScript = `tell application "Microsoft Outlook"
+export async function purgeDeletedItems(request: PurgeRequest): Promise<PurgeDeletedItemsResult> {
+    const folderPath = macFolderPath(request.account, 'Deleted Items', []);
+    const acct = await resolveMacAccount(request.account);
+    const index = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'deleted items', 'trashFolder')}
     set idList to id of every message of trashFolder
@@ -199,32 +165,33 @@ ${rootFolderSnippet(acct, 'deleted items', 'trashFolder')}
     on error
         set timeList to {}
     end try
-    set cutoff to (current date) - (${days} * days)
+    set olderThanDays to ${asInt(request.olderThanDays)}
+    set cutoff to (current date) - (olderThanDays * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
         if (count of timeList) is (count of idList) then set stamp to item i of timeList
         set keepIt to false
-        if ${days} > 0 and stamp is not missing value and stamp is greater than cutoff then set keepIt to true
+        if olderThanDays > 0 and stamp is not missing value and stamp is greater than cutoff then set keepIt to true
         set out to out & ${asRow(['(item i of idList as string)', '(keepIt as string)'])}
     end repeat
     return out
-end tell`;
+end tell`, 'scan');
 
-    const rows = splitRecords(await runOsaScript(indexScript, 300000)).map(record => {
+    const rows = splitRecords(index).map(record => {
         const parts = splitFields(record);
-        return { id: field(parts, 0), keep: boolField(parts, 1) };
+        return {id: field(parts, 0), keep: boolField(parts, 1)};
     });
     const doomed = rows.filter(row => !row.keep);
     const kept = rows.length - doomed.length;
-    if (dryRun || doomed.length === 0) {
-        return { folderPath, dryRun, matched: doomed.length, purged: 0, kept, failed: 0 };
+    if (request.dryRun || doomed.length === 0) {
+        return {folderPath, dryRun: request.dryRun, matched: doomed.length, purged: 0, kept, failed: 0};
     }
 
-    const purgeScript = `tell application "Microsoft Outlook"
+    const summary = summaryFields(await runOsaScript(`tell application "Microsoft Outlook"
     set purgedCount to 0
     set failedCount to 0
-    repeat with theId in {${doomed.map(row => row.id).join(', ')}}
+    repeat with theId in ${asIdList(doomed.map(row => row.id))}
         try
             set theMsg to missing value
             try
@@ -238,12 +205,10 @@ end tell`;
         end try
     end repeat
     return ${asRow(['(purgedCount as string)', '(failedCount as string)'])}
-end tell`;
-
-    const summary = summaryFields(await runOsaScript(purgeScript, 600000));
+end tell`, 'purge'));
     return {
         folderPath,
-        dryRun,
+        dryRun: request.dryRun,
         matched: doomed.length,
         purged: intField(summary, 0),
         kept,

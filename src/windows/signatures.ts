@@ -1,25 +1,22 @@
-// Outlook stores each signature as "<name>.htm" (plus .rtf/.txt and a
-// "<name>_files" folder for images) under %APPDATA%\Microsoft\Signatures, so
-// both of these read the disk rather than driving COM.
+// Outlook for Windows keeps each signature as "<name>.htm" (beside .rtf/.txt
+// copies and a "<name>_files" folder of images) under
+// %APPDATA%\Microsoft\Signatures, so these read the disk rather than COM.
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
-const SIGNATURES_DIR = process.env.APPDATA
-    ? path.join(process.env.APPDATA, 'Microsoft', 'Signatures')
-    : '';
+function signaturesDir(): string {
+    return process.env.APPDATA ? path.join(process.env.APPDATA, 'Microsoft', 'Signatures') : '';
+}
 
-/**
- * Names of the user's Outlook signatures (the ".htm" files), sorted. Empty off
- * Windows. Reads from disk synchronously but is declared async to match macOS,
- * which has to ask Outlook itself — one signature for both platforms.
- */
+/** The signature names — the ".htm" files — sorted. */
 export async function listOutlookSignatures(): Promise<string[]> {
-    if (process.platform !== 'win32' || !SIGNATURES_DIR) return [];
+    const dir = signaturesDir();
+    if (!dir) return [];
     try {
-        return fs.readdirSync(SIGNATURES_DIR)
-            .filter(f => f.toLowerCase().endsWith('.htm'))
-            .map(f => f.slice(0, -4))
+        return fs.readdirSync(dir)
+            .filter(file => file.toLowerCase().endsWith('.htm'))
+            .map(file => file.slice(0, -'.htm'.length))
             .sort((a, b) => a.localeCompare(b));
     } catch {
         return [];
@@ -27,36 +24,29 @@ export async function listOutlookSignatures(): Promise<string[]> {
 }
 
 /**
- * Read a named signature's HTML with its image references rewritten to absolute
- * file: URIs. Outlook stores signature images relative to a "<name>_files"
- * folder; once the refs are absolute, assigning the HTML to a mail body lets
- * Outlook resolve and embed the images on Display/Send. Returns '' if the
- * signature can't be found.
+ * A signature's HTML with its image references made absolute file: URIs, so an
+ * email body built from it resolves and embeds the images; '' when there is no
+ * signature by that name.
  */
 export async function readOutlookSignatureHtml(name: string): Promise<string> {
-    if (process.platform !== 'win32' || !SIGNATURES_DIR) return '';
-    // Only accept a bare signature name — never a path — so a crafted name can't
-    // escape the Signatures folder.
-    const safe = path.basename(name);
-    const file = path.join(SIGNATURES_DIR, `${safe}.htm`);
+    const dir = signaturesDir();
+    if (!dir) return '';
+    // A bare name only — never a path — so a crafted name can't reach outside
+    // the Signatures folder.
+    const file = path.join(dir, `${path.basename(name)}.htm`);
     if (!fs.existsSync(file)) return '';
-    // Classic Outlook signatures are saved as windows-1252, not UTF-8; decode by
-    // the charset the file declares so accented text / smart quotes survive.
-    const buf = fs.readFileSync(file);
-    const head = buf.toString('latin1', 0, 2048);
-    const charset = head.match(/charset=["']?([\w-]+)/i)?.[1] || 'utf-8';
+    // Signatures are saved in whatever charset Outlook chose (often
+    // windows-1252), so decode by the one the file declares.
+    const bytes = fs.readFileSync(file);
+    const charset = bytes.toString('latin1', 0, 2048).match(/charset=["']?([\w-]+)/i)?.[1] || 'utf-8';
     let html: string;
     try {
-        html = new TextDecoder(charset).decode(buf);
+        html = new TextDecoder(charset).decode(bytes);
     } catch {
-        html = buf.toString('utf-8');
+        html = bytes.toString('utf8');
     }
-    // pathToFileURL encodes spaces/specials the same way Outlook's relative refs
-    // are, so prefixing the (already relative, already-encoded) src keeps a valid URI.
-    const dirUri = pathToFileURL(SIGNATURES_DIR + path.sep).href;
-    html = html.replace(
-        /(src|background)=(["'])(?!https?:|cid:|data:|file:|mailto:|#)/gi,
-        `$1=$2${dirUri}`,
-    );
-    return html;
+    // pathToFileURL encodes the directory the way Outlook's relative refs are
+    // already encoded, so prefixing it keeps each reference a valid URI.
+    const dirUri = pathToFileURL(dir + path.sep).href;
+    return html.replace(/(src|background)=(["'])(?!https?:|cid:|data:|file:|mailto:|#)/gi, `$1=$2${dirUri}`);
 }

@@ -1,81 +1,73 @@
 // Getting a generated AppleScript to osascript and its output back.
 //
-// The macOS counterpart of windows/run.ts: the run itself, the escaping rules,
-// and the record framing every reader here shares.
-import { execFile } from 'child_process';
+// The macOS counterpart of windows/run.ts: running a script, the escaping
+// rules, and the record framing every reader here shares.
 import fs from 'fs';
-import { getConfig, reportRun, tempFile } from '../runtime';
-import { classifyRunFailure } from '../errors';
+import { removeTempFile, type RunBudget, tempFile } from '../runtime';
+import { runScriptProcess } from '../shared/exec';
+import { InvalidRequestError } from '../errors';
 import { WORD_SECTION_ANCHOR } from '../shared/replyBody';
 
 const RUNNER = 'osascript' as const;
 
 /**
- * Run an AppleScript via a temp file (avoids arg-length and quoting limits).
- *
- * `AS_HANDLERS` is prepended here rather than by each caller — the Windows runner
- * already owns its UTF-8 prelude the same way. It matters more on this side: a
- * script missing a handler fails at COMPILE time for the WHOLE script, with a
- * message pointing nowhere near the omission, so "remember to paste the handlers"
- * was a footgun every new script had to survive.
- *
- * `timeout` overrides the configured default for this one call; see `configure()`
- * for that and for the stdout cap.
+ * osascript's report of a script error: "<file>:<start>:<end>: execution error:
+ * <message> (<number>)". Only the message is worth showing — these reach people
+ * in per-item failure lists — and -2700 is the number AppleScript gives every
+ * `error "…"` a script raises itself.
  */
-export function runOsaScript(source: string, timeout?: number): Promise<string> {
-    // The full text is what osascript compiled, so it is also what the error's
-    // line numbers refer to and what the debug hook and ScriptError must carry.
-    const script = AS_HANDLERS + source;
-    const scriptFile = tempFile('osa', 'applescript');
-    fs.writeFileSync(scriptFile, script, 'utf-8');
-    const { timeoutMs, maxBufferBytes, signal } = getConfig();
-    const effectiveTimeout = timeout ?? timeoutMs;
-    const startedAt = Date.now();
-    return new Promise((resolve, reject) => {
-        execFile(
-            'osascript',
-            [scriptFile],
-            { maxBuffer: maxBufferBytes, timeout: effectiveTimeout, signal },
-            (error, stdout, stderr) => {
-                const durationMs = Date.now() - startedAt;
-                try {
-                    fs.unlinkSync(scriptFile);
-                } catch { /* ignore */
-                }
-                if (error) {
-                    // Running from a file, osascript prefixes the script path:
-                    // "/tmp/outlook-bridge-osa-1.applescript:12:34: execution error:
-                    // Microsoft Outlook got an error: … (-1728)". Keep just the human
-                    // part — these strings reach the user in per-email failure lists.
-                    const msg = (stderr || error.message)
-                        .replace(/^(?:.*?:)?\d+:\d+:\s*execution error:\s*/m, '')
-                        .trim();
-                    const failure = classifyRunFailure({
-                        runner: RUNNER,
-                        script,
-                        stderr: msg,
-                        durationMs,
-                        nodeError: error,
-                        timeoutMs: effectiveTimeout,
-                        signal,
-                    });
-                    reportRun({ runner: RUNNER, script, durationMs, error: failure.message });
-                    reject(failure);
-                } else {
-                    reportRun({ runner: RUNNER, script, durationMs });
-                    resolve(stdout.replace(/\n$/, ''));
-                }
-            },
-        );
-    });
+function parseFailure(stderr: string): { message: string } {
+    const message = stderr
+        .replace(/^(?:.*?:)?\d+:\d+:\s*execution error:\s*/m, '')
+        .replace(/\s*\(-2700\)\s*$/, '')
+        .trim();
+    return {message};
 }
 
-/** Escape a string for embedding inside an AppleScript double-quoted literal. */
-export function asEscape(s: string): string {
-    return s
+/**
+ * Run a script from a temp file (no argument-length or quoting limits) and
+ * return what it printed, minus the newline osascript appends.
+ *
+ * `AS_HANDLERS` is prepended here rather than by each caller: a script missing
+ * a handler fails to compile as a WHOLE, with an error pointing nowhere near the
+ * omission, so it can't be left to each script to remember.
+ */
+export async function runOsaScript(source: string, budget: RunBudget): Promise<string> {
+    // The full text is what osascript compiles, so it is also what error offsets
+    // refer to and what the debug hook and errors carry.
+    const script = AS_HANDLERS + source;
+    const file = tempFile('osa', 'applescript');
+    fs.writeFileSync(file, script, 'utf8');
+    try {
+        const {stdout} = await runScriptProcess({
+            runner: RUNNER,
+            command: 'osascript',
+            args: [file],
+            script,
+            budget,
+            parseFailure,
+        });
+        return stdout.replace(/\n$/, '');
+    } finally {
+        removeTempFile(file);
+    }
+}
+
+/**
+ * Escape text for the inside of an AppleScript double-quoted literal.
+ * AppleScript strings never interpolate, so escaping the quote, the backslash
+ * and line breaks is the whole job.
+ */
+export function asEscape(text: string): string {
+    return text
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
         .replace(/\r\n|\r|\n/g, '\\n');
+}
+
+/** Text as an AppleScript string literal. */
+export function asString(text: string): string {
+    return `"${asEscape(text)}"`;
 }
 
 /** AppleScript's boolean literals. */
@@ -83,13 +75,28 @@ export function asBool(value: boolean): string {
     return value ? 'true' : 'false';
 }
 
-// Control characters as separators: subjects and bodies contain tabs, newlines
-// and commas, but never these. Every emitted field also passes through the
-// `sanitize` handler below, which is what makes the framing safe rather than
-// merely unlikely to break.
-export const FIELD_SEP = '\u001f';
-export const RECORD_SEP = '\u001e';
-export const LIST_SEP = '\u001d';
+/** A whole number for a script; anything else is refused before it becomes code. */
+export function asInt(value: number): string {
+    if (!Number.isSafeInteger(value)) {
+        throw new InvalidRequestError(`Expected a whole number, got ${String(value)}.`);
+    }
+    return String(value);
+}
+
+/** Message ids (already validated as integers) as an AppleScript list literal. */
+export function asIdList(ids: readonly string[]): string {
+    return `{${ids.map(id => asInt(Number(id))).join(', ')}}`;
+}
+
+// ── Record framing ───────────────────────────────────────────────────────
+//
+// Control characters separate fields, records and list items: subjects and
+// bodies contain tabs, newlines and commas, but never these — and every emitted
+// field passes through the `sanitize` handler, which makes the framing safe
+// rather than merely unlikely to break.
+export const FIELD_SEP = '';
+export const RECORD_SEP = '';
+export const LIST_SEP = '';
 
 /** The same three, as AppleScript expressions. */
 export const AS_FIELD_SEP = '(character id 31)';
@@ -97,13 +104,10 @@ export const AS_RECORD_SEP = '(character id 30)';
 export const AS_LIST_SEP = '(character id 29)';
 
 /**
- * Emit one record: the AppleScript expressions in `fields`, separated and
- * terminated so `splitRecords`/`splitFields` can take them apart again.
- *
- * Every field goes through `sanitize`, which is what makes the framing safe
- * rather than merely unlikely to break. A field holding a LIST must be built
- * with `my sanitizeList(...)`, which cleans the elements instead — `sanitize`
- * deliberately leaves the list separator alone.
+ * One record: the AppleScript expressions in `fields`, separated and terminated
+ * so `splitRecords`/`splitFields` can take them apart again. A field holding a
+ * LIST must be built with `my sanitizeList(...)`, which cleans the elements —
+ * `sanitize` deliberately leaves the list separator alone.
  */
 export function asRow(fields: readonly string[]): string {
     return fields
@@ -112,12 +116,11 @@ export function asRow(fields: readonly string[]): string {
 }
 
 /**
- * The AppleScript handlers every script here relies on. Called with `my` from
- * inside a `tell` block.
+ * The handlers every script relies on, called with `my` from inside a `tell`.
  *
- * `isoDate` produces the zero-padded 'yyyy-MM-dd HH:mm' both platforms' readers
- * return; `sanitize` strips the framing characters; `joinList` and `replaceText`
- * are the text-item-delimiter dance nobody should write twice.
+ * `isoDate` produces the zero-padded 'yyyy-MM-dd HH:mm' both platforms return;
+ * `sanitize` strips the framing characters; `joinList` and `replaceText` are the
+ * text-item-delimiter dance nobody should write twice.
  */
 export const AS_HANDLERS = `
 on pad2(n)
@@ -150,8 +153,7 @@ on replaceText(t, findWhat, replaceWith)
 end replaceText
 
 -- Strips the FIELD and RECORD separators only. The LIST separator is left
--- alone on purpose: a field may legitimately BE a list, and stripping 29 here
--- collapsed every such field into one run-on string.
+-- alone on purpose: a field may legitimately BE a list.
 on sanitize(v)
     if v is missing value then return ""
     set t to v as string
@@ -179,11 +181,10 @@ on insertAboveQuoted(c, ins)
     if c is missing value then return ins
     set c to c as string
     if (length of c) is 0 then return ins
-    -- Outlook builds a reply as a document whose own empty paragraph sits inside
-    -- WordSection1; inserting straight after that tag puts the new text where the
-    -- user's cursor would have been. Anything else falls back to just inside <body>.
-    -- 'at' is a reserved AppleScript parameter name, so the cut point cannot be
-    -- called that however naturally it reads.
+    -- A reply's own empty paragraph sits inside WordSection1; inserting straight
+    -- after that tag puts the new text where the cursor would be. Anything else
+    -- falls back to just inside <body>. ('at' is a reserved parameter name, so
+    -- the cut point can't be called that.)
     set cutPoint to my tagEnd(c, "${WORD_SECTION_ANCHOR}")
     if cutPoint is 0 then set cutPoint to my tagEnd(c, "<body")
     if cutPoint is 0 then return ins & c
@@ -191,8 +192,8 @@ on insertAboveQuoted(c, ins)
     return (text 1 thru cutPoint of c) & ins & (text (cutPoint + 1) thru -1 of c)
 end insertAboveQuoted
 
--- 'rest' is an AppleScript term (rest of list), so the remainder cannot be
--- called that: assigning to it compiles and then fails at run time.
+-- 'rest' is an AppleScript term, so the remainder can't be called that:
+-- assigning to it compiles and then fails at run time.
 on tagEnd(c, marker)
     set ix to offset of marker in c
     if ix is 0 then return 0
@@ -204,45 +205,38 @@ on tagEnd(c, marker)
 end tagEnd
 `;
 
-/** Split a script's output into records, dropping the trailing empty one. */
+/** A script's output as records, without the trailing empty one. */
 export function splitRecords(raw: string): string[] {
     return raw.split(RECORD_SEP).filter(record => record.trim() !== '');
 }
 
-/** Split one record into its fields. */
+/** One record's fields. */
 export function splitFields(record: string): string[] {
     return record.split(FIELD_SEP);
 }
 
-/** Split one field that carries a list. */
+/** A field that carries a list. */
 export function splitList(value: string | undefined): string[] {
     return (value || '').split(LIST_SEP).filter(Boolean);
 }
 
-/** A field by position — a missing field reads as ''. */
+/** A field by position; a missing field reads as ''. */
 export function field(fields: readonly string[], index: number): string {
     return fields[index] ?? '';
 }
 
-/**
- * The fields of a script's ONE summary record — the shape every mutation here
- * returns (counts first, then any per-item failures as further records).
- */
+/** The fields of a script's first record — the summary a mutation returns ahead of any per-item rows. */
 export function summaryFields(raw: string): string[] {
     return splitFields(splitRecords(raw)[0] ?? '');
 }
 
-/** A numeric field, defaulting to `fallback` when absent or unparsable. */
+/** A numeric field, `fallback` when absent or unparsable. */
 export function intField(fields: readonly string[], index: number, fallback = 0): number {
     const parsed = Number.parseInt(field(fields, index), 10);
     return Number.isNaN(parsed) ? fallback : parsed;
 }
 
-/**
- * A boolean field. AppleScript renders booleans as the bare words `true`/`false`,
- * so this is the counterpart of `shared/json.ts`'s coercions for the framed
- * output — the Windows side gets those free from ConvertFrom-Json.
- */
+/** A boolean field; AppleScript renders booleans as the bare words true/false. */
 export function boolField(fields: readonly string[], index: number): boolean {
     return field(fields, index).trim() === 'true';
 }

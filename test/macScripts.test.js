@@ -1,15 +1,11 @@
-// Every complete AppleScript the macOS implementation generates, compiled.
+// Every complete AppleScript the macOS backend generates, compiled.
 //
-// This is the test that earns its keep on this platform. A single bad
-// dictionary term fails the WHOLE script at compile time rather than at the
-// offending line, so the live error never names the thing that caused it — and
-// the automation itself can only be exercised against a real mailbox, which CI
-// does not have.
-//
-// So: stub the runner, drive every operation with plausible arguments, capture
-// the scripts they build, and put each through osacompile. Compiling resolves
-// terminology against the installed Outlook without opening a session, sending
-// anything, or touching a single message.
+// A single bad dictionary term fails the WHOLE script at compile time rather
+// than at the offending line, so a live error never names its cause — and the
+// automation itself can only run against a real mailbox. So the runner is
+// stubbed, every operation is driven through the public operations, and each
+// captured script goes through osacompile, which resolves terminology against
+// the installed Outlook without opening a session or touching a message.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,58 +13,30 @@ const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
 
+const macRun = require('../dist/mac/run.js');
+const {macBackend} = require('../dist/mac/index.js');
+const {createOperations} = require('../dist/bridge.js');
+const {captureScripts, tempFileWith} = require('./support.js');
+
 const OUTLOOK_APP = '/Applications/Microsoft Outlook.app';
 const runnable = process.platform === 'darwin' && fs.existsSync(OUTLOOK_APP);
 const skip = runnable ? false : 'needs macOS with Outlook installed';
 
-const macRun = require('../dist/mac/run.js');
-const mac = require('../dist/mac/index.js');
-
 const ACCOUNT = 'someone@example.com';
-const FS = macRun.FIELD_SEP;
-const RS = macRun.RECORD_SEP;
-const LS = macRun.LIST_SEP;
+const {FIELD_SEP: FS, RECORD_SEP: RS, LIST_SEP: LS} = macRun;
 
-/** Build one framed record, the way the scripts emit them. */
+/** One framed record, the way the scripts emit them. */
 function row(...fields) {
     return fields.join(FS) + RS;
 }
 
-/**
- * Run `operation` with the runner stubbed out, returning every script it built.
- *
- * `responses` are handed back in order, so a two-pass reader can be driven into
- * its second pass — which is the only way that script gets generated at all.
- */
-async function scriptsFrom(operation, responses = []) {
-    const captured = [];
-    const real = macRun.runOsaScript;
-    let call = 0;
-    macRun.runOsaScript = (script) => {
-        captured.push(script);
-        return Promise.resolve(responses[call++] ?? '');
-    };
-    try {
-        await operation();
-    } finally {
-        macRun.runOsaScript = real;
-    }
-    return captured;
-}
-
-/**
- * Compile (never run) a script, returning osacompile's complaint or ''.
- *
- * The shared handlers are prepended because `runOsaScript` prepends them — what
- * osascript compiles is the pair, so compiling the operation body alone would
- * leave a `my someHandler(...)` typo to be found by a live run instead.
- */
+/** Compile (never run) a script, returning osacompile's complaint or ''. The
+ *  shared handlers are prepended because the runner prepends them. */
 function compileError(body) {
-    const source = macRun.AS_HANDLERS + body;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-osa-'));
     const input = path.join(dir, 'generated.applescript');
     try {
-        fs.writeFileSync(input, source, 'utf-8');
+        fs.writeFileSync(input, macRun.AS_HANDLERS + body, 'utf-8');
         execFileSync('osacompile', ['-o', path.join(dir, 'generated.scpt'), input], {stdio: 'pipe'});
         return '';
     } catch (error) {
@@ -78,98 +46,87 @@ function compileError(body) {
     }
 }
 
+const outlook = createOperations(macBackend);
+
 /**
- * Every operation, paired with the canned runner output that walks it through
- * all of its passes. Ids are the small integers Outlook for Mac uses.
+ * Every operation, with the canned runner output that walks it through all of
+ * its passes. Ids are the small integers Outlook for Mac uses.
  */
 const CASES = {
-    getOutlookAccounts: {
-        run: () => mac.getOutlookAccounts(),
-    },
+    getOutlookAccounts: {run: () => outlook.getOutlookAccounts()},
     sendOutlookEmail: {
-        run: () => mac.sendOutlookEmail({
+        run: () => outlook.sendOutlookEmail({
             emailAccount: ACCOUNT,
-            to: 'a@example.com, b@example.com',
+            to: '"Doe, Jo" <a@example.com>, b@example.com',
             cc: 'c@example.com',
+            bcc: ['d@example.com'],
             subject: "Quarter's figures",
             htmlBody: '<p>Hello "world" \\ backslash</p>',
-            attachmentPath: '/tmp/report.pdf',
-            sendImmediately: false,
+            attachments: [tempFileWith('report.pdf')],
             openDraftWindow: false,
         }),
     },
     replyOutlookEmail: {
-        run: () => mac.replyOutlookEmail({
+        run: () => outlook.replyOutlookEmail({
             emailAccount: ACCOUNT,
             entryId: '1263',
             htmlBody: '<p>Thanks — noted.</p>',
             replyAll: true,
-            sendImmediately: false,
             openDraftWindow: false,
         }),
     },
-    sendAllDrafts: {
-        run: () => mac.sendAllDrafts(ACCOUNT),
-    },
+    sendAllDrafts: {run: () => outlook.sendAllDrafts(ACCOUNT)},
     readInboxEmails: {
-        run: () => mac.readInboxEmails(ACCOUNT, 30, 10, 'Inbox\\Clients'),
+        run: () => outlook.readInboxEmails(ACCOUNT, {daysBack: 30, limit: 10, folder: 'Inbox\\Clients'}),
+        responses: ['1263\t2026-08-01 09:30\n'],
+    },
+    readInboxEmailsNoPreview: {
+        run: () => outlook.readInboxEmails(ACCOUNT, {folder: 'Sent Items', previewChars: 0}),
         responses: ['1263\t2026-08-01 09:30\n'],
     },
     searchInboxByFilter: {
-        run: () => mac.searchInboxByFilter(ACCOUNT, {
+        run: () => outlook.searchInboxByFilter(ACCOUNT, {
+            daysBack: 30,
             subjectLike: '*invoice*',
             subjectPattern: /invoice\s+\d+/,
             excludeReplies: true,
             requireAttachment: true,
-        }, 30),
+        }),
         responses: [row('INBOX' + LS + 'Clients', '1263', 'Invoice 42', '2026-08-01 09:30')],
     },
+    searchInboxByFilterNoBody: {
+        run: () => outlook.searchInboxByFilter(ACCOUNT, {includeBody: false, includeFolders: ['Clients']}),
+        responses: [row('INBOX', '1263', 'Hello', '2026-08-01 09:30')],
+    },
     readSelectedEmail: {
-        run: () => mac.readSelectedEmail(),
+        run: () => outlook.readSelectedEmail(),
         responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', '', 'body')],
     },
     readEmailBody: {
-        run: () => mac.readEmailBody('1263', undefined, 8000, true),
+        run: () => outlook.readEmailBody('1263', {includeQuoted: true}),
         responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', '', 'body')],
     },
-    openOutlookEmail: {
-        run: () => mac.openOutlookEmail('1263'),
-    },
-    listInboxFolders: {
-        run: () => mac.listInboxFolders(ACCOUNT, 3),
-    },
+    openOutlookEmail: {run: () => outlook.openOutlookEmail('1263')},
+    listInboxFolders: {run: () => outlook.listInboxFolders(ACCOUNT, {maxDepth: 3})},
     moveOutlookEmails: {
-        run: () => mac.moveOutlookEmails(ACCOUNT, ['1263', '1264'], "Clients\\Bob's mail\\2026", true),
+        run: () => outlook.moveOutlookEmails(ACCOUNT, ['1263', '1264'], "Clients\\Bob's mail\\2026", {createIfMissing: true}),
         responses: [row('2', 'true')],
     },
-    listOutlookDrafts: {
-        run: () => mac.listOutlookDrafts(ACCOUNT, 50, 200),
-    },
-    deleteOutlookDrafts: {
-        run: () => mac.deleteOutlookDrafts(ACCOUNT, ['1263']),
-        responses: [row('1')],
-    },
-    sendDrafts: {
-        run: () => mac.sendDrafts(ACCOUNT, ['1263']),
-        responses: [row('1')],
-    },
-    deleteOutlookEmails: {
-        run: () => mac.deleteOutlookEmails(ACCOUNT, ['1263'], {allowProtected: true, dryRun: false}),
-    },
-    deleteOutlookEmailsDryRun: {
-        run: () => mac.deleteOutlookEmails(ACCOUNT, ['1263'], {dryRun: true}),
-    },
+    listOutlookDrafts: {run: () => outlook.listOutlookDrafts(ACCOUNT, {limit: 50, previewChars: 200})},
+    deleteOutlookDrafts: {run: () => outlook.deleteOutlookDrafts(ACCOUNT, ['1263']), responses: [row('1')]},
+    sendDrafts: {run: () => outlook.sendDrafts(ACCOUNT, ['1263']), responses: [row('1')]},
+    deleteOutlookEmails: {run: () => outlook.deleteOutlookEmails(ACCOUNT, ['1263'], {allowProtected: true})},
+    deleteOutlookEmailsDryRun: {run: () => outlook.deleteOutlookEmails(ACCOUNT, ['1263'], {dryRun: true})},
     purgeDeletedItems: {
-        run: () => mac.purgeDeletedItems(ACCOUNT, 30, false),
+        run: () => outlook.purgeDeletedItems(ACCOUNT, {olderThanDays: 30}),
         responses: [row('1263', 'false'), row('1', '0')],
     },
     saveEmailAttachments: {
-        run: () => mac.saveEmailAttachments('1263', ['invoice.pdf'], undefined, undefined),
-        // The shared message-detail row leads with the message id (MessageDetail.id).
+        run: () => outlook.saveEmailAttachments('1263', ['invoice.pdf']),
         responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf')],
     },
     cleanUndeliverableEmails: {
-        run: () => mac.cleanUndeliverableEmails(ACCOUNT, 30, false),
+        run: () => outlook.cleanUndeliverableEmails(ACCOUNT, {daysBack: 30, dryRun: false}),
         responses: [
             row('1263', 'Undeliverable: Rate request', 'Mail Delivery Subsystem', 'mailer-daemon@x.com', '2026-08-01 09:30'),
             row('1263', 'failed for bob@example.com'),
@@ -177,95 +134,72 @@ const CASES = {
         ],
     },
     collectBouncedRecipients: {
-        run: () => mac.collectBouncedRecipients(ACCOUNT, 30, true),
+        run: () => outlook.collectBouncedRecipients(ACCOUNT, {daysBack: 30}),
         responses: [
             row('1263', 'Undeliverable: Rate request', 'Mail Delivery Subsystem', 'mailer-daemon@x.com', '2026-08-01 09:30'),
             row('1263', 'failed for bob@example.com'),
         ],
     },
     readSentRecipientGroups: {
-        run: () => mac.readSentRecipientGroups(ACCOUNT, 30, 100),
+        run: () => outlook.readSentRecipientGroups(ACCOUNT, {daysBack: 30, limit: 100}),
         responses: [row('1263', 'Rate request', '2026-08-01 09:30')],
     },
-    listOutlookSignatures: {
-        run: () => mac.listOutlookSignatures(),
-    },
-    readOutlookSignatureHtml: {
-        run: () => mac.readOutlookSignatureHtml('Default "work"'),
-    },
+    listOutlookSignatures: {run: () => outlook.listOutlookSignatures()},
+    readOutlookSignatureHtml: {run: () => outlook.readOutlookSignatureHtml('Default "work"')},
     readTemplateEmails: {
-        run: () => mac.readTemplateEmails(ACCOUNT, 'Templates', 20, true, 'Rate reply'),
+        run: () => outlook.readTemplateEmails(ACCOUNT, {subject: 'Rate reply'}),
         responses: [row('1', 'Templates') + row('1263', 'Rate reply', '2026-08-01 09:30')],
     },
     readTemplateEmailsNoBody: {
-        run: () => mac.readTemplateEmails(ACCOUNT, 'Templates', 20, false),
+        run: () => outlook.readTemplateEmails(ACCOUNT, {includeBody: false}),
         responses: [row('1', 'Templates') + row('1263', 'Rate reply', '2026-08-01 09:30')],
     },
     saveTemplateEmail: {
-        run: () => mac.saveTemplateEmail(ACCOUNT, 'Rate reply', '<p>{{SIGNATURE}}</p>', 'Templates'),
+        run: () => outlook.saveTemplateEmail(ACCOUNT, {subject: 'Rate reply', htmlBody: '<p>{{SIGNATURE}}</p>'}),
         responses: [row('Templates', 'false')],
     },
     editEmailTemplate: {
-        run: () => mac.editEmailTemplate('Rate reply', '<p>body</p>'),
+        run: () => outlook.editEmailTemplate('Rate reply', '<p>body</p>'),
         responses: ['<p>edited</p>'],
     },
 };
 
-for (const [name, {run, responses}] of Object.entries(CASES)) {
+async function scriptsOf(name) {
+    const {run, responses} = CASES[name];
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], run, responses);
+    if (error) throw error;
+    return scripts;
+}
+
+for (const name of Object.keys(CASES)) {
     test(`${name} generates AppleScript that compiles`, {skip}, async () => {
-        const scripts = await scriptsFrom(run, responses);
+        const scripts = await scriptsOf(name);
         assert.ok(scripts.length > 0, 'the operation generated no script at all');
         scripts.forEach((script, index) => {
-            const error = compileError(script);
-            assert.equal(error, '', `${name} script ${index + 1}/${scripts.length}:\n${error}`);
+            assert.equal(compileError(script), '', `${name} script ${index + 1}/${scripts.length}`);
         });
     });
 }
 
-test('the two-pass readers really do reach their second pass', {skip}, async () => {
-    // Otherwise the cases above would quietly only ever check pass one, and the
-    // detail scripts — the ones that read bodies and senders — would go
-    // uncompiled while the suite stayed green.
-    for (const name of [
-        'readInboxEmails',
-        'searchInboxByFilter',
-        'purgeDeletedItems',
-        'readSentRecipientGroups',
-        'readTemplateEmails',
-        'saveEmailAttachments',
-    ]) {
-        const {run, responses} = CASES[name];
-        const scripts = await scriptsFrom(run, responses);
-        assert.ok(scripts.length >= 2, `${name} stopped after ${scripts.length} script(s)`);
+test('every operation generates its scripts without throwing', async () => {
+    for (const name of Object.keys(CASES)) {
+        assert.ok((await scriptsOf(name)).length > 0, name);
     }
 });
 
-test('caller text stays inside its AppleScript literal', {skip}, async () => {
-    // A subject carrying a quote or a backslash must not be able to close the
-    // literal it sits in — the AppleScript counterpart of the PowerShell
-    // single-quote doubling, and the reason compiling these matters.
-    const scripts = await scriptsFrom(() => mac.sendOutlookEmail({
-        emailAccount: 'a"b@example.com',
-        to: 'x@example.com',
-        subject: 'He said "hello" \\ then left',
-        htmlBody: '<p>line one\nline two "quoted"</p>',
-        sendImmediately: false,
-        openDraftWindow: false,
-    }));
-    assert.equal(compileError(scripts[0]), '');
+test('the two-pass readers really do reach their second pass', async () => {
+    for (const name of ['readInboxEmails', 'searchInboxByFilter', 'purgeDeletedItems', 'readSentRecipientGroups', 'readTemplateEmails', 'saveEmailAttachments']) {
+        assert.ok((await scriptsOf(name)).length >= 2, `${name} stopped after one script`);
+    }
 });
 
 // ── Guards for the failures compiling cannot catch ───────────────────────
-// Both of these shipped once. Neither is a compile error: the script builds,
-// osacompile accepts it, and it fails only against a live Outlook — which is
-// exactly the kind of bug that needs a cheap test rather than a lucky run.
-// These need no Outlook at all, since the scripts are captured, not run.
+// Both shipped once, and neither is a compile error: the script builds, then
+// fails only against a live Outlook. They need no Outlook to check, since the
+// scripts are captured rather than run.
 
-/**
- * AppleScript terms that cannot be used as variable names. Assigning to one
- * compiles and then fails at run time with a message that names the value
- * rather than the variable, so it reads like a data problem.
- */
+/** AppleScript terms that can't be variable names. Assigning to one compiles,
+ *  then fails at run time with a message naming the value, not the variable. */
 const RESERVED_WORDS = new Set([
     'at', 'rest', 'end', 'count', 'length', 'text', 'item', 'id', 'name', 'contents',
     'result', 'first', 'last', 'front', 'back', 'middle', 'every', 'some', 'it', 'me',
@@ -275,43 +209,53 @@ const RESERVED_WORDS = new Set([
     'beginning', 'above', 'below', 'since', 'until', 'while', 'repeat', 'tell',
 ]);
 
-/** A script with its AppleScript comments removed — those quote the very
- *  patterns these guards forbid, and are not code. */
+/** A script without its comments, which quote the very patterns these guards forbid. */
 function withoutComments(script) {
-    return script
-        .split('\n')
-        .filter(line => !line.trim().startsWith('--'))
-        .join('\n');
+    return script.split('\n').filter(line => !line.trim().startsWith('--')).join('\n');
 }
 
 async function everyGeneratedScript() {
     const all = [];
-    for (const [name, {run, responses}] of Object.entries(CASES)) {
-        for (const script of await scriptsFrom(run, responses)) {
-            all.push({name, script: withoutComments(script)});
-        }
+    for (const name of Object.keys(CASES)) {
+        for (const script of await scriptsOf(name)) all.push({name, script: withoutComments(script)});
     }
     return all;
 }
 
 test('no generated script assigns to a reserved AppleScript word', async () => {
-    // `set rest to ...` and `set at to ...` both shipped and both failed live.
     for (const {name, script} of await everyGeneratedScript()) {
         for (const [, variable] of script.matchAll(/^\s*set ([A-Za-z_]\w*) to /gm)) {
-            assert.ok(
-                !RESERVED_WORDS.has(variable.toLowerCase()),
-                `${name}: "set ${variable} to ..." uses a reserved AppleScript word`,
-            );
+            assert.ok(!RESERVED_WORDS.has(variable.toLowerCase()), `${name}: "set ${variable} to ..." uses a reserved word`);
         }
     }
 });
 
 test('no generated script reads a record field through a nested accessor', async () => {
-    // `address of (sender of m)` and `address of (email address of r)` do not
-    // coerce — the record has to be bound to a variable first. Inside a try, the
-    // failure is silent: an empty sender, or no recipients at all.
     for (const {name, script} of await everyGeneratedScript()) {
         const nested = script.match(/\b(?:address|name) of \((?:sender|email address) of /);
         assert.equal(nested, null, `${name}: ${nested && nested[0]}... must bind the record first`);
     }
+});
+
+test('a Windows EntryID is refused before any script is built', async () => {
+    const windowsEntryId = '00000000AABBCCDD1122334455667788';
+    for (const call of [
+        () => outlook.readEmailBody(windowsEntryId),
+        () => outlook.openOutlookEmail(windowsEntryId),
+        () => outlook.replyOutlookEmail({emailAccount: ACCOUNT, entryId: windowsEntryId, htmlBody: '<p>x</p>'}),
+    ]) {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], call);
+        assert.equal(error.code, 'INVALID_REQUEST');
+        assert.match(error.message, /Outlook for Mac message id/);
+        assert.equal(scripts.length, 0);
+    }
+});
+
+test('a batch reports an unusable id beside the others rather than discarding them', async () => {
+    const {error} = await captureScripts(macRun, ['runOsaScript'], async () => {
+        const result = await outlook.moveOutlookEmails(ACCOUNT, ['not-a-mac-id'], 'Archive');
+        assert.equal(result.moved, 0);
+        assert.deepEqual(result.failed.map(f => f.entryId), ['not-a-mac-id']);
+    });
+    assert.equal(error, undefined);
 });

@@ -1,120 +1,94 @@
-// Platform-neutral mail helpers.
-//
-// These used to live in the Windows implementation, which meant the macOS reader
-// imported them from it — the wrong direction, and the reason a folder string or
-// a quote split could drift between platforms. Both import them from here now.
+// Platform-neutral mail helpers: folder strings, reply prefixes, and splitting a
+// reply from the thread it quotes. Pure functions, usable without Outlook, and
+// shared by both platforms so neither can come to read these differently.
+import { InvalidRequestError } from './errors';
 import type { MailFolderRef } from './types';
 
 /**
- * Clamp a caller's count to the range an operation actually accepts.
- *
- * These bounds ARE the argument contract — how far back a scan reaches, how many
- * rows come back, how deep a folder walk goes — so they are stated here rather
- * than once per platform, which is how the two came to disagree about what a
- * `daysBack` of 0 means.
+ * Outlook's olDefaultFolders ids for the folders this package addresses by
+ * role rather than by name. The ids are Outlook's own, and a folder's NAME is
+ * localized, so a role is always resolved through its id.
  */
-export function clamp(value: number, min: number, max: number): number {
-    return Math.max(min, Math.min(max, Math.floor(value)));
-}
+export const FolderId = Object.freeze({
+    DeletedItems: 3,
+    Outbox: 4,
+    SentMail: 5,
+    Inbox: 6,
+    Drafts: 16,
+    Junk: 23,
+});
 
 /**
- * The Outlook folders addressable by name rather than by walking from the Inbox,
- * with their olDefaultFolders id. Sent Items is the one that earns this: "has this
- * already gone out?" is otherwise unanswerable, and no amount of Inbox scanning
- * substitutes for it.
- *
- * A well-known name always wins over a user folder of the same name — reach the
- * latter by qualifying it (`Inbox\Drafts`).
+ * The folders addressable by name rather than by walking from the Inbox, with
+ * their olDefaultFolders id. A well-known name wins over a user folder of the
+ * same name; reach the latter by qualifying it (`Inbox\Drafts`).
  */
-export const WELL_KNOWN_FOLDERS: Record<string, number> = {
-    inbox: 6,
-    'sent items': 5,
-    sent: 5,
-    'sent mail': 5,
-    drafts: 16,
-    'deleted items': 3,
-    deleted: 3,
-    trash: 3,
-    'junk email': 23,
-    junk: 23,
-    outbox: 4,
-};
+export const WELL_KNOWN_FOLDERS: Readonly<Record<string, number>> = Object.freeze({
+    'inbox': FolderId.Inbox,
+    'sent items': FolderId.SentMail,
+    'sent': FolderId.SentMail,
+    'sent mail': FolderId.SentMail,
+    'drafts': FolderId.Drafts,
+    'deleted items': FolderId.DeletedItems,
+    'deleted': FolderId.DeletedItems,
+    'trash': FolderId.DeletedItems,
+    'junk email': FolderId.Junk,
+    'junk': FolderId.Junk,
+    'outbox': FolderId.Outbox,
+});
+
+/** The Inbox root, as a folder reference. */
+export const INBOX_REF: Readonly<MailFolderRef> = Object.freeze({
+    rootId: FolderId.Inbox,
+    rootLabel: 'Inbox',
+    segments: [],
+});
 
 /**
- * Why `deleteOutlookEmails` refuses a message, worded once for both platforms.
- *
- * It reaches the caller verbatim in a per-email `reason`, so the two generated
- * scripts must not word it independently — the same reasoning that put the
- * attachment "not found" sentence in `shared/attachmentMatch.ts`. It also names
- * the option a consumer of THIS package actually passes: the text used to say
- * `allow_protected`, which is the tool-layer spelling and not a name this
- * package exposes.
+ * Why `deleteOutlookEmails` refuses an item, worded once for both platforms —
+ * it reaches the caller verbatim as a per-item `reason`.
  */
 export const PROTECTED_MAIL_REASON =
     'received or sent mail (Inbox/Sent Items or a subfolder) - pass allowProtected to override';
 
 /**
- * Roots whose items are OUTGOING mail.
- *
- * Outgoing mail carries a sent timestamp where received mail carries a received
- * one, and both platforms have to pick the same folders out on that basis —
- * which is why it lives beside `WELL_KNOWN_FOLDERS` rather than as raw
- * `olDefaultFolders` ids compared inline in each reader.
+ * Roots whose items are outgoing mail, which carries a sent time where incoming
+ * mail carries a received one — so a date filter has to know which it's on.
  */
 export function isOutgoingRoot(rootId: number): boolean {
-    return rootId === WELL_KNOWN_FOLDERS['sent items']
-        || rootId === WELL_KNOWN_FOLDERS.outbox
-        || rootId === WELL_KNOWN_FOLDERS.drafts;
+    return rootId === FolderId.SentMail || rootId === FolderId.Outbox || rootId === FolderId.Drafts;
 }
 
 /**
- * Roots a content scan must never walk INTO, as olDefaultFolders ids.
+ * Roots an Inbox walk must never descend into.
  *
- * On an Exchange profile these sit beside the Inbox, and a walk from it cannot
- * reach them anyway. On an IMAP profile Outlook maps them UNDER the Inbox — a
- * mailbox whose sent and deleted mail is literally `Inbox\Sent Items` and
- * `Inbox\Deleted Items` — so that same walk hands back mail the operator already
- * sent, drafted or threw away as though it had just arrived.
- *
- * Matched by EntryID off `GetDefaultFolder`, never by folder name: the names are
- * localized (a Chinese profile files them under 已发送邮件 and 已删除邮件), which
- * is precisely the case a name test would miss.
+ * On an Exchange profile these sit beside the Inbox and a walk from it can't
+ * reach them anyway. On an IMAP profile Outlook nests them UNDER the Inbox, so
+ * the same walk would hand back mail already sent, drafted or thrown away as if
+ * it had just arrived. They are matched by id, never by name: the names are
+ * localized.
  */
-export const NON_INCOMING_ROOTS: number[] = [
-    WELL_KNOWN_FOLDERS['deleted items'],
-    WELL_KNOWN_FOLDERS.outbox,
-    WELL_KNOWN_FOLDERS['sent items'],
-    WELL_KNOWN_FOLDERS.drafts,
-    WELL_KNOWN_FOLDERS['junk email'],
-];
+export const NON_INCOMING_ROOTS: readonly number[] = Object.freeze([
+    FolderId.DeletedItems,
+    FolderId.Outbox,
+    FolderId.SentMail,
+    FolderId.Drafts,
+    FolderId.Junk,
+]);
 
 /**
- * How far back a filtered scan reaches when the caller names no window.
+ * Subject prefixes that mark a reply or a forward.
  *
- * There is no unbounded mode. A scan reaching back forever is never what a batch
- * run wants — it re-surfaces every pre-alert ever filed — and the one that used
- * to exist was reachable only by accident, depending on whether a given store
- * could answer the subject prefilter. A caller that really wants a year asks for
- * 365.
- */
-export const DEFAULT_SCAN_DAYS = 60;
-
-/**
- * Subject prefixes that mark a message as a reply or a forward.
+ * Kept as a pattern SOURCE because it runs in two engines: macOS tests it as a
+ * JavaScript RegExp, Windows inside PowerShell's .NET one, and both read every
+ * construct used here the same way. Non-ASCII is written as \uXXXX so the
+ * generated PowerShell stays plain ASCII.
  *
- * A pattern SOURCE rather than a RegExp because it must hold in two engines:
- * macOS tests it as a JavaScript RegExp, Windows concatenates it into a
- * PowerShell `-imatch`, and .NET and JavaScript agree on every construct used
- * here. Non-ASCII is spelled as \uXXXX escapes for the same reason — the Windows
- * script crosses a console codepage that plain ASCII survives unconditionally.
- *
- * The list is not only English. A mailbox run in Chinese threads its replies
- * under 回复: and its forwards under 转发:, so an `RE:|FW:` test reads every one
- * of them as a brand-new message — which is how one shipment's thread becomes a
- * dozen apparent arrivals.
- *
- * The colon may be the full-width one (U+FF1A) a CJK input method produces, and
- * Outlook's reply counter (`RE[2]:`) sits between the prefix and the colon.
+ * Not only English: mail threaded in Chinese, Japanese or Korean replies under
+ * 回复:/返信:/답장: and forwards under 转发:/転送:/전달:, and the European
+ * clients use AW:, WG:, SV:, TR:, RV:, ENC: and friends. The colon may be the
+ * full-width one a CJK input method types, and Outlook's reply counter (RE[2]:)
+ * can sit before it.
  */
 const REPLY_PREFIXES: readonly string[] = [
     're', 'fwd?', 'aw', 'wg', 'sv', 'vs', 'vb', 'tr', 'res', 'rv', 'enc', 'odp',
@@ -123,69 +97,92 @@ const REPLY_PREFIXES: readonly string[] = [
     '\\uB2F5\\uC7A5', '\\uC804\\uB2EC',
 ];
 
-/** The prefixes as one pattern source: a prefix, Outlook's optional reply
- *  counter, then a half- or full-width colon. */
+/** The reply/forward prefixes as one case-insensitive pattern source. */
 export const REPLY_PREFIX_SOURCE =
     '^\\s*(?:' + REPLY_PREFIXES.join('|') + ')\\s*(?:\\[\\d+\\])?\\s*[:\\uFF1A]';
 export const REPLY_PREFIX = new RegExp(REPLY_PREFIX_SOURCE, 'i');
 
 /**
- * The leaf name of an exclude-list entry, for the platforms that can only match
- * a folder by name. A full folder path narrows to its last segment; a bare name
- * is already one.
+ * A subject glob as an anchored regex source: `*` matches any run, `?` one
+ * character, everything else itself. Written with constructs JavaScript and
+ * .NET read identically, so both platforms apply exactly the same test.
  */
+export function subjectGlobSource(glob: string): string {
+    let source = '';
+    for (const ch of glob) {
+        if (ch === '*') source += '.*';
+        else if (ch === '?') source += '.';
+        else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    return `^${source}$`;
+}
+
+/** The leaf name of a folder path or bare name. */
 export function folderLeafName(entry: string): string {
-    return entry.trim().split(/[\\\\/]/).filter(Boolean).pop() ?? '';
+    return entry.trim().split(/[\\/]/).filter(Boolean).pop() ?? '';
+}
+
+/** A full Outlook folder path starts with the mailbox: `\\mailbox@example.com\…`. */
+const MAILBOX_PREFIX = /^\\\\[^\\/]+[\\/]/;
+
+function folderSegments(folder: string): string[] {
+    return folder.trim().replace(MAILBOX_PREFIX, '').split(/[\\/]+/).map(s => s.trim()).filter(Boolean);
 }
 
 /**
- * Resolve a caller's folder string to a well-known root plus the segments below it.
+ * Resolve a folder string to a well-known root plus the segments below it.
  *
- * Accepts every shape a user has to hand: a bare name ("Invoices"), a relative
- * path ("Invoices\\Paid"), a well-known folder ("Sent Items"), a path under one
- * ("Deleted Items\\2026"), and the full FolderPath listInboxFolders prints
- * ("\\\\team@x.com\\Inbox\\Invoices").
- *
- * An unrecognized first segment means Inbox-relative, which is what keeps a bare
- * subfolder name working unchanged.
+ * Accepts every shape a person has to hand: a bare name ('Invoices'), a
+ * relative path ('Invoices\Paid'), a well-known folder ('Sent Items'), a path
+ * under one ('Deleted Items\2026'), and the full path listInboxFolders prints
+ * ('\\team@example.com\Inbox\Invoices'). Anything not starting at a well-known
+ * folder is taken as relative to the Inbox.
  */
 export function mailFolderRef(folder: string): MailFolderRef {
-    const rest = folder.trim().replace(/^\\\\[^\\/]+[\\/]/, '');
-    const segments = rest.split(/[\\/]+/).map(s => s.trim()).filter(Boolean);
-    if (segments.length > 0) {
-        const head = segments[0].toLowerCase();
-        if (Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
-            return { rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1) };
-        }
+    const segments = folderSegments(folder);
+    const head = segments[0]?.toLowerCase();
+    if (head !== undefined && Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
+        return {rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1)};
     }
-    return { rootId: 6, rootLabel: 'Inbox', segments };
+    return {rootId: FolderId.Inbox, rootLabel: 'Inbox', segments};
+}
+
+/**
+ * A caller's folder option as a reference: none given means the Inbox root,
+ * and a string that names no folder at all (only separators) is refused rather
+ * than silently read as the Inbox root.
+ */
+export function folderOption(folder: string | undefined): { ref: MailFolderRef; label: string } {
+    if (folder === undefined || folder.trim() === '') return {ref: INBOX_REF, label: 'Inbox'};
+    if (folderSegments(folder).length === 0) {
+        throw new InvalidRequestError(`Folder '${folder}' does not name a folder.`);
+    }
+    return {ref: mailFolderRef(folder), label: folder.trim()};
 }
 
 /**
  * Split a plain-text reply into the sender's own text and the quoted thread
  * below it.
  *
- * This matters more than it looks: the quoted original of a reply carries the
- * text of the message it answers. Handing a caller one blob invites a figure
- * from the outgoing message to be read back as the sender's answer, which is a
- * worse failure than the truncation this exists to fix.
+ * This matters more than it looks: the quoted original carries the text of the
+ * message being answered, and handing a reader one blob invites a figure from
+ * that message to be read back as the sender's own.
  *
- * Scans for the earliest of the separators Outlook and the common webmail
- * clients emit. If the split would leave no new text at all — a bottom-posted
- * reply, or a body that opens on a quote — it is abandoned and everything is
- * returned as `body`, since dropping the sender's actual words is the one
- * outcome worth avoiding.
+ * Splits at the earliest separator Outlook or the common webmail clients emit.
+ * If that would leave no new text at all — a bottom-posted reply, or a body
+ * that opens on a quote — the split is abandoned and everything is `body`,
+ * since losing the sender's actual words is the one outcome worth avoiding.
  */
 export function splitQuotedOriginal(text: string): { body: string; quoted: string; separator: string } {
     const lines = text.split(/\r?\n/);
-    const whole = { body: text, quoted: '', separator: '' };
+    const whole = {body: text, quoted: '', separator: ''};
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         let separator = '';
         if (/^-{2,}\s*original message\s*-{2,}$/i.test(line)) separator = '-----Original Message-----';
-        // Outlook's HTML thread rule, which sits directly above the From:/Sent: block.
+        // Outlook's HTML thread rule, directly above the From:/Sent: block.
         else if (/^_{10,}$/.test(line)) separator = 'Outlook thread rule';
-        // "On Tue, Jul 21, 2026 at 9:14 AM John Doe <j@x.com> wrote:"
+        // "On Tue, Jul 21, 2026 at 9:14 AM Jo Doe <jo@example.com> wrote:"
         else if (/^on\b.{5,300}\bwrote:$/i.test(line)) separator = 'On … wrote:';
         else if (/^>/.test(lines[i])) separator = '> quoted lines';
         // A bare header block: "From: …" followed by another header line.
@@ -195,7 +192,7 @@ export function splitQuotedOriginal(text: string): { body: string; quoted: strin
         if (!separator) continue;
         const body = lines.slice(0, i).join('\n').trimEnd();
         if (!body.trim()) return whole;
-        return { body, quoted: lines.slice(i).join('\n').trim(), separator };
+        return {body, quoted: lines.slice(i).join('\n').trim(), separator};
     }
     return whole;
 }

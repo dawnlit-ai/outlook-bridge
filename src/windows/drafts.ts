@@ -1,319 +1,228 @@
-// Drafts: which ones belong to an account, and sending, listing or deleting them.
-import { psList, requireWindows, runPowerShell } from './run';
+// Drafts: which ones belong to an account, and listing, sending or deleting them.
+import { psArray, psInt, runPowerShellJson } from './run';
 import { accountScript, DELIVERY_STORE_PS } from './scripts';
-import { num, parseObject, record, str, strList, toArray } from '../shared/json';
-import type { DeleteDraftsResult, ListDraftsResult, SendAllDraftsResult, SendDraftsResult } from '../types';
+import { bool, itemFailures, num, record, str, strList, toArray } from '../shared/json';
+import { FolderId } from '../mail';
+import type { AccountRequest, EntryIdsRequest, ListDraftsRequest } from '../backend';
+import type { DeleteDraftsResult, ListDraftsResult, SendDraftsResult } from '../types';
 
 /**
  * Resolve the Drafts folders belonging to one account into `$scan`, and define
- * `Test-DraftMatches` over them. Emitted into every drafts script so listing,
- * deleting and sending can never disagree about which drafts are "this account's".
- * Expects `$target`, `$outlook`, `$ns` and `$account` to already be set.
+ * `Test-DraftMatches` over them. Emitted into every drafts script, so listing,
+ * sending and deleting can never disagree about which drafts are this account's.
  *
- * Two Drafts folders can hold drafts for one account, so both are scanned:
- *  - The account's OWN mailbox store Drafts folder (account.DeliveryStore) — where
- *    a draft composed while that mailbox is selected lands. A draft there with no
- *    explicit SendUsingAccount still belongs to this account, so null counts.
- *  - The DEFAULT store's Drafts folder — where the in-app "Create Drafts" flow
- *    files drafts via $mail.Save() regardless of send-account. Only drafts stamped
- *    with this account match here; a null SendUsingAccount means the default
- *    account, not necessarily this one, so it's left alone.
- * (When those two resolve to the same folder — the account IS the default — it is
- * scanned once, under the more permissive "own store" rule.)
+ * Two Drafts folders can hold one account's drafts, so both are scanned:
+ *  - the account's OWN store's Drafts, where a draft composed in that mailbox
+ *    lands. A draft there with no explicit sending account still belongs to it.
+ *  - the DEFAULT store's Drafts, where a program's `Save()` files a draft
+ *    whatever account it sends from. Only drafts stamped with this account
+ *    match there; an unstamped one belongs to the default account.
+ * When the two are the same folder it is scanned once, under the first rule.
  *
- * Drafts bound to another account never match, so nothing here can reach unrelated
- * mail. Non-mail items (meeting requests, reports) are ignored.
+ * Non-mail items (meeting requests, reports) never match.
  */
 const DRAFTS_SCAN_PS = `
-# Collect the Drafts folders to scan, deduped by id. includeNull marks the account's
-# own store, where a draft with no explicit send-account still belongs to it.
 $scan = @()
-$seen = @{}
-
+$seenFolders = @{}
 $homeDrafts = $null
-try { $homeDrafts = $store.GetDefaultFolder(16) } catch {}  # olFolderDrafts
+try { $homeDrafts = $store.GetDefaultFolder(${psInt(FolderId.Drafts)}) } catch {}
 if ($homeDrafts -ne $null) {
-    $seen["$($homeDrafts.StoreID)|$($homeDrafts.EntryID)"] = $true
-    $scan += [pscustomobject]@{ folder = $homeDrafts; includeNull = $true }
+    $seenFolders["$($homeDrafts.StoreID)|$($homeDrafts.EntryID)"] = $true
+    $scan += [PSCustomObject]@{ folder = $homeDrafts; includeUnstamped = $true }
 }
-
-$defDrafts = $null
-try { $defDrafts = $ns.GetDefaultFolder(16) } catch {}
-if ($defDrafts -ne $null) {
-    $k = "$($defDrafts.StoreID)|$($defDrafts.EntryID)"
-    if (-not $seen.ContainsKey($k)) {
-        $seen[$k] = $true
-        $scan += [pscustomobject]@{ folder = $defDrafts; includeNull = $false }
-    }
+$defaultDrafts = $null
+try { $defaultDrafts = $ns.GetDefaultFolder(${psInt(FolderId.Drafts)}) } catch {}
+if ($defaultDrafts -ne $null -and -not $seenFolders.ContainsKey("$($defaultDrafts.StoreID)|$($defaultDrafts.EntryID)")) {
+    $scan += [PSCustomObject]@{ folder = $defaultDrafts; includeUnstamped = $false }
 }
-
-# SendUsingAccount is null for a draft that never set one, so guard the access.
-function Test-DraftMatches($item, $includeNull) {
+function Test-DraftMatches($item, [bool]$includeUnstamped) {
     if ($item.Class -ne 43) { return $false }  # olMail only
-    $acct = $null
-    try { $acct = $item.SendUsingAccount } catch {}
-    if ($acct -eq $null) { return $includeNull }
-    return ($acct.SmtpAddress -ieq $target)
+    $sender = $null
+    try { $sender = $item.SendUsingAccount } catch {}
+    if ($sender -eq $null) { return $includeUnstamped }
+    return ([string]$sender.SmtpAddress -ieq $target)
+}
+# An id is acted on only once it is PROVED to be one of this account's drafts:
+# resolved in one of the scanned folders' stores, sitting in that folder, and
+# bound to this account (or unbound, in its own store).
+$draftFolderRules = @{}
+foreach ($entry in $scan) { $draftFolderRules[[string]$entry.folder.EntryID] = $entry.includeUnstamped }
+function Resolve-OwnDraft([string]$id, [string]$verb) {
+    $draft = $null
+    foreach ($entry in $scan) {
+        try { $draft = $ns.GetItemFromID($id, $entry.folder.StoreID) } catch { $draft = $null }
+        if ($draft -ne $null) { break }
+    }
+    if ($draft -eq $null) { throw "no such item in this account's Drafts folders" }
+    $parentId = ''
+    try { $parentId = [string]$draft.Parent.EntryID } catch {}
+    if (-not $draftFolderRules.ContainsKey($parentId)) { throw "item is not in this account's Drafts folder - refusing to $verb" }
+    if (-not (Test-DraftMatches $draft $draftFolderRules[$parentId])) { throw "draft is not bound to $target - refusing to $verb" }
+    return $draft
 }
 `;
 
-/** Session, account and the drafts scan rule — the prelude all three share. */
-function draftsScript(emailAccount: string): string {
-    return accountScript(emailAccount) + DELIVERY_STORE_PS + DRAFTS_SCAN_PS;
+function draftsScript(account: string): string {
+    return accountScript(account) + DELIVERY_STORE_PS + DRAFTS_SCAN_PS;
 }
 
-/**
- * Send the mail drafts that belong to `emailAccount`, wherever Outlook filed them.
- * Which drafts those are is DRAFTS_SCAN_PS's rule, not this function's.
- *
- * Item references are snapshotted before any Send() call: sending moves an item out
- * of Drafts, and mutating the collection mid-enumeration would skip every other one.
- */
-export async function sendAllDrafts(emailAccount: string): Promise<SendAllDraftsResult> {
-    requireWindows();
-    const script = `${draftsScript(emailAccount)}
-# Snapshot the matching mail items first — Send() removes each from Drafts, so
-# sending inside a live enumeration would skip every other item.
-$items = @()
-foreach ($entry in $scan) {
-    foreach ($it in $entry.folder.Items) {
-        if (Test-DraftMatches $it $entry.includeNull) { $items += $it }
-    }
-}
-
-$sent = 0
-$failed = @()
-foreach ($m in $items) {
-    try {
-        $m.Send()
-        $sent++
-    } catch {
-        $subj = ''
-        try { $subj = $m.Subject } catch {}
-        $failed += [pscustomobject]@{ subject = $subj; error = $_.Exception.Message }
-    }
-}
-
-[pscustomobject]@{ sent = $sent; failed = @($failed) } | ConvertTo-Json -Compress -Depth 4
-`;
-    try {
-        const parsed = parseObject(await runPowerShell(script, 300000));
-        return {
-            sent: num(parsed.sent),
-            failed: toArray(parsed.failed).map(f => {
-                const e = record(f);
-                return { subject: str(e.subject), error: str(e.error) };
-            }),
-        };
-    } catch (error) {
-        // A malformed report is not worth failing a send that already happened;
-        // a run that never got that far has already rejected above.
-        if (error instanceof SyntaxError) return { sent: 0, failed: [] };
-        throw error;
-    }
-}
-
-/**
- * List the mail drafts belonging to `emailAccount`, newest first. Which drafts
- * those are is DRAFTS_SCAN_PS's rule.
- *
- * Deliberately returns no StoreID: deleteOutlookDrafts re-resolves each EntryID
- * against the same folders, so repeating a ~700-char store id on every row would be
- * pure payload. Bodies are previewed, never returned whole — a templated reply body
- * runs to tens of thousands of characters and a folder's worth would blow the cap.
- */
-export async function listOutlookDrafts(
-    emailAccount: string,
-    limit = 100,
-    previewChars = 300,
-): Promise<ListDraftsResult> {
-    requireWindows();
-    const script = `${draftsScript(emailAccount)}
-$previewChars = ${previewChars}
+/** The account's drafts, newest first. Bodies are previewed, never returned whole. */
+export async function listOutlookDrafts(request: ListDraftsRequest): Promise<ListDraftsResult> {
+    const output = await runPowerShellJson(`${draftsScript(request.account)}
+$previewChars = ${psInt(request.previewChars)}
+$limit = ${psInt(request.limit)}
 $rows = @()
-$folders = @()
+$folderPaths = @()
 foreach ($entry in $scan) {
-    $fp = ''
-    try { $fp = $entry.folder.FolderPath } catch {}
-    $folders += $fp
+    $folderPath = ''
+    try { $folderPath = [string]$entry.folder.FolderPath } catch {}
+    $folderPaths += $folderPath
     foreach ($it in $entry.folder.Items) {
-        if (-not (Test-DraftMatches $it $entry.includeNull)) { continue }
-        $subj = ''; try { $subj = $it.Subject } catch {}
-        $to = ''; try { $to = $it.To } catch {}
-        $addrs = @()
+        if (-not (Test-DraftMatches $it $entry.includeUnstamped)) { continue }
+        $addresses = @()
         try {
             foreach ($r in $it.Recipients) {
-                $a = ''
-                try { $a = $r.Address } catch {}
-                if ($a -and $a.StartsWith('/')) { try { $a = $r.Name } catch {} }
-                if ($a) { $addrs += $a }
+                $address = ''
+                try { $address = [string]$r.Address } catch {}
+                # An unresolved Exchange entry has a DN for an address; its name reads better.
+                if ($address.StartsWith('/')) { try { $address = [string]$r.Name } catch {} }
+                if ($address) { $addresses += $address }
             }
         } catch {}
-        $body = ''
-        try { $body = $it.Body } catch {}
-        if ($body -eq $null) { $body = '' }
-        $body = ($body -replace '\\s+', ' ').Trim()
-        if ($body.Length -gt $previewChars) { $body = $body.Substring(0, $previewChars) }
-        $mod = ''
-        try { $mod = $it.LastModificationTime.ToString('yyyy-MM-dd HH:mm') } catch {}
-        $att = $false
-        try { $att = ($it.Attachments.Count -gt 0) } catch {}
-        $rows += [pscustomobject]@{
-            entryId = $it.EntryID
-            subject = $subj
-            to = $to
-            toEmails = @($addrs)
-            bodyPreview = $body
-            hasAttachments = $att
-            lastModified = $mod
-            folderPath = $fp
+        $preview = ''
+        if ($previewChars -gt 0) {
+            try { $preview = ([string]$it.Body -replace '\\s+', ' ').Trim() } catch {}
+            if ($preview.Length -gt $previewChars) { $preview = $preview.Substring(0, $previewChars) }
+        }
+        $modified = ''
+        try { $modified = $it.LastModificationTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+        $hasAttachments = $false
+        try { $hasAttachments = ($it.Attachments.Count -gt 0) } catch {}
+        $rows += [PSCustomObject]@{
+            entryId        = [string]$it.EntryID
+            subject        = [string]$it.Subject
+            to             = [string]$it.To
+            toEmails       = @($addresses)
+            bodyPreview    = $preview
+            hasAttachments = $hasAttachments
+            lastModified   = $modified
+            folderPath     = $folderPath
         }
     }
 }
 $sorted = @($rows | Sort-Object -Property lastModified -Descending)
 $total = $sorted.Count
-if ($total -gt ${limit}) { $sorted = @($sorted[0..(${limit} - 1)]) }
-ConvertTo-Json @{ account = $target; foldersScanned = @($folders); count = $total; truncated = ($total -gt ${limit}); drafts = @($sorted) } -Depth 4
-`;
-    const parsed = parseObject(await runPowerShell(script, 300000));
+if ($total -gt $limit) { $sorted = @($sorted[0..($limit - 1)]) }
+ConvertTo-Json -Depth 4 -InputObject ([PSCustomObject]@{
+    account        = $target
+    foldersScanned = @($folderPaths)
+    count          = $total
+    truncated      = ($total -gt $limit)
+    drafts         = @($sorted)
+})
+`, 'scan');
+    const e = record(output);
     return {
-        account: str(parsed.account) || emailAccount,
-        foldersScanned: toArray(parsed.foldersScanned).map(str),
-        count: num(parsed.count),
-        truncated: Boolean(parsed.truncated),
-        drafts: toArray(parsed.drafts).map(d => {
-            const e = record(d);
+        account: str(e.account) || request.account,
+        foldersScanned: toArray(e.foldersScanned).map(str),
+        count: num(e.count),
+        truncated: bool(e.truncated),
+        drafts: toArray(e.drafts).map(row => {
+            const d = record(row);
             return {
-                entryId: str(e.entryId),
-                subject: str(e.subject),
-                to: str(e.to),
-                toEmails: strList(e.toEmails),
-                bodyPreview: str(e.bodyPreview),
-                hasAttachments: Boolean(e.hasAttachments),
-                lastModified: str(e.lastModified),
-                folderPath: str(e.folderPath),
+                entryId: str(d.entryId),
+                subject: str(d.subject),
+                to: str(d.to),
+                toEmails: strList(d.toEmails),
+                bodyPreview: str(d.bodyPreview),
+                hasAttachments: bool(d.hasAttachments),
+                lastModified: str(d.lastModified),
+                folderPath: str(d.folderPath),
             };
         }),
     };
 }
 
-/**
- * Delete mail drafts by EntryID. Outlook's Delete() moves the item to Deleted Items
- * rather than destroying it, so a mistaken call stays recoverable from there.
- *
- * Every id must resolve to a mail item sitting in one of THIS account's Drafts
- * folders before anything is deleted; an id pointing at ordinary mail, or at another
- * account's draft, is refused and reported. Without that gate this would be a
- * general-purpose "delete any email by id" tool, which is not what it is for.
- */
-export async function deleteOutlookDrafts(
-    emailAccount: string,
-    entryIds: string[],
-): Promise<DeleteDraftsResult> {
-    requireWindows();
-    if (entryIds.length === 0) return { deleted: 0, failed: [] };
-    const script = `${draftsScript(emailAccount)}
-# Index this account's Drafts folders by EntryID, so a resolved item can be PROVED
-# to live in one of them before it is deleted.
-$draftFolderIds = @{}
-foreach ($entry in $scan) { $draftFolderIds[$entry.folder.EntryID] = $entry.includeNull }
-
-$deleted = 0
-$failed = @()
-foreach ($id in @(${psList(entryIds)})) {
-    try {
-        $it = $null
-        foreach ($entry in $scan) {
-            try {
-                $it = $ns.GetItemFromID($id, $entry.folder.StoreID)
-                if ($it -ne $null) { break }
-            } catch { $it = $null }
-        }
-        if ($it -eq $null) { throw "no such item in this account's Drafts folders" }
-        $parentId = ''
-        try { $parentId = $it.Parent.EntryID } catch {}
-        if (-not $draftFolderIds.ContainsKey($parentId)) {
-            throw "item is not in this account's Drafts folder - refusing to delete"
-        }
-        if (-not (Test-DraftMatches $it $draftFolderIds[$parentId])) {
-            throw "draft is not bound to $target - refusing to delete"
-        }
-        $it.Delete()
-        $deleted++
-    } catch {
-        $failed += [pscustomobject]@{ entryId = $id; error = $_.Exception.Message }
-    }
-}
-ConvertTo-Json @{ deleted = $deleted; failed = @($failed) } -Depth 3
-`;
-    const parsed = parseObject(await runPowerShell(script, 300000));
-    return {
-        deleted: num(parsed.deleted),
-        failed: toArray(parsed.failed).map(f => {
-            const e = record(f);
-            return { entryId: str(e.entryId), error: str(e.error) };
-        }),
-    };
-}
-
-/**
- * Send a chosen subset of `emailAccount`'s drafts by EntryID — e.g. after
- * `listOutlookDrafts` and a user review pass — instead of `sendAllDrafts`'s
- * account-wide sweep.
- *
- * Same ownership gate as `deleteOutlookDrafts`: every id must resolve to a mail
- * item sitting in one of THIS account's Drafts folders before anything is sent.
- * An id pointing at ordinary inbox mail, or at another account's draft, is
- * refused and reported rather than sent.
- */
-export async function sendDrafts(
-    emailAccount: string,
-    entryIds: string[],
-): Promise<SendDraftsResult> {
-    requireWindows();
-    if (entryIds.length === 0) return { sent: 0, failed: [] };
-    const script = `${draftsScript(emailAccount)}
-# Index this account's Drafts folders by EntryID, so a resolved item can be PROVED
-# to live in one of them before it is sent.
-$draftFolderIds = @{}
-foreach ($entry in $scan) { $draftFolderIds[$entry.folder.EntryID] = $entry.includeNull }
-
+/** Send the named drafts, each proved to be this account's first. */
+export async function sendDrafts(request: EntryIdsRequest): Promise<SendDraftsResult> {
+    const output = await runPowerShellJson(`${draftsScript(request.account)}
 $sent = 0
 $failed = @()
-foreach ($id in @(${psList(entryIds)})) {
-    $subj = ''
+foreach ($id in ${psArray(request.entryIds)}) {
+    $subject = ''
     try {
-        $it = $null
-        foreach ($entry in $scan) {
-            try {
-                $it = $ns.GetItemFromID($id, $entry.folder.StoreID)
-                if ($it -ne $null) { break }
-            } catch { $it = $null }
-        }
-        if ($it -eq $null) { throw "no such item in this account's Drafts folders" }
-        try { $subj = $it.Subject } catch {}
-        $parentId = ''
-        try { $parentId = $it.Parent.EntryID } catch {}
-        if (-not $draftFolderIds.ContainsKey($parentId)) {
-            throw "item is not in this account's Drafts folder - refusing to send"
-        }
-        if (-not (Test-DraftMatches $it $draftFolderIds[$parentId])) {
-            throw "draft is not bound to $target - refusing to send"
-        }
-        $it.Send()
+        $draft = Resolve-OwnDraft $id 'send'
+        try { $subject = [string]$draft.Subject } catch {}
+        $draft.Send()
         $sent++
     } catch {
-        $failed += [pscustomobject]@{ entryId = $id; subject = $subj; error = $_.Exception.Message }
+        $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
     }
 }
-[pscustomobject]@{ sent = $sent; failed = @($failed) } | ConvertTo-Json -Compress -Depth 4
-`;
-    const parsed = parseObject(await runPowerShell(script, 300000));
-    return {
-        sent: num(parsed.sent),
-        failed: toArray(parsed.failed).map(f => {
-            const e = record(f);
-            return { entryId: str(e.entryId), subject: str(e.subject), error: str(e.error) };
-        }),
-    };
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ sent = $sent; failed = @($failed) })
+`, 'scan');
+    const e = record(output);
+    return {sent: num(e.sent), failed: itemFailures(e.failed)};
+}
+
+/**
+ * Send every draft belonging to the account.
+ *
+ * The matching items are snapshotted before the first send: sending moves an
+ * item out of Drafts, and sending during a live enumeration would skip every
+ * other one.
+ */
+export async function sendAllDrafts(request: AccountRequest): Promise<SendDraftsResult> {
+    const output = await runPowerShellJson(`${draftsScript(request.account)}
+$drafts = @()
+foreach ($entry in $scan) {
+    foreach ($it in $entry.folder.Items) {
+        if (Test-DraftMatches $it $entry.includeUnstamped) { $drafts += $it }
+    }
+}
+$sent = 0
+$failed = @()
+foreach ($draft in $drafts) {
+    $entryId = ''
+    $subject = ''
+    try { $entryId = [string]$draft.EntryID } catch {}
+    try { $subject = [string]$draft.Subject } catch {}
+    try {
+        $draft.Send()
+        $sent++
+    } catch {
+        $failed += [PSCustomObject]@{ entryId = $entryId; subject = $subject; error = $_.Exception.Message }
+    }
+}
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ sent = $sent; failed = @($failed) })
+`, 'scan');
+    const e = record(output);
+    return {sent: num(e.sent), failed: itemFailures(e.failed)};
+}
+
+/**
+ * Delete the named drafts, each proved to be this account's first. Outlook's
+ * Delete() moves an item to Deleted Items, so a mistake stays recoverable.
+ * Without the proof this would be a general "delete any email by id" call,
+ * which is not what it is for.
+ */
+export async function deleteOutlookDrafts(request: EntryIdsRequest): Promise<DeleteDraftsResult> {
+    const output = await runPowerShellJson(`${draftsScript(request.account)}
+$deleted = 0
+$failed = @()
+foreach ($id in ${psArray(request.entryIds)}) {
+    $subject = ''
+    try {
+        $draft = Resolve-OwnDraft $id 'delete'
+        try { $subject = [string]$draft.Subject } catch {}
+        $draft.Delete()
+        $deleted++
+    } catch {
+        $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
+    }
+}
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ deleted = $deleted; failed = @($failed) })
+`, 'scan');
+    const e = record(output);
+    return {deleted: num(e.deleted), failed: itemFailures(e.failed)};
 }

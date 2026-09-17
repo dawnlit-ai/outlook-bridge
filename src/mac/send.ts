@@ -1,102 +1,79 @@
 // Composing outgoing mail on macOS: a new email, and a reply to an existing one.
-import { asEscape, field, runOsaScript, splitFields } from './run';
-import { accountLookupSnippet, macMessageId, messageLookupSnippet, resolveMacAccount, } from './scripts';
-import { composeReplyHtml } from '../shared/replyBody';
-import { listOutlookSignatures, readOutlookSignatureHtml } from './signatures';
-import { readTemplateEmails } from './templates';
-import type { ReplyEmailParams, ReplyEmailResult, SendEmailParams } from '../types';
-
-/** Split a To/CC string the way the Windows contract accepts it. */
-function splitAddresses(s: string): string[] {
-    return s.split(/[,;]+/).map(x => x.trim()).filter(Boolean);
-}
+import { asString, field, runOsaScript, splitFields } from './run';
+import { accountLookupSnippet, macMessageId, messageLookupSnippet, resolveMacAccount } from './scripts';
+import { parseRecipient } from '../shared/args';
+import type { Disposition, ReplyRequest, SendRequest } from '../backend';
+import type { ReplyEmailResult } from '../types';
 
 /**
- * What to do with a composed item.
+ * What to do with a composed message.
  *
- * A new outgoing message lands in Temporary Items, not Drafts — `open` is what
- * surfaces it, so a windowless draft has to be moved into the Drafts folder
- * explicitly. (`save` is no help: it demands a file destination, not a folder.)
- * `move` reports success even where it silently does nothing, so the folder is
- * confirmed to have grown rather than risk reporting a draft that doesn't exist.
+ * A new outgoing message lands in Temporary Items, not Drafts — `open` only
+ * shows it — so a windowless draft is moved into Drafts explicitly. `move`
+ * reports success even where it silently does nothing, so the folder is
+ * confirmed to have grown rather than report a draft that doesn't exist.
  */
-function composeAction(
-    variable: string,
-    sendImmediately: boolean | undefined,
-    openDraftWindow: boolean | undefined,
-): { prelude: string; action: string } {
-    if (sendImmediately) return { prelude: '', action: `    send ${variable}` };
-    if (openDraftWindow !== false) return { prelude: '', action: `    open ${variable}` };
-    return {
-        prelude: `    set draftsFolder to drafts of targetAcct
+function dispose(variable: string, disposition: Disposition): { prelude: string; action: string } {
+    switch (disposition) {
+        case 'send':
+            return {prelude: '', action: `    send ${variable}`};
+        case 'display':
+            return {prelude: '', action: `    open ${variable}`};
+        case 'save':
+            return {
+                prelude: `    set draftsFolder to drafts of targetAcct
     set draftsBefore to count of messages of draftsFolder`,
-        action: `    move ${variable} to draftsFolder
+                action: `    move ${variable} to draftsFolder
     if (count of messages of draftsFolder) is not greater than draftsBefore then error "Outlook did not file the draft in the Drafts folder."`,
-    };
+            };
+    }
 }
 
-/**
- * Create an Outlook email as a draft window (or send it) via AppleScript.
- * Mirrors the Windows COM contract from windows/send.ts.
- */
-export async function sendOutlookEmail(params: SendEmailParams): Promise<void> {
-    // Same safety property as Windows: never silently send from the wrong mailbox.
-    // The account lookup raises when the address doesn't resolve, so there's no
-    // pre-flight getOutlookAccounts() round-trip — it cost an extra osascript
-    // launch on every email in a batch.
-    const recipientLines = [
-        ...splitAddresses(params.to).map(addr =>
-            `    make new to recipient at newMsg with properties {email address:{address:"${asEscape(addr)}"}}`),
-        ...splitAddresses(params.cc || '').map(addr =>
-            `    make new cc recipient at newMsg with properties {email address:{address:"${asEscape(addr)}"}}`),
-    ].join('\n');
+/** One `make new … recipient` line per entry, keeping a display name when given. */
+function recipientLines(kind: 'to' | 'cc' | 'bcc', entries: readonly string[]): string[] {
+    return entries.map(entry => {
+        const {name, address} = parseRecipient(entry);
+        const emailAddress = name
+            ? `{name:${asString(name)}, address:${asString(address)}}`
+            : `{address:${asString(address)}}`;
+        return `    make new ${kind} recipient at newMsg with properties {email address:${emailAddress}}`;
+    });
+}
 
-    const attachLine = params.attachmentPath
-        ? `    make new attachment at newMsg with properties {file:POSIX file "${asEscape(params.attachmentPath)}"}`
-        : '';
-
-    const acct = await resolveMacAccount(params.emailAccount);
-    const { prelude, action } = composeAction('newMsg', params.sendImmediately, params.openDraftWindow);
-    const script = `
+/** Send, display or file a new email. */
+export async function sendOutlookEmail(request: SendRequest): Promise<void> {
+    const acct = await resolveMacAccount(request.account);
+    const {prelude, action} = dispose('newMsg', request.disposition);
+    const lines = [
+        ...recipientLines('to', request.to),
+        ...recipientLines('cc', request.cc),
+        ...recipientLines('bcc', request.bcc),
+        ...request.attachments.map(file => `    make new attachment at newMsg with properties {file:POSIX file ${asString(file)}}`),
+    ];
+    await runOsaScript(`
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct, true)}
 ${prelude}
-    set newMsg to make new outgoing message with properties {subject:"${asEscape(params.subject)}", content:"${asEscape(params.htmlBody)}"}
-${recipientLines}
+    set newMsg to make new outgoing message with properties {subject:${asString(request.subject)}, content:${asString(request.htmlBody)}}
+${lines.join('\n')}
     set account of newMsg to targetAcct
-${attachLine}
 ${action}
-end tell`;
-    await runOsaScript(script, 120000);
+end tell`, 'standard');
 }
 
 /**
- * Reply to an email, inserting the caller's HTML above the quoted original.
+ * Reply to an email with the composed HTML above the quoted original.
  *
- * `entryId` is Outlook for Mac's small integer message id (see readInboxEmails),
- * not a Windows MAPI EntryID; `storeId` is accepted for signature parity and
- * ignored, since macOS has no StoreID and `message id N` resolves against the
- * application rather than one folder.
- *
- * `reply to` builds the quoted body Outlook itself would have — the same thing
- * COM's Reply() returns — so the insertion point is the one place the two
- * platforms have to agree, and both look for WordSection1 then `<body>`.
- *
- * The `to` line is the reply's resolved recipient addresses rather than the
- * display-name string Windows reports: Outlook for Mac exposes recipients as
- * records, and an address is the more useful half to verify against.
+ * `reply to` builds the same quoted body COM's Reply() returns, so the insertion
+ * point is the one thing the platforms must agree on (see WORD_SECTION_ANCHOR).
+ * `to` comes back as the reply's resolved addresses: Outlook for Mac exposes
+ * recipients as records, and the address is the half worth checking.
  */
-export async function replyOutlookEmail(params: ReplyEmailParams): Promise<ReplyEmailResult> {
-    const id = macMessageId(params.entryId);
-    const insertHtml = await composeReplyHtml(params, {
-        readTemplateEmails,
-        readOutlookSignatureHtml,
-        listOutlookSignatures,
-    });
-    const acct = await resolveMacAccount(params.emailAccount);
-    const { prelude, action } = composeAction('theReply', params.sendImmediately, params.openDraftWindow);
-    const replyAll = params.replyAll ? 'reply to all true' : 'without reply to all';
-    const script = `tell application "Microsoft Outlook"
+export async function replyOutlookEmail(request: ReplyRequest): Promise<ReplyEmailResult> {
+    const id = macMessageId(request.email.entryId);
+    const acct = await resolveMacAccount(request.account);
+    const {prelude, action} = dispose('theReply', request.disposition);
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct, true)}
 ${messageLookupSnippet(id)}
     set repliedTo to ""
@@ -107,16 +84,14 @@ ${messageLookupSnippet(id)}
         set repliedTo to (address of origSender) as string
     end try
 ${prelude}
-    set theReply to reply to theMsg opening window false ${replyAll}
-    -- Neither of these is wrapped in a try, and both would read more defensively
-    -- if they were. A swallowed account assignment sends from whichever mailbox
-    -- Outlook considers default, and a swallowed insertion files a reply with the
-    -- caller's text missing — the two failures this package exists to prevent,
-    -- both of them invisible to the caller if tolerated here.
+    set theReply to reply to theMsg opening window false ${request.replyAll ? 'reply to all true' : 'without reply to all'}
+    -- Neither of these is wrapped in a try. A swallowed account assignment sends
+    -- from the default mailbox, and a swallowed insertion files a reply missing
+    -- its text — both invisible to the caller if tolerated here.
     set account of theReply to targetAcct
-    set content of theReply to my insertAboveQuoted(content of theReply, "${asEscape(insertHtml)}")
-    -- Read the outgoing fields BEFORE acting: sending moves the item, after which
-    -- the reference is no longer readable.
+    set content of theReply to my insertAboveQuoted(content of theReply, ${asString(request.html)})
+    -- Read the outgoing fields BEFORE acting: sending moves the item, and the
+    -- reference can't be read afterwards.
     set toList to {}
     try
         repeat with r in (every to recipient of theReply)
@@ -133,11 +108,7 @@ ${prelude}
     end try
 ${action}
     return my sanitize(toLine) & (character id 31) & my sanitize(subj) & (character id 31) & my sanitize(repliedTo)
-end tell`;
-    const parts = splitFields(await runOsaScript(script, 120000));
-    return {
-        to: field(parts, 0),
-        subject: field(parts, 1),
-        repliedToSender: field(parts, 2),
-    };
+end tell`, 'standard');
+    const parts = splitFields(raw);
+    return {to: field(parts, 0), subject: field(parts, 1), repliedToSender: field(parts, 2)};
 }
