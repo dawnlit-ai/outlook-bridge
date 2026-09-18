@@ -91,10 +91,22 @@ function profileDatabase(): string {
     // preferences, not beside the profiles — so with more than one the newest
     // wins, after the name Outlook itself creates and all but everyone keeps.
     const dbOf = (name: string) => path.join(PROFILES_DIR, name, 'Data', 'Outlook.sqlite');
+    // Outlook rewrites these files while it runs, and the whole directory sits
+    // behind macOS privacy control, so a database that existed a moment ago need
+    // not stat. An unreadable timestamp sorts last rather than throwing: this
+    // runs on nearly every macOS operation (resolveMacAccount), and a mailbox
+    // AppleScript could have named on its own must not be lost to it.
+    const mtimeOf = (db: string) => {
+        try {
+            return fs.statSync(db).mtimeMs;
+        } catch {
+            return -Infinity;
+        }
+    };
     const candidates = names
         .map(dbOf)
         .filter(db => fs.existsSync(db))
-        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+        .sort((a, b) => mtimeOf(b) - mtimeOf(a));
     const preferred = dbOf(DEFAULT_PROFILE);
     if (candidates.includes(preferred)) return preferred;
     return candidates[0] ?? '';
@@ -119,6 +131,17 @@ function query(database: string, sql: string): Promise<string> {
  * caller keeps whatever the account probe would have done.
  */
 export async function readProfileAccounts(): Promise<ProfileAccount[]> {
+    try {
+        return await readAccounts();
+    } catch {
+        // The module's contract, enforced at its one exit: this is an enrichment
+        // pass over what AppleScript already found, so nothing that happens in it
+        // is worth failing an operation that would otherwise have worked.
+        return [];
+    }
+}
+
+async function readAccounts(): Promise<ProfileAccount[]> {
     const database = profileDatabase();
     if (!database) return [];
     const termOf = new Map(Object.entries(ROOT_SPECIAL_TYPES).map(([term, type]) => [type, term]));
