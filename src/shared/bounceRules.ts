@@ -46,6 +46,23 @@ export const BOUNCE_DAEMON_NAMES: readonly string[] = [
 /** MessageClass prefix Exchange stamps on a non-delivery report. */
 export const NDR_MESSAGE_CLASS_PREFIX = 'REPORT.IPM.Note.NDR';
 
+/**
+ * The same structural signal as it arrives on the wire, for macOS: a bounce is
+ * a delivery-status notification (RFC 3464) and says so in its own headers.
+ * Both markers must be present — `multipart/report` also carries read receipts,
+ * and it is the report type that separates a delivery that FAILED from one that
+ * was acknowledged.
+ *
+ * Outlook for Mac publishes no MessageClass in its AppleScript dictionary, so
+ * this stands in for it: the message Exchange stamps REPORT.IPM.Note.NDR is the
+ * message that arrived carrying these headers.
+ *
+ * The macOS index tests these in AppleScript, whose `contains` is already
+ * case-insensitive, and returns one flag per message rather than the headers
+ * themselves (see mac/bounces.ts).
+ */
+export const DSN_HEADER_MARKERS: readonly string[] = ['multipart/report', 'delivery-status'];
+
 /** Address fragments never reported as a failed recipient — they are the bounce's own author. */
 export const DAEMON_SELF_ADDRESSES: readonly string[] = ['mailer-daemon', 'postmaster', 'mail-daemon'];
 
@@ -62,7 +79,7 @@ export const BOUNCE_REASON = {
 /**
  * Why this item is a bounce, or '' if it isn't.
  *
- * The structural signal (an NDR message class) outranks the sender
+ * The structural signal (a non-delivery report) outranks the sender
  * fingerprint, which outranks a subject phrase — so the reason reported is the
  * strongest one that applied, not whichever was tested first.
  */
@@ -70,7 +87,11 @@ export function bounceReason(item: {
     subject?: string;
     senderName?: string;
     senderEmail?: string;
-    /** True when the item's MessageClass marks it a non-delivery report (Windows only). */
+    /**
+     * True when the item is STRUCTURALLY a non-delivery report, whichever way
+     * its platform can see that: its MessageClass on Windows, the
+     * delivery-status headers it arrived with on macOS.
+     */
     isNonDeliveryReport?: boolean;
 }): string {
     if (item.isNonDeliveryReport) return BOUNCE_REASON.ndr;

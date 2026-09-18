@@ -432,6 +432,44 @@ test('cleanUndeliverableEmails classifies the bounce and mines its failed recipi
     assert.ok(result.matched[0].matchedReason, 'a match says why it matched');
 });
 
+// The index's sixth field is the structural bounce signal: whether the message's
+// own headers declare it a delivery-status notification. It is what stands in
+// for the MessageClass Windows reads, so these cover the parity it buys.
+test('a bounce only its headers give away is still caught', async () => {
+    // A localized subject and an unremarkable sender: no subject phrase and no
+    // daemon fingerprint matches, so before the header read this was a miss.
+    const result = await decode(() => outlook.cleanUndeliverableEmails(ACCOUNT, {dryRun: true}), [
+        row('1', 'Unzustellbar: Ratenanfrage', 'Mail Gateway', 'noreply@corp.example', '2026-08-01 09:30', 'true') +
+        row('2', 'An ordinary email', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', 'false'),
+        row('1', 'Delivery failed for bob@example.com'),
+    ]);
+    assert.equal(result.matchedCount, 1);
+    assert.equal(result.matched[0].entryId, '1', 'the ordinary email is left alone');
+    assert.equal(result.matched[0].matchedReason, 'Non-delivery report (NDR)');
+    assert.deepEqual(result.matched[0].failedRecipients, ['bob@example.com']);
+});
+
+test('the structural signal outranks the sender fingerprint, as it does on Windows', async () => {
+    // Both signals fire. Windows reports the NDR because the message class is
+    // tested first, so the same message must report the same reason here.
+    const result = await decode(() => outlook.cleanUndeliverableEmails(ACCOUNT, {dryRun: true}), [
+        row('1', 'Undeliverable: Rate request', 'Mail Delivery Subsystem', 'daemon@x.com', '2026-08-01 09:30', 'true'),
+        row('1', 'Delivery failed for bob@example.com'),
+    ]);
+    assert.equal(result.matched[0].matchedReason, 'Non-delivery report (NDR)');
+});
+
+test('a folder whose headers cannot be read still classifies on sender and subject', async () => {
+    // The header read is wrapped in a try, so an unreadable folder yields no
+    // flags at all — the cheaper rules must still find the bounce.
+    const result = await decode(() => outlook.cleanUndeliverableEmails(ACCOUNT, {dryRun: true}), [
+        row('1', 'Undeliverable: Rate request', 'Mail Delivery Subsystem', 'daemon@x.com', '2026-08-01 09:30'),
+        row('1', 'Delivery failed for bob@example.com'),
+    ]);
+    assert.equal(result.matchedCount, 1);
+    assert.equal(result.matched[0].matchedReason, 'From mail-delivery system');
+});
+
 test('readTemplateEmails reports a missing folder with the folders there are', async () => {
     const result = await decode(() => outlook.readTemplateEmails(ACCOUNT), [
         row('0', `Inbox${LS}Archive`),

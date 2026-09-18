@@ -5,9 +5,21 @@
 // AppleScript has no Restrict, so a folder is indexed with bulk property reads
 // and the SAME rules (shared/bounceRules) run here in TypeScript. Only matches
 // have their bodies read, which keeps either version affordable.
-import { asIdList, asInt, asRow, field, intField, runOsaScript, splitFields, splitList, splitRecords } from './run';
+import {
+    asIdList,
+    asInt,
+    asRow,
+    asString,
+    boolField,
+    field,
+    intField,
+    runOsaScript,
+    splitFields,
+    splitList,
+    splitRecords
+} from './run';
 import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet } from './scripts';
-import { bounceReason, failedRecipients } from '../shared/bounceRules';
+import { bounceReason, DSN_HEADER_MARKERS, failedRecipients } from '../shared/bounceRules';
 import type { CleanUndeliverableRequest, CollectBouncesRequest, SentGroupsRequest } from '../backend';
 import type { CleanUndeliverableResult, ItemFailure, SentRecipientGroup, UndeliverableEmail } from '../types';
 
@@ -17,12 +29,19 @@ interface IndexedMessage {
     senderName: string;
     senderEmail: string;
     receivedTime: string;
+    /** Whether the message's own headers declare it a delivery-status notification. */
+    isNonDeliveryReport: boolean;
 }
 
 /**
  * Index one well-known folder's messages within the window: everything the
  * classifier needs, in bulk reads — `sender of every message` hands back a list
- * of records AppleScript reads locally, so the whole index is four Apple events.
+ * of records AppleScript reads locally, so the whole index is five Apple events.
+ *
+ * The fifth is the header block, which carries the structural bounce signal (see
+ * DSN_HEADER_MARKERS). Headers are bulkier than the other properties, so they
+ * are tested in AppleScript and cross the boundary as one flag per message
+ * rather than as text.
  */
 async function indexFolder(emailAccount: string, folderTerm: string, daysBack: number): Promise<IndexedMessage[]> {
     const acct = await resolveMacAccount(emailAccount);
@@ -41,6 +60,17 @@ ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
     on error
         set sndList to {}
     end try
+    -- Outlook for Mac publishes no MessageClass, so the delivery-status headers
+    -- the report arrived with are the structural signal instead. A folder whose
+    -- headers can't be read leaves the list empty and every flag false, which
+    -- classifies on the sender and subject rules alone — the behaviour before
+    -- this read existed, never an error.
+    try
+        set hdrList to headers of every message of scanFolder
+    on error
+        set hdrList to {}
+    end try
+    set hasHeaders to ((count of hdrList) is (count of idList))
     set cutoff to (current date) - (${asInt(daysBack)} * days)
     set out to ""
     repeat with i from 1 to (count of idList)
@@ -58,7 +88,14 @@ ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
                     set sndName to (name of snd) as string
                 end try
             end if
-            set out to out & ${asRow(['(item i of idList as string)', '(item i of subjList)', 'sndName', 'sndAddr', 'my isoDate(stamp)'])}
+            set isNdr to false
+            if hasHeaders then
+                try
+                    set hdrText to (item i of hdrList) as string
+                    if ${DSN_HEADER_MARKERS.map(marker => `hdrText contains ${asString(marker)}`).join(' and ')} then set isNdr to true
+                end try
+            end if
+            set out to out & ${asRow(['(item i of idList as string)', '(item i of subjList)', 'sndName', 'sndAddr', 'my isoDate(stamp)', '(isNdr as string)'])}
         end if
     end repeat
     return out
@@ -71,6 +108,7 @@ end tell`, 'scan');
             senderName: field(parts, 2),
             senderEmail: field(parts, 3),
             receivedTime: field(parts, 4),
+            isNonDeliveryReport: boolField(parts, 5),
         };
     });
 }
@@ -123,8 +161,9 @@ async function collectBounces(indexed: readonly IndexedMessage[], accountAddress
 
 /**
  * Find bounce-backs in the Inbox and, unless dry-running, move each to Deleted
- * Items. macOS has no MessageClass, so the NDR-class signal Windows also uses is
- * unavailable — an Exchange NDR still matches on its "Undeliverable:" subject.
+ * Items. The same three signals Windows uses apply, in the same order: a report
+ * that declares itself one in its headers, then the sender fingerprint, then the
+ * subject phrases.
  */
 export async function cleanUndeliverableEmails(request: CleanUndeliverableRequest): Promise<CleanUndeliverableResult> {
     const matched = await collectBounces(await indexFolder(request.account, 'inbox', request.daysBack), request.account);
