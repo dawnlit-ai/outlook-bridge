@@ -326,6 +326,8 @@ $bodyRaw = ''
 try { $bodyRaw = [string]$item.Body } catch {}
 $storeId = ''
 try { $storeId = [string]$item.Parent.Store.StoreID } catch {}
+$folderPath = ''
+try { $folderPath = [string]$item.Parent.FolderPath } catch {}
 ${SENDER_SMTP_PS}
 $received = ''
 try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
@@ -338,6 +340,7 @@ ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
     receivedTime    = $received
     body            = ${BODY_B64_PS}
     attachmentNames = @($attachmentNames)
+    folderPath      = $folderPath
 })
 `, 'quick');
     const e = record(output);
@@ -350,6 +353,7 @@ ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
         receivedTime: str(e.receivedTime),
         body: base64Text(e.body),
         attachmentNames: strList(e.attachmentNames),
+        folderPath: str(e.folderPath),
     };
 }
 

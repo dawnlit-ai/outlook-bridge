@@ -302,6 +302,29 @@ test('readEmailBody splits the quoted original off the reply', async () => {
     assert.equal(result.attachmentCount, 1);
 });
 
+test('readSelectedEmail rebuilds the folder it sits in from its container chain', async () => {
+    const detail = row('1263', ' BL types ', 'Jo Doe', 'jo@x.com', '2026-08-17 09:00', '', 'body text');
+    const selected = await decode(() => outlook.readSelectedEmail(), [
+        detail + row(ACCOUNT, `Drafts${LS}[Gmail]`, '7'),
+    ]);
+    assert.equal(selected.subject, 'BL types');
+    assert.equal(selected.body, 'body text', 'the detail row keeps its body last');
+    assert.equal(selected.folderPath, '\\\\someone@example.com\\[Gmail]\\Drafts');
+
+    const profile = require('../dist/mac/profile.js');
+    const real = profile.readProfileAccounts;
+    // A mailbox with no account object: only its root folder's id names it.
+    profile.readProfileAccounts = async () => [{emailAccount: ACCOUNT, folderIds: {'root folder': 7}}];
+    try {
+        const byRoot = await decode(() => outlook.readSelectedEmail(), [detail + row('', 'Inbox', '7')]);
+        assert.equal(byRoot.folderPath, '\\\\someone@example.com\\Inbox');
+        const unnamed = await decode(() => outlook.readSelectedEmail(), [detail + row('', 'Inbox', '8')]);
+        assert.equal(unnamed.folderPath, '', 'a mailbox nothing names reports no path');
+    } finally {
+        profile.readProfileAccounts = real;
+    }
+});
+
 test('searchInboxByFilter rebuilds each folder path and drops what the details deny', async () => {
     const matches = await decode(
         () => outlook.searchInboxByFilter(ACCOUNT, {subjectLike: '*invoice*', requireAttachment: true}),
