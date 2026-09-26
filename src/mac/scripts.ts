@@ -117,6 +117,39 @@ export function macFolderPath(emailAccount: string, rootLabel: string, segments:
     return ['\\\\' + emailAccount, rootLabel, ...segments].join('\\');
 }
 
+/**
+ * Walk a folder's `container` chain to the top as the list `chainNames`,
+ * nearest first. Requires `theFolder`, and leaves `cur` on the folder the walk
+ * stopped at: the account's nameless root folder, when it got that far.
+ *
+ * The chain's last element is the folder directly under the account, and an
+ * account can't hold two top-level folders of one name, so comparing that name
+ * is exact.
+ */
+export function folderChainSnippet(indent: string): string {
+    return `${indent}set chainNames to {}
+${indent}set cur to theFolder
+${indent}set guard to 0
+${indent}repeat while cur is not missing value and guard < 25
+${indent}    -- The account's root folder has a name of missing value, and coercing
+${indent}    -- that yields the STRING "missing value" — so test before coercing.
+${indent}    set rawName to missing value
+${indent}    try
+${indent}        set rawName to name of cur
+${indent}    end try
+${indent}    if rawName is missing value then exit repeat
+${indent}    set nm to rawName as string
+${indent}    if nm is "" then exit repeat
+${indent}    set end of chainNames to nm
+${indent}    set nextUp to missing value
+${indent}    try
+${indent}        set nextUp to container of cur
+${indent}    end try
+${indent}    set cur to nextUp
+${indent}    set guard to guard + 1
+${indent}end repeat`;
+}
+
 /** The dictionary term for a root, or NOT_IMPLEMENTED naming what was asked. */
 export function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
     const term = MAC_ROOT_TERMS[ref.rootId];

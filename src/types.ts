@@ -425,6 +425,13 @@ export interface SelectedEmail extends EmailLocator {
     body: string;
     /** Not saved to disk — pass the ones you want to saveEmailAttachments. */
     attachmentNames: string[];
+    /**
+     * The folder it sits in, in the form the listings report
+     * (`\\team@example.com\[Gmail]\Drafts`) and so naming its mailbox. '' when
+     * Outlook can't say: an email opened from a file, or on macOS one whose
+     * mailbox neither AppleScript nor the profile database names.
+     */
+    folderPath: string;
 }
 
 export interface ReadEmailBodyOptions {

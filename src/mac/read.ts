@@ -19,10 +19,12 @@ import {
     splitRecords,
     summaryFields
 } from './run';
+import { readProfileAccounts } from './profile';
 import {
     accountLookupSnippet,
     dateProperty,
     firstRecipientSnippet,
+    folderChainSnippet,
     macFolderPath,
     macMessageId,
     mailScopeSnippet,
@@ -342,6 +344,10 @@ end tell`, 'scan');
 /**
  * The email currently selected — or open — in Outlook. `current messages`
  * covers both cases the Windows reader handles separately.
+ *
+ * Where it sits comes back as a second record, so the detail row keeps its body
+ * last. A mailbox with no account object answers `account of` with missing
+ * value; its root folder's id is then looked up in the profile database.
  */
 export async function readSelectedEmail(): Promise<SelectedEmail> {
     const records = splitRecords(await runOsaScript(`tell application "Microsoft Outlook"
@@ -352,10 +358,30 @@ export async function readSelectedEmail(): Promise<SelectedEmail> {
     if (count of sel) is 0 then error ${asString(`${failureTag('NOT_FOUND', 'email')}No email is selected in Outlook. Select or open an email, then try again.`)}
     set theMsg to item 1 of sel
 ${messageDetailSnippet(true)}
-    return ${asRow(messageDetailFields(true))}
+    set acctAddr to ""
+    try
+        set rawAddr to email address of (account of theMsg)
+        if rawAddr is not missing value then set acctAddr to rawAddr as string
+    end try
+    set chainNames to {}
+    set rootId to ""
+    set theFolder to missing value
+    try
+        set theFolder to folder of theMsg
+    end try
+    if theFolder is not missing value then
+${folderChainSnippet('        ')}
+        try
+            set rootId to (id of cur) as string
+        end try
+    end if
+    return ${asRow(messageDetailFields(true))} & ${asRow(['acctAddr', 'my sanitizeList(chainNames)', 'rootId'])}
 end tell`, 'quick'));
     if (records.length === 0) throw new NotFoundError('email', 'Outlook reported no selected email.');
     const parts = splitFields(records[0]);
+    const where = splitFields(records[1] ?? '');
+    const chain = splitList(field(where, 1)).reverse();
+    const account = field(where, 0) || (chain.length ? await accountByRootFolder(field(where, 2)) : '');
     return {
         entryId: field(parts, MessageDetail.id),
         storeId: '',
@@ -365,7 +391,15 @@ end tell`, 'quick'));
         receivedTime: field(parts, MessageDetail.receivedTime),
         body: field(parts, MessageDetail.body),
         attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
+        folderPath: account && chain.length ? macFolderPath(account, chain[0], chain.slice(1)) : '',
     };
+}
+
+/** The address of the account whose root folder has this id, per the profile database; '' if none. */
+async function accountByRootFolder(rootId: string): Promise<string> {
+    if (!/^\d+$/.test(rootId)) return '';
+    const id = Number(rootId);
+    return (await readProfileAccounts()).find(a => a.folderIds['root folder'] === id)?.emailAccount ?? '';
 }
 
 /** Open an email in Outlook and bring Outlook forward. */
