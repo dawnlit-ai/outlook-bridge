@@ -528,6 +528,25 @@ test('replyOutlookEmail reports the addresses the reply actually resolved to', a
     });
 });
 
+test('sendOutlookEmail reports the id of the draft it filed, and none for a window', async () => {
+    const base = {emailAccount: ACCOUNT, to: 'a@example.com', subject: 'Rates', htmlBody: '<p>x</p>'};
+    assert.deepEqual(await decode(() => outlook.sendOutlookEmail({...base, openDraftWindow: false}), ['1263']), {
+        draftEntryId: '1263',
+    });
+    assert.deepEqual(await decode(() => outlook.sendOutlookEmail(base), ['']), {draftEntryId: ''});
+});
+
+test('a filed draft is named by the id Drafts gained, never the one it had before the move', async () => {
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, to: 'a@example.com', subject: 'Rates', htmlBody: '<p>x</p>', openDraftWindow: false,
+    }));
+    if (error) throw error;
+    const [script] = scripts;
+    assert.match(script, /draftIdsBefore does not contain/);
+    assert.doesNotMatch(script, /id of newMsg/, 'moving rewrites the id, so the one read before it is stale');
+    assert.match(script, /return filedDraftId/);
+});
+
 test('saveEmailAttachments never overwrites, and refuses a name the email does not carry', async () => {
     const destDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-mac-att-'));
     fs.writeFileSync(path.join(destDir, 'inv.pdf'), 'already here');

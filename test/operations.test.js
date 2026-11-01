@@ -243,6 +243,15 @@ test('sendOutlookEmail maps the two flags onto one disposition', async () => {
     assert.equal(last('sendOutlookEmail').args[0].disposition, 'send');
 });
 
+test("sendOutlookEmail hands back the backend's draft id", async () => {
+    const {outlook} = setup({
+        sendOutlookEmail: request => ({draftEntryId: request.disposition === 'save' ? 'D1' : ''}),
+    });
+    const base = {emailAccount: ACCOUNT, to: 'a@example.com', subject: 's', htmlBody: 'b'};
+    assert.deepEqual(await outlook.sendOutlookEmail({...base, openDraftWindow: false}), {draftEntryId: 'D1'});
+    assert.deepEqual(await outlook.sendOutlookEmail(base), {draftEntryId: ''});
+});
+
 test('sendOutlookEmail resolves attachments to absolute paths and refuses missing ones', async () => {
     const {outlook, last} = setup();
     const file = tempFileWith('report.pdf');

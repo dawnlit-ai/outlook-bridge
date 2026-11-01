@@ -3,28 +3,58 @@ import { asString, field, runOsaScript, splitFields } from './run';
 import { accountLookupSnippet, macMessageId, messageLookupSnippet, resolveMacAccount } from './scripts';
 import { parseRecipient } from '../shared/args';
 import type { Disposition, ReplyRequest, SendRequest } from '../backend';
-import type { ReplyEmailResult } from '../types';
+import type { ReplyEmailResult, SendEmailResult } from '../types';
 
 /**
- * What to do with a composed message.
+ * What to do with a composed message. A filed draft leaves its id in
+ * `filedDraftId` ("" for the other dispositions, or when it can't be told).
  *
  * A new outgoing message lands in Temporary Items, not Drafts — `open` only
  * shows it — so a windowless draft is moved into Drafts explicitly. `move`
  * reports success even where it silently does nothing, so the folder is
- * confirmed to have grown rather than report a draft that doesn't exist.
+ * confirmed to hold a message it didn't before rather than report a draft that
+ * doesn't exist.
+ *
+ * Moving rewrites a message's id, so the draft's id is the one Drafts gained.
+ * Another draft can land in the same moment — an autosave of a compose window,
+ * a sync — and then the subject tells them apart; a tie is left unnamed rather
+ * than guessed, since a caller that keeps the id may later send by it.
  */
 function dispose(variable: string, disposition: Disposition): { prelude: string; action: string } {
     switch (disposition) {
         case 'send':
-            return {prelude: '', action: `    send ${variable}`};
+            return {prelude: '    set filedDraftId to ""', action: `    send ${variable}`};
         case 'display':
-            return {prelude: '', action: `    open ${variable}`};
+            return {prelude: '    set filedDraftId to ""', action: `    open ${variable}`};
         case 'save':
             return {
-                prelude: `    set draftsFolder to drafts of targetAcct
-    set draftsBefore to count of messages of draftsFolder`,
-                action: `    move ${variable} to draftsFolder
-    if (count of messages of draftsFolder) is not greater than draftsBefore then error "Outlook did not file the draft in the Drafts folder."`,
+                prelude: `    set filedDraftId to ""
+    set draftsFolder to drafts of targetAcct
+    set draftIdsBefore to id of every message of draftsFolder`,
+                action: `    set filedSubject to ""
+    try
+        set filedSubject to (subject of ${variable}) as string
+    end try
+    move ${variable} to draftsFolder
+    -- Bound before the loop, so it walks a local list rather than asking
+    -- Outlook for each item in turn.
+    set draftIdsAfter to id of every message of draftsFolder
+    set newIds to {}
+    repeat with anId in draftIdsAfter
+        if draftIdsBefore does not contain (contents of anId) then set end of newIds to (contents of anId)
+    end repeat
+    if (count of newIds) is 0 then error "Outlook did not file the draft in the Drafts folder."
+    if (count of newIds) is 1 then
+        set filedDraftId to (item 1 of newIds) as string
+    else
+        set sameSubject to {}
+        repeat with anId in newIds
+            try
+                if ((subject of message id (contents of anId)) as string) is filedSubject then set end of sameSubject to (contents of anId)
+            end try
+        end repeat
+        if (count of sameSubject) is 1 then set filedDraftId to (item 1 of sameSubject) as string
+    end if`,
             };
     }
 }
@@ -40,8 +70,8 @@ function recipientLines(kind: 'to' | 'cc' | 'bcc', entries: readonly string[]): 
     });
 }
 
-/** Send, display or file a new email. */
-export async function sendOutlookEmail(request: SendRequest): Promise<void> {
+/** Send, display or file a new email; a filed draft reports its id. */
+export async function sendOutlookEmail(request: SendRequest): Promise<SendEmailResult> {
     const acct = await resolveMacAccount(request.account);
     const {prelude, action} = dispose('newMsg', request.disposition);
     const lines = [
@@ -50,7 +80,7 @@ export async function sendOutlookEmail(request: SendRequest): Promise<void> {
         ...recipientLines('bcc', request.bcc),
         ...request.attachments.map(file => `    make new attachment at newMsg with properties {file:POSIX file ${asString(file)}}`),
     ];
-    await runOsaScript(`
+    const raw = await runOsaScript(`
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct, true)}
 ${prelude}
@@ -58,7 +88,9 @@ ${prelude}
 ${lines.join('\n')}
     set account of newMsg to targetAcct
 ${action}
+    return filedDraftId
 end tell`, 'standard');
+    return {draftEntryId: raw.trim()};
 }
 
 /**

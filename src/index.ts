@@ -78,6 +78,7 @@ export type {
     EmailRef,
     Recipients,
     SendEmailParams,
+    SendEmailResult,
     ReplyEmailParams,
     ReplyEmailResult,
     ItemFailure,

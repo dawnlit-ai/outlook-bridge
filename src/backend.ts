@@ -24,6 +24,7 @@ import type {
     SaveTemplateResult,
     SelectedEmail,
     SendDraftsResult,
+    SendEmailResult,
     SentRecipientGroup,
     TemplateFolderResult,
 } from './types';
@@ -173,7 +174,7 @@ export interface EditTemplateRequest {
 export interface Backend {
     getOutlookAccounts(): Promise<string[]>;
 
-    sendOutlookEmail(request: SendRequest): Promise<void>;
+    sendOutlookEmail(request: SendRequest): Promise<SendEmailResult>;
 
     replyOutlookEmail(request: ReplyRequest): Promise<ReplyEmailResult>;
 
