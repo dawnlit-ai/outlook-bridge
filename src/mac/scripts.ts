@@ -295,7 +295,7 @@ ${indent}end try` : '');
 
 /** The fields `messageDetailSnippet` fills, in row order — see `MessageDetail`. */
 export function messageDetailFields(withBody = false): string[] {
-    const fields = ['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'recvd', 'my sanitizeList(attNames)'];
+    const fields = ['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'recvd', 'my sanitizePositionalList(attNames)'];
     if (withBody) fields.push('bodyText');
     return fields;
 }

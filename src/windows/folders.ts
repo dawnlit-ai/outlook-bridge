@@ -1,7 +1,7 @@
 // Listing the folders under an Inbox, and filing mail into one.
 import { psArray, psInt, runPowerShellJson } from './run';
 import { accountScript, DELIVERY_STORE_PS, mailScopeScript } from './scripts';
-import { bool, itemFailures, num, record, str, toArray } from '../shared/json';
+import { bool, itemFailurePs, itemFailures, num, record, str, toArray } from '../shared/json';
 import { FolderId } from '../mail';
 import type { ListFoldersRequest, MoveRequest } from '../backend';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
@@ -60,7 +60,7 @@ foreach ($id in ${psArray(request.entryIds)}) {
         [void]$it.Move($scope)
         $moved++
     } catch {
-        $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
+        ${itemFailurePs('$id')}
     }
 }
 ConvertTo-Json -Depth 3 -InputObject ([PSCustomObject]@{

@@ -5,7 +5,7 @@
 // and the second run saves what matched. That keeps one definition of "does this
 // name match", one wording for the error, and one file-naming rule.
 import fs from 'fs';
-import { asInt, asRow, asString, field, runOsaScript, splitList, summaryFields } from './run';
+import { asInt, asRow, asString, field, runOsaScript, splitPositionalList, summaryFields } from './run';
 import {
     macMessageId,
     MessageDetail,
@@ -41,7 +41,7 @@ end tell`, 'quick'));
         senderEmail: field(parts, MessageDetail.senderEmail),
         receivedTime: field(parts, MessageDetail.receivedTime),
     };
-    const attachmentNames = splitList(field(parts, MessageDetail.attachmentNames));
+    const attachmentNames = splitPositionalList(field(parts, MessageDetail.attachmentNames));
 
     const picks = request.fileNames.map(fileName => {
         const index = findAttachmentIndex(attachmentNames, fileName);

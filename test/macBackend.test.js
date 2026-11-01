@@ -33,6 +33,11 @@ function row(...fields) {
     return fields.join(FS) + RS;
 }
 
+/** A list field written by sanitizePositionalList, as an email's attachment names are. */
+function names(...items) {
+    return items.map(item => item + LS).join('');
+}
+
 /** Drive an operation with canned runner output, returning its result. */
 async function decode(operation, responses) {
     let value;
@@ -149,7 +154,7 @@ function probeCases() {
         },
         saveEmailAttachments: {
             run: () => outlook.saveEmailAttachments('1263', [PROBE], {destDir}),
-            responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', PROBE)],
+            responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', names(PROBE))],
         },
         cleanUndeliverableEmails: {
             run: () => outlook.cleanUndeliverableEmails(PROBE, {dryRun: false}),
@@ -264,7 +269,7 @@ test('readInboxEmails pairs the index with the details and keeps the folder path
     const mail = await decode(() => outlook.readInboxEmails(ACCOUNT, {folder: 'Inbox\\Clients'}), [
         '1263\t2026-08-01 09:30\n1264\t2026-08-02 11:00\n',
         row('1264', ' Later ', 'Al Roe', 'al@x.com', 'preview B', '') +
-        row('1263', ' Subject A ', 'Jo Doe', 'jo@x.com', 'preview A', `a.pdf${LS}b.pdf`),
+        row('1263', ' Subject A ', 'Jo Doe', 'jo@x.com', 'preview A', names('a.pdf', 'b.pdf')),
     ]);
     // Newest first, whatever order the index and the details came back in.
     assert.deepEqual(mail.map(m => m.entryId), ['1264', '1263']);
@@ -293,7 +298,7 @@ test('readInboxEmails takes the newest, not the first, when the limit bites', as
 test('readEmailBody splits the quoted original off the reply', async () => {
     const body = 'Thanks, noted.\n\nOn 1 Aug 2026, Jo wrote:\n> the original';
     const result = await decode(() => outlook.readEmailBody('1263', {includeQuoted: true}), [
-        row('1263', ' Re: Rates ', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', 'a.pdf', body),
+        row('1263', ' Re: Rates ', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', names('a.pdf'), body),
     ]);
     assert.equal(result.subject, 'Re: Rates');
     assert.equal(result.body, 'Thanks, noted.');
@@ -333,7 +338,7 @@ test('searchInboxByFilter rebuilds each folder path and drops what the details d
             row('INBOX', '1264', 'Invoice 43', '2026-08-02 09:30') +
             row('INBOX', '1265', 'Unrelated', '2026-08-02 09:30'),
             // 1264 comes back with no attachment, so requireAttachment drops it.
-            row('1263', 'Jo Doe', 'jo@x.com', 'inv.pdf', 'body text') +
+            row('1263', 'Jo Doe', 'jo@x.com', names('inv.pdf'), 'body text') +
             row('1264', 'Al Roe', 'al@x.com', '', 'body text'),
         ],
     );
@@ -361,6 +366,21 @@ test('listOutlookDrafts sorts newest first and reports truncation against the wh
     assert.deepEqual(older.drafts[0].toEmails, ['jo@x.com']);
 });
 
+test('a draft set to send from another account is neither listed nor sent by sendAllDrafts', async () => {
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], async () => {
+        await outlook.listOutlookDrafts(ACCOUNT);
+        await outlook.sendAllDrafts(ACCOUNT);
+    }, ['', row('0')]);
+    if (error) throw error;
+    const [list, sendAll] = scripts;
+    for (const script of scripts) {
+        assert.match(script, /set boundElsewhere to \(boundTo is not "" and boundTo is not "someone@example\.com"\)/);
+    }
+    assert.match(list, /if not boundElsewhere then set out to out &/);
+    // Skipped, as Windows skips it, rather than sent from the account it names.
+    assert.match(sendAll, /if not boundElsewhere then\s+try\s+set subj[^]*?send theMsg[^]*?end if/);
+});
+
 test('a batch reports the summary and the per-item failures apart', async () => {
     const sent = await decode(() => outlook.sendDrafts(ACCOUNT, ['1263', '1264']), [
         row('1') + row('1264', 'Stuck', 'draft is not bound to this account'),
@@ -377,6 +397,23 @@ test('a batch reports the summary and the per-item failures apart', async () => 
         moved: 2,
         failed: [],
     });
+});
+
+test('each move is confirmed on its own, so a silent no-op fails as that item', async () => {
+    let moved;
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], async () => {
+        moved = await outlook.moveOutlookEmails(ACCOUNT, ['1263', '1264'], 'Archive');
+    }, [row('1', 'false') + row('1264', 'Stuck', "Outlook reported the move but 'Archive' did not grow - not filed")]);
+    if (error) throw error;
+    const [script] = scripts;
+    const start = script.indexOf('repeat with theId');
+    const end = script.indexOf('end repeat', start);
+    const loop = script.slice(start, end);
+    assert.match(loop, /if fromId is not scopeId then/, 'mail already in the folder is not moved again');
+    assert.match(loop, /set countBefore to count of messages of scopeFolder\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then error/);
+    assert.doesNotMatch(script.slice(end), /did not grow/, 'no batch-wide check is left to discard the per-item results');
+    assert.equal(moved.moved, 1);
+    assert.deepEqual(moved.failed.map(f => f.entryId), ['1264']);
 });
 
 test('an id macOS cannot use is reported beside the ids that worked', async () => {
@@ -503,7 +540,7 @@ test('readTemplateEmails reports a missing folder with the folders there are', a
 });
 
 test('readTemplateEmails strips embedded images and reports the markers a template uses', async () => {
-    const html = '<html><body><p>Hi {{NAME}}</p><img src="cid:logo123" width="10"><p>[[QUOTE]]body[[/QUOTE]]</p></body></html>';
+    const html = '<html><body><p>Hi {{NAME}}</p><img src="cid:logo123" width="10"><IMG SRC="CID:seal"><p>[[QUOTE]]body[[/QUOTE]]</p></body></html>';
     const result = await decode(() => outlook.readTemplateEmails(ACCOUNT, {subject: 'Rate reply'}), [
         row('1', 'Templates') + row('10', ' Rate reply ', '2026-08-01 09:30') + row('11', 'Other', '2026-08-02 09:30'),
         row('10', html),
@@ -511,7 +548,7 @@ test('readTemplateEmails strips embedded images and reports the markers a templa
     assert.equal(result.folderFound, true);
     assert.equal(result.folderPath, '\\\\someone@example.com\\Templates');
     assert.deepEqual(result.templates.map(t => t.subject), ['Rate reply'], 'the subject filter picks one');
-    assert.doesNotMatch(result.templates[0].htmlBody, /cid:/, 'an embedded image would show as a broken placeholder');
+    assert.doesNotMatch(result.templates[0].htmlBody, /cid:/i, 'an embedded image would show as a broken placeholder');
     assert.deepEqual(result.templates[0].placeholders, ['NAME']);
     assert.deepEqual(result.templates[0].sections, ['QUOTE']);
 });
@@ -550,7 +587,7 @@ test('a filed draft is named by the id Drafts gained, never the one it had befor
 test('saveEmailAttachments never overwrites, and refuses a name the email does not carry', async () => {
     const destDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-mac-att-'));
     fs.writeFileSync(path.join(destDir, 'inv.pdf'), 'already here');
-    const detail = row('1263', 'Subject', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', `inv.pdf${LS}second.pdf`);
+    const detail = row('1263', 'Subject', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', names('inv.pdf', 'second.pdf'));
 
     const saved = await decode(() => outlook.saveEmailAttachments('1263', ['inv.pdf'], {destDir}), [detail, '']);
     // The counter goes before the extension, so the file stays openable.
@@ -569,6 +606,28 @@ test('saveEmailAttachments never overwrites, and refuses a name the email does n
         },
     );
     fs.rmSync(destDir, {recursive: true, force: true});
+});
+
+test('an unnamed attachment keeps its place, so the attachment saved is the one named', async () => {
+    const destDir = tempDir('ob-mac-att-');
+    const detail = row('1263', 'Subject', 'Jo Doe', 'jo@x.com', '2026-08-01 09:30', names('', 'invoice.pdf'));
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'],
+        () => outlook.saveEmailAttachments('1263', ['invoice.pdf'], {destDir}), [detail, '']);
+    if (error) throw error;
+    assert.match(scripts[1], /save \(item 2 of attachments of theMsg\)/, 'item 1 is the unnamed inline image');
+
+    const body = await decode(() => outlook.readEmailBody('1263'), [detail]);
+    assert.deepEqual(body.attachmentNames, ['', 'invoice.pdf']);
+    assert.equal(body.attachmentCount, 2, 'an unnamed attachment still counts, as on Windows');
+});
+
+test('a positional list keeps empty elements, and an empty list stays empty, under osascript', {skip: needsOsascript}, () => {
+    const file = path.join(tempDir('ob-osa-list-'), 'list.applescript');
+    for (const items of [[], [''], ['', 'invoice.pdf'], ['a.pdf', 'b.pdf']]) {
+        fs.writeFileSync(file, `${macRun.AS_HANDLERS}\nreturn my sanitizePositionalList({${items.map(macRun.asString).join(', ')}})`, 'utf8');
+        const out = execFileSync('osascript', [file], {encoding: 'utf8'}).replace(/\n$/, '');
+        assert.deepEqual(macRun.splitPositionalList(out), items);
+    }
 });
 
 test('a framed field carrying the separators still decodes into one record', () => {

@@ -16,6 +16,12 @@ const {accountScript, itemLookupScript, mailScopeScript} = require('../dist/wind
 const {buildScript, psEscape, psInt} = require('../dist/windows/run.js');
 const {mailFolderRef} = require('../dist/mail.js');
 const {errorFromTaggedMessage} = require('../dist/errors.js');
+const {itemFailurePs, itemFailures} = require('../dist/shared/json.js');
+const {EMBEDDED_IMAGE_SOURCE} = require('../dist/shared/templateLimits.js');
+const windowsRun = require('../dist/windows/run.js');
+const {windowsBackend} = require('../dist/windows/index.js');
+const {createOperations} = require('../dist/bridge.js');
+const {captureScripts} = require('./support.js');
 const macScripts = require('../dist/mac/scripts.js');
 const macRun = require('../dist/mac/run.js');
 
@@ -60,6 +66,30 @@ test('caller text only ever appears in a single-quoted literal', () => {
     const lookup = itemLookupScript({entryId: "$(evil)'", storeId: 'S'});
     assert.match(lookup, /\$lookupId = '\$\(evil\)'''/);
     assert.doesNotMatch(lookup, /"[^"]*\$\(evil\)/, 'never inside a double-quoted string');
+});
+
+test('the Windows failure row names exactly the fields itemFailures reads', () => {
+    const written = [...itemFailurePs('$id').matchAll(/(\w+) = /g)].map(m => m[1]);
+    assert.deepEqual(written, ['entryId', 'subject', 'error']);
+    assert.deepEqual(Object.keys(itemFailures([{}])[0]), written);
+});
+
+/** The one PowerShell script a Windows operation generates. */
+async function windowsScript(operation) {
+    const {scripts} = await captureScripts(windowsRun, ['runPowerShellJson'], () => operation(createOperations(windowsBackend)));
+    return scripts[0];
+}
+
+test('a Windows delete refuses an id that resolved outside the account, before anything is deleted', async () => {
+    const script = await windowsScript(outlook => outlook.deleteOutlookEmails('a@x.com', ['AB'], {allowProtected: true}));
+    const guard = script.indexOf('if (-not (Test-InAccountStore $parent)) { throw');
+    assert.ok(guard > 0, 'the store check is applied to each item');
+    assert.ok(guard < script.indexOf('$it.Delete()'), 'and before the delete, even with allowProtected');
+});
+
+test('a Windows template body loses its embedded images whatever their case, as on macOS', async () => {
+    const script = await windowsScript(outlook => outlook.readTemplateEmails('a@x.com', {includeBody: true}));
+    assert.ok(script.includes(`[regex]::Replace($html, '${EMBEDDED_IMAGE_SOURCE}', '', [Text.RegularExpressions.RegexOptions]::IgnoreCase)`));
 });
 
 test('a bare well-known root needs no walk', () => {

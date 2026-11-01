@@ -15,7 +15,11 @@ const PROTECTED_FOLDER_IDS = [FolderId.Inbox, FolderId.SentMail];
  *
  * This is the one operation that can reach received mail, and an entry id is an
  * unsafe key for it: a stale or wrong id can resolve to a DIFFERENT message.
- * Three things hold the line:
+ * Four things hold the line:
+ *  - An id that resolves outside this account's store is refused. The bare
+ *    lookup falls back to the default store, and the Inbox/Sent check below
+ *    only knows this account's folders, so another mailbox's received mail
+ *    would otherwise pass it.
  *  - Inbox and Sent Items are refused, INCLUDING their subfolders (a filed
  *    folder is still received mail), unless `allowProtected`.
  *  - `dryRun` resolves and reports without deleting, so the exact subjects and
@@ -45,6 +49,14 @@ function Test-UnderProtectedFolder($folder) {
     }
     return $false
 }
+function Test-InAccountStore($folder) {
+    $folderStoreId = $null
+    try { $folderStoreId = [string]$folder.StoreID } catch {}
+    if (-not $folderStoreId) { return $false }
+    if ($folderStoreId -ieq $storeId) { return $true }
+    # One store can be named by two id strings; MAPI decides whether they match.
+    try { return [bool]$ns.CompareEntryIDs($folderStoreId, $storeId) } catch { return $false }
+}
 $items = @()
 foreach ($id in ${psArray(request.entryIds)}) {
     $subject = ''
@@ -59,6 +71,7 @@ foreach ($id in ${psArray(request.entryIds)}) {
         try { $parent = $it.Parent } catch {}
         if ($parent -eq $null) { throw "item has no parent folder - refusing to delete" }
         try { $folderPath = [string]$parent.FolderPath } catch {}
+        if (-not (Test-InAccountStore $parent)) { throw "item is in another mailbox, not this account - refusing to delete" }
         if ((Test-UnderProtectedFolder $parent) -and -not $allowProtected) {
             $items += [PSCustomObject]@{ entryId = $id; subject = $subject; folderPath = $folderPath; status = 'refused'; reason = $protectedReason }
         } elseif ($dryRun) {

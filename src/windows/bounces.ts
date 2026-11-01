@@ -2,7 +2,7 @@
 // addresses that failed.
 import { psArray, psBool, psInt, psString, runPowerShellJson } from './run';
 import { accountScript, cutoffScript, DELIVERY_STORE_PS, itemsSinceScript, NAMED_STORE_PS } from './scripts';
-import { itemFailures, num, record, str, strList, toArray } from '../shared/json';
+import { itemFailurePs, itemFailures, num, record, str, strList, toArray } from '../shared/json';
 import {
     BODY_ADDRESS_PATTERN,
     BOUNCE_DAEMON_ADDRESSES,
@@ -119,7 +119,7 @@ if (-not $dryRun) {
         try { $entryId = [string]$m.EntryID } catch {}
         try { $subject = [string]$m.Subject } catch {}
         try { $m.Delete(); $deleted++ }
-        catch { $failed += [PSCustomObject]@{ entryId = $entryId; subject = $subject; error = $_.Exception.Message } }
+        catch { ${itemFailurePs('$entryId')} }
     }
 }
 ConvertTo-Json -Depth 4 -InputObject ([PSCustomObject]@{

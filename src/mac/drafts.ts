@@ -81,7 +81,8 @@ ${preview}
         try
             set modAt to my isoDate(modification date of theMsg)
         end try
-        set out to out & ${asRow(['(id of theMsg as string)', 'subj', 'my joinList(toNames, ", ")', 'my sanitizeList(toAddrs)', 'bodyText', '(attCount as string)', 'modAt'])}
+${boundElsewhereSnippet(request.account, '        ')}
+        if not boundElsewhere then set out to out & ${asRow(['(id of theMsg as string)', 'subj', 'my joinList(toNames, ", ")', 'my sanitizeList(toAddrs)', 'bodyText', '(attCount as string)', 'modAt'])}
     end repeat
     return out
 end tell`, 'standard');
@@ -111,6 +112,20 @@ end tell`, 'standard');
 }
 
 /**
+ * Set `boundElsewhere` to whether `theMsg`, a message in the account's Drafts
+ * folder, is set to send from some OTHER account. An unbound draft there is the
+ * account's own. Listing, sending all and the per-id guard all apply this one
+ * rule, as Windows' Test-DraftMatches is applied to all three.
+ */
+function boundElsewhereSnippet(emailAccount: string, indent: string): string {
+    return `${indent}set boundTo to ""
+${indent}try
+${indent}    set boundTo to (email address of (account of theMsg)) as string
+${indent}end try
+${indent}set boundElsewhere to (boundTo is not "" and boundTo is not ${asString(emailAccount)})`;
+}
+
+/**
  * The AppleScript that proves `theMsg` is one of this account's drafts before
  * `verb` happens to it: it sits in the account's Drafts folder, and it is bound
  * to this account or to none.
@@ -121,11 +136,8 @@ function ownDraftGuard(emailAccount: string, verb: 'send' | 'delete'): string {
                 set inFolder to (name of (folder of theMsg)) as string
             end try
             if inFolder is not draftsName or draftIds does not contain (id of theMsg) then error "item is not in this account's Drafts folder - refusing to ${verb}"
-            set boundTo to ""
-            try
-                set boundTo to (email address of (account of theMsg)) as string
-            end try
-            if boundTo is not "" and boundTo is not ${asString(emailAccount)} then error "draft is not bound to this account - refusing to ${verb}"`;
+${boundElsewhereSnippet(emailAccount, '            ')}
+            if boundElsewhere then error "draft is not bound to this account - refusing to ${verb}"`;
 }
 
 /** Run `verb` over named drafts of the account, each proved to be its own first. */
@@ -185,7 +197,9 @@ export async function deleteOutlookDrafts(request: EntryIdsRequest): Promise<Del
 /**
  * Send every draft belonging to the account. The ids are snapshotted before the
  * first send: sending moves an item out of Drafts, and mutating the collection
- * mid-enumeration would skip every other one.
+ * mid-enumeration would skip every other one. A draft in the folder that is set
+ * to send from another account is not this account's, so it is skipped, as on
+ * Windows, rather than sent from that account.
  */
 export async function sendAllDrafts(request: AccountRequest): Promise<SendDraftsResult> {
     const acct = await resolveMacAccount(request.account);
@@ -203,11 +217,14 @@ ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
                 set theMsg to message id theId
             end try
             if theMsg is missing value then error "draft is no longer in the Drafts folder"
-            try
-                set subj to (subject of theMsg) as string
-            end try
-            send theMsg
-            set sentCount to sentCount + 1
+${boundElsewhereSnippet(request.account, '            ')}
+            if not boundElsewhere then
+                try
+                    set subj to (subject of theMsg) as string
+                end try
+                send theMsg
+                set sentCount to sentCount + 1
+            end if
         on error errText
             set out to out & ${ITEM_FAILURE_ROW}
         end try

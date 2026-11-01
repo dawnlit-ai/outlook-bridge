@@ -16,6 +16,7 @@ import {
     runOsaScript,
     splitFields,
     splitList,
+    splitPositionalList,
     splitRecords,
     summaryFields,
 } from './run';
@@ -112,7 +113,7 @@ ${preview}
             try
                 set attNames to name of every attachment of theMsg
             end try
-            set out to out & ${asRow(['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'bodyText', 'my sanitizeList(attNames)'])}
+            set out to out & ${asRow(['(id of theMsg as string)', 'subj', 'sndName', 'sndAddr', 'bodyText', 'my sanitizePositionalList(attNames)'])}
         end if
     end repeat
     return out
@@ -122,7 +123,7 @@ end tell`, 'standard');
     return splitRecords(raw).map(record => {
         const parts = splitFields(record);
         const id = field(parts, 0);
-        const attachmentNames = splitList(field(parts, 5));
+        const attachmentNames = splitPositionalList(field(parts, 5));
         return {
             entryId: id,
             storeId: '',
@@ -156,7 +157,7 @@ end tell`, 'quick'));
         senderEmail: field(parts, MessageDetail.senderEmail),
         receivedTime: field(parts, MessageDetail.receivedTime),
         body: field(parts, MessageDetail.body),
-        attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
+        attachmentNames: splitPositionalList(field(parts, MessageDetail.attachmentNames)),
     };
 }
 
@@ -299,7 +300,7 @@ ${senderSnippet('            ')}
                 set attNames to name of every attachment of theMsg
             end try
 ${body}
-            set out to out & ${asRow(['(id of theMsg as string)', 'sndName', 'sndAddr', 'my sanitizeList(attNames)', 'bodyText'])}
+            set out to out & ${asRow(['(id of theMsg as string)', 'sndName', 'sndAddr', 'my sanitizePositionalList(attNames)', 'bodyText'])}
         end if
     end repeat
     return out
@@ -309,7 +310,7 @@ end tell`, 'scan');
         const detail = {
             senderName: field(parts, 1),
             senderEmail: field(parts, 2),
-            attachmentNames: splitList(field(parts, 3)),
+            attachmentNames: splitPositionalList(field(parts, 3)),
             body: field(parts, 4),
         };
         return [field(parts, 0), detail] as const;
@@ -385,7 +386,7 @@ end tell`, 'quick'));
         senderEmail: field(parts, MessageDetail.senderEmail),
         receivedTime: field(parts, MessageDetail.receivedTime),
         body: field(parts, MessageDetail.body),
-        attachmentNames: splitList(field(parts, MessageDetail.attachmentNames)),
+        attachmentNames: splitPositionalList(field(parts, MessageDetail.attachmentNames)),
         folderPath: account && chain.length ? macFolderPath(account, chain[0], chain.slice(1)) : '',
     };
 }
