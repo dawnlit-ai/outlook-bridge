@@ -125,7 +125,7 @@ const CASES = {
         // A destDir of its own: with the runner stubbed nothing is saved, and
         // the private directory a call makes by default would be left behind.
         run: () => outlook.saveEmailAttachments('1263', ['invoice.pdf'], {destDir: tempDir()}),
-        responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf')],
+        responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf' + LS)],
     },
     cleanUndeliverableEmails: {
         run: () => outlook.cleanUndeliverableEmails(ACCOUNT, {daysBack: 30, dryRun: false}),

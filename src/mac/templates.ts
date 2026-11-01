@@ -24,19 +24,20 @@ import {
     resolveMacAccount,
     rootFolderSnippet,
 } from './scripts';
-import { MAX_TEMPLATE_HTML, TEMPLATE_PREVIEW_CHARS, TEMPLATE_SEARCH_DEPTH } from '../shared/templateLimits';
+import {
+    EMBEDDED_IMAGE_SOURCE,
+    MAX_TEMPLATE_HTML,
+    TEMPLATE_PREVIEW_CHARS,
+    TEMPLATE_SEARCH_DEPTH,
+} from '../shared/templateLimits';
 import { findTemplateMarkers } from '../templateBody';
 import { NotFoundError } from '../errors';
 import type { EditTemplateRequest, ReadTemplatesRequest, SaveTemplateRequest } from '../backend';
 import type { SaveTemplateResult, TemplateEmail, TemplateFolderResult } from '../types';
 
-/**
- * Embedded (cid:) images live as attachments on the TEMPLATE item, so its HTML
- * reused elsewhere shows broken-image placeholders. Template emails are text
- * and markup only.
- */
+/** A template body without its embedded images — see EMBEDDED_IMAGE_SOURCE. */
 function stripEmbeddedImages(html: string): string {
-    return html.replace(/<img[^>]*src="cid:[^"]*"[^>]*>/gi, '');
+    return html.replace(new RegExp(EMBEDDED_IMAGE_SOURCE, 'gi'), '');
 }
 
 /**

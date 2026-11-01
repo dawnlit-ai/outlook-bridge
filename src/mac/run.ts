@@ -178,6 +178,15 @@ on sanitizeList(lst)
     return my joinList(cleaned, (character id 29))
 end sanitizeList
 
+-- A list whose positions matter, like an email's attachments: every element is
+-- FOLLOWED by the LIST separator, so an empty element keeps its place and an
+-- empty list stays distinct from a list of one empty name. splitPositionalList()
+-- takes it apart.
+on sanitizePositionalList(lst)
+    if (count of lst) is 0 then return ""
+    return my sanitizeList(lst) & (character id 29)
+end sanitizePositionalList
+
 on insertAboveQuoted(c, ins)
     if c is missing value then return ins
     set c to c as string
@@ -216,9 +225,21 @@ export function splitFields(record: string): string[] {
     return record.split(FIELD_SEP);
 }
 
-/** A field that carries a list. */
+/**
+ * A field that carries a list. Empty elements are dropped, so where an index
+ * into the list must match Outlook's, the field is written with
+ * `sanitizePositionalList` and read with `splitPositionalList` instead.
+ */
 export function splitList(value: string | undefined): string[] {
     return (value || '').split(LIST_SEP).filter(Boolean);
+}
+
+/**
+ * A field written by `sanitizePositionalList`: every element at its position,
+ * empty ones included, so index N here is item N+1 of the AppleScript list.
+ */
+export function splitPositionalList(value: string | undefined): string[] {
+    return value ? value.split(LIST_SEP).slice(0, -1) : [];
 }
 
 /** A field by position; a missing field reads as ''. */

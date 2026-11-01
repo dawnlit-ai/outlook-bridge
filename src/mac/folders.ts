@@ -77,9 +77,11 @@ return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
  * File emails into a folder of the account. Moving rewrites each message's id.
  *
  * Outlook for Mac's `move` reports success even where it silently does nothing,
- * so the destination's count is compared before and after: a run where every
- * move "succeeded" yet the folder never grew fails rather than reporting mail
- * that was never filed.
+ * so each move is confirmed by the destination growing, and one that didn't
+ * fails as its own item. A count compared once around the whole batch would let
+ * one real move cover for silent failures, and give no per-item results when it
+ * tripped. A message already in the destination counts as moved without being
+ * moved, as Windows' Move() to its own folder does.
  */
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
     const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
@@ -89,7 +91,7 @@ export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmail
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMissing)}
-    set countBefore to count of messages of scopeFolder
+    set scopeId to id of scopeFolder
     set movedCount to 0
     set out to ""
     repeat with theId in ${asIdList(valid)}
@@ -103,16 +105,20 @@ ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMi
             try
                 set subj to (subject of theMsg) as string
             end try
-            move theMsg to scopeFolder
+            set fromId to missing value
+            try
+                set fromId to id of (folder of theMsg)
+            end try
+            if fromId is not scopeId then
+                set countBefore to count of messages of scopeFolder
+                move theMsg to scopeFolder
+                if (count of messages of scopeFolder) is not greater than countBefore then error "Outlook reported the move but '" & (name of scopeFolder) & "' did not grow - not filed"
+            end if
             set movedCount to movedCount + 1
         on error errText
             set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
-    set countAfter to count of messages of scopeFolder
-    if movedCount > 0 and countAfter is not greater than countBefore then
-        error "Outlook reported " & (movedCount as string) & " move(s) but '" & (name of scopeFolder) & "' did not grow - nothing was filed."
-    end if
     return ${asRow(['(movedCount as string)', '(scopeCreated as string)'])} & out
 end tell`, 'scan');
     const { summary, failed } = splitBatch(raw);

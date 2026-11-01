@@ -40,7 +40,18 @@ export function base64Text(value: unknown): string {
     return Buffer.from(str(value), 'base64').toString('utf8');
 }
 
-/** A list of per-item failures, as the scripts report them. */
+/**
+ * The PowerShell that appends one item's failure to `$failed`, inside the
+ * `catch` of a per-item loop: the row `itemFailures` reads back, written once
+ * so no script can name its fields differently. `idVariable` holds the item's
+ * id. `$subject` must be reset before each item's `try`, or a failure reports
+ * the previous item's subject.
+ */
+export function itemFailurePs(idVariable: '$id' | '$entryId'): string {
+    return `$failed += [PSCustomObject]@{ entryId = ${idVariable}; subject = $subject; error = $_.Exception.Message }`;
+}
+
+/** A list of per-item failures, as `itemFailurePs` writes them. */
 export function itemFailures(value: unknown): ItemFailure[] {
     return toArray(value).map(row => {
         const e = record(row);

@@ -1,7 +1,7 @@
 // Drafts: which ones belong to an account, and listing, sending or deleting them.
 import { psArray, psInt, runPowerShellJson } from './run';
 import { accountScript, DELIVERY_STORE_PS } from './scripts';
-import { bool, itemFailures, num, record, str, strList, toArray } from '../shared/json';
+import { bool, itemFailurePs, itemFailures, num, record, str, strList, toArray } from '../shared/json';
 import { FolderId } from '../mail';
 import type { AccountRequest, EntryIdsRequest, ListDraftsRequest } from '../backend';
 import type { DeleteDraftsResult, ItemFailure, ListDraftsResult, SendDraftsResult } from '../types';
@@ -159,7 +159,7 @@ foreach ($id in ${psArray(request.entryIds)}) {
         $draft.${verb === 'send' ? 'Send' : 'Delete'}()
         $done++
     } catch {
-        $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
+        ${itemFailurePs('$id')}
     }
 }
 ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ done = $done; failed = @($failed) })
@@ -200,7 +200,7 @@ foreach ($draft in $drafts) {
         $draft.Send()
         $sent++
     } catch {
-        $failed += [PSCustomObject]@{ entryId = $entryId; subject = $subject; error = $_.Exception.Message }
+        ${itemFailurePs('$entryId')}
     }
 }
 ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ sent = $sent; failed = @($failed) })

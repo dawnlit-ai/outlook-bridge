@@ -3,7 +3,12 @@
 import { psBool, psInt, psString, readScriptOutput, runPowerShell, runPowerShellJson, scriptInput } from './run';
 import { accountScript, DELIVERY_STORE_PS, FIND_FOLDER_PS, SESSION_PS } from './scripts';
 import { bool, record, str, toArray } from '../shared/json';
-import { MAX_TEMPLATE_HTML, TEMPLATE_PREVIEW_CHARS, TEMPLATE_SEARCH_DEPTH } from '../shared/templateLimits';
+import {
+    EMBEDDED_IMAGE_SOURCE,
+    MAX_TEMPLATE_HTML,
+    TEMPLATE_PREVIEW_CHARS,
+    TEMPLATE_SEARCH_DEPTH,
+} from '../shared/templateLimits';
 import { findTemplateMarkers, MARKER_TOKEN_SOURCE } from '../templateBody';
 import { FolderId } from '../mail';
 import { NotFoundError } from '../errors';
@@ -54,10 +59,9 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
     $markers = ''
     if ($includeBody) {
         try { $html = [string]$item.HTMLBody } catch {}
-        # Embedded (cid:) images live as attachments on the TEMPLATE item, so its
-        # HTML reused elsewhere shows broken-image placeholders. Template emails
-        # are text and markup only.
-        $html = [regex]::Replace($html, '<img[^>]*src="cid:[^"]*"[^>]*>', '')
+        # Embedded (cid:) images are attachments of the TEMPLATE item, so they
+        # would show as broken placeholders anywhere else.
+        $html = [regex]::Replace($html, ${psString(EMBEDDED_IMAGE_SOURCE)}, '', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($html.Length -gt $maxHtml) { $html = $html.Substring(0, $maxHtml) }
     } else {
         # No body asked for: a short preview, plus the section and placeholder
