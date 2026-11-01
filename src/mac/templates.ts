@@ -20,6 +20,7 @@ import {
 import {
     accountLookupSnippet,
     FIND_FOLDER_HANDLER,
+    folderChainSnippet,
     macFolderPath,
     resolveMacAccount,
     rootFolderSnippet,
@@ -75,7 +76,10 @@ tell application "Microsoft Outlook"
         set modList to {}
     end try
     set hasMods to ((count of modList) is (count of idList))
-    set out to ${asRow(['"1"', '(name of theFolder as string)'])}
+    -- The folder may sit up to the search depth down, so its whole chain is
+    -- reported, not just its name: the path is the one Windows' FolderPath gives.
+${folderChainSnippet('    ')}
+    set out to ${asRow(['"1"', 'my sanitizeList(chainNames)'])}
     repeat with i from 1 to (count of idList)
         set modAt to ""
         if hasMods then set modAt to my isoDate(item i of modList)
@@ -88,7 +92,10 @@ end tell`, 'standard'));
     if (field(header, 0) !== '1') {
         return { folderFound: false, folderPath: '', templates: [], availableFolders: splitList(field(header, 1)) };
     }
-    const folderPath = macFolderPath(request.account, field(header, 1) || request.folder, []);
+    const chain = splitList(field(header, 1)).reverse();
+    const folderPath = chain.length
+        ? macFolderPath(request.account, chain[0], chain.slice(1))
+        : macFolderPath(request.account, request.folder, []);
     const wanted = (request.subject ?? '').toLowerCase();
     const chosen = records.slice(1)
         .map(record => {
