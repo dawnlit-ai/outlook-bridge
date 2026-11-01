@@ -187,7 +187,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             if (signatureName) {
                 request.htmlBody = placeSignature(request.htmlBody, await resolveSignatureHtml(platform, signatureName));
             }
-            await platform.sendOutlookEmail(request);
+            return platform.sendOutlookEmail(request);
         },
 
         async replyOutlookEmail(params) {

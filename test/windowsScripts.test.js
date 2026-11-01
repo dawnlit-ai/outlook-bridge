@@ -171,3 +171,32 @@ test('the probe round-trips through psString exactly', {skip}, () => {
     assert.deepEqual(result.errors, []);
     assert.deepEqual(result.literals, [PROBE]);
 });
+
+// What follows reads the captured scripts and decodes canned output, so it
+// needs no PowerShell and runs everywhere.
+
+test('a filed draft reports the EntryID Save() gave it; a sent or shown email reports none', async () => {
+    const outlook = createOperations(windowsBackend);
+    const base = {emailAccount: 'someone@example.com', to: 'a@example.com', subject: 'Rates', htmlBody: '<p>x</p>'};
+    let result;
+    const filed = await captureScripts(run, ['runPowerShellJson'], async () => {
+        result = await outlook.sendOutlookEmail({...base, openDraftWindow: false});
+    }, [{draftEntryId: '00000000ABCDEF'}]);
+    if (filed.error) throw filed.error;
+    assert.deepEqual(result, {draftEntryId: '00000000ABCDEF'});
+    const [script] = filed.scripts;
+    assert.ok(
+        script.indexOf('$mail.Save()') < script.indexOf('[string]$mail.EntryID'),
+        'the id exists only once the draft is saved',
+    );
+
+    for (const flags of [{sendImmediately: true}, {}]) {
+        const other = await captureScripts(run, ['runPowerShellJson'], async () => {
+            result = await outlook.sendOutlookEmail({...base, ...flags});
+        });
+        if (other.error) throw other.error;
+        assert.deepEqual(result, {draftEntryId: ''});
+        // A sent item is gone from under the reference; a shown one isn't saved.
+        assert.doesNotMatch(other.scripts[0], /\$mail\.EntryID/);
+    }
+});

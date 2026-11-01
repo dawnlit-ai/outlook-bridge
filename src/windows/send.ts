@@ -1,11 +1,11 @@
 // Composing outgoing mail: a new email, and a reply to an existing one.
-import { psString, runPowerShell, runPowerShellJson, scriptInput } from './run';
+import { psString, runPowerShellJson, scriptInput } from './run';
 import { accountScript, itemLookupScript, SENDER_SMTP_PS } from './scripts';
 import { WORD_SECTION_ANCHOR } from '../shared/replyBody';
 import { failureTag } from '../errors';
 import { record, str } from '../shared/json';
 import type { Disposition, ReplyRequest, SendRequest } from '../backend';
-import type { ReplyEmailResult } from '../types';
+import type { ReplyEmailResult, SendEmailResult } from '../types';
 
 /**
  * Set the sending account through IDispatch reflection.
@@ -47,16 +47,22 @@ function recipientLine(entries: readonly string[]): string {
     return psString(entries.join('; '));
 }
 
-/** Send, display or file a new email. */
-export async function sendOutlookEmail(request: SendRequest): Promise<void> {
+/**
+ * Send, display or file a new email. Only a filed draft reports an id: a sent
+ * item has left for the Outbox, and a displayed one is saved nowhere yet. The
+ * id is read after `Save()`, which is what assigns it — the EntryID the
+ * draft then keeps, and the one listOutlookDrafts reports.
+ */
+export async function sendOutlookEmail(request: SendRequest): Promise<SendEmailResult> {
     // The body goes through a file: inline, a large email bloats the script and
     // every error that carries it.
     const body = scriptInput('email-body', request.htmlBody);
     const attach = request.attachments
         .map(file => `[void]$mail.Attachments.Add(${psString(file)})`)
         .join('\n');
+    const draftEntryId = request.disposition === 'save' ? '[string]$mail.EntryID' : "''";
     try {
-        await runPowerShell(`${accountScript(request.account)}
+        const output = await runPowerShellJson(`${accountScript(request.account)}
 $mail = $outlook.CreateItem(0)
 ${sendUsingAccount('mail')}
 $mail.To = ${recipientLine(request.to)}
@@ -66,7 +72,9 @@ $mail.Subject = ${psString(request.subject)}
 $mail.HTMLBody = [IO.File]::ReadAllText(${psString(body.path)}, [Text.Encoding]::UTF8)
 ${attach}
 ${dispose('mail', request.disposition)}
+ConvertTo-Json -Compress @{ draftEntryId = ${draftEntryId} }
 `, 'standard');
+        return {draftEntryId: str(record(output).draftEntryId)};
     } finally {
         body.cleanup();
     }

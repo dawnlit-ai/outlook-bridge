@@ -6,7 +6,7 @@ const path = require('node:path');
 /** Every method a backend implements, with a plausible empty answer. */
 const BACKEND_DEFAULTS = {
     getOutlookAccounts: () => [],
-    sendOutlookEmail: () => undefined,
+    sendOutlookEmail: () => ({draftEntryId: ''}),
     replyOutlookEmail: () => ({to: '', subject: '', repliedToSender: ''}),
     readInboxEmails: () => [],
     searchInboxByFilter: () => [],

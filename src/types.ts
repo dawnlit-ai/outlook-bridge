@@ -65,6 +65,19 @@ export interface SendEmailParams {
     openDraftWindow?: boolean;
 }
 
+export interface SendEmailResult {
+    /**
+     * The draft's entry id when the email was filed silently into Drafts
+     * (`openDraftWindow: false`) — the id `listOutlookDrafts` reports for it,
+     * so a caller can keep it and later send or delete exactly the drafts it
+     * made. '' when the email was sent, or opened in a compose window, which
+     * files nothing yet; and on macOS in the rare case Drafts gained another
+     * draft with the same subject in the same moment, so this one could not be
+     * told apart.
+     */
+    draftEntryId: string;
+}
+
 export interface ReplyEmailParams extends EmailLocator {
     /** SMTP address of the mailbox to reply from. */
     emailAccount: string;
@@ -583,7 +596,7 @@ export interface OutlookBridge {
     getOutlookAccounts(): Promise<string[]>;
 
     /** Send an email, or stage it as a draft. */
-    sendOutlookEmail(params: SendEmailParams): Promise<void>;
+    sendOutlookEmail(params: SendEmailParams): Promise<SendEmailResult>;
 
     /** Reply to an email, with the new text above the quoted original. */
     replyOutlookEmail(params: ReplyEmailParams): Promise<ReplyEmailResult>;
