@@ -15,28 +15,20 @@ import {
     splitFields,
     splitList,
     splitRecords,
-    summaryFields
+    summaryFields,
 } from './run';
 import {
     accountLookupSnippet,
     FIND_FOLDER_HANDLER,
     macFolderPath,
     resolveMacAccount,
-    rootFolderSnippet
+    rootFolderSnippet,
 } from './scripts';
+import { MAX_TEMPLATE_HTML, TEMPLATE_PREVIEW_CHARS, TEMPLATE_SEARCH_DEPTH } from '../shared/templateLimits';
 import { findTemplateMarkers } from '../templateBody';
 import { NotFoundError } from '../errors';
 import type { EditTemplateRequest, ReadTemplatesRequest, SaveTemplateRequest } from '../backend';
 import type { SaveTemplateResult, TemplateEmail, TemplateFolderResult } from '../types';
-
-/** How deep under the mailbox root a template folder is searched for. */
-const TEMPLATE_SEARCH_DEPTH = 3;
-
-/** Cap on one template body, matching Windows. */
-const MAX_TEMPLATE_HTML = 100_000;
-
-/** Plain text standing in for a body that wasn't asked for. */
-const PREVIEW_CHARS = 200;
 
 /**
  * Embedded (cid:) images live as attachments on the TEMPLATE item, so its HTML
@@ -93,20 +85,20 @@ end tell`, 'standard'));
 
     const header = splitFields(records[0] ?? '');
     if (field(header, 0) !== '1') {
-        return {folderFound: false, folderPath: '', templates: [], availableFolders: splitList(field(header, 1))};
+        return { folderFound: false, folderPath: '', templates: [], availableFolders: splitList(field(header, 1)) };
     }
     const folderPath = macFolderPath(request.account, field(header, 1) || request.folder, []);
     const wanted = (request.subject ?? '').toLowerCase();
     const chosen = records.slice(1)
         .map(record => {
             const parts = splitFields(record);
-            return {id: field(parts, 0), subject: field(parts, 1).trim(), lastModified: field(parts, 2)};
+            return { id: field(parts, 0), subject: field(parts, 1).trim(), lastModified: field(parts, 2) };
         })
         // Newest first, before the cap, so "the newest 20" means that.
         .sort((a, b) => b.lastModified.localeCompare(a.lastModified))
         .filter(item => !wanted || item.subject.toLowerCase() === wanted)
         .slice(0, request.limit);
-    if (chosen.length === 0) return {folderFound: true, folderPath, templates: [], availableFolders: []};
+    if (chosen.length === 0) return { folderFound: true, folderPath, templates: [], availableFolders: [] };
 
     // Pass 2 — the bodies, for the chosen templates only.
     const bodyProperty = request.includeBody ? 'content' : 'plain text content';
@@ -144,13 +136,13 @@ end tell`, 'standard');
             entryId: item.id,
             subject: item.subject,
             htmlBody: html,
-            bodyPreview: request.includeBody ? '' : body.trim().slice(0, PREVIEW_CHARS),
+            bodyPreview: request.includeBody ? '' : body.trim().slice(0, TEMPLATE_PREVIEW_CHARS),
             sections: markers.sections,
             placeholders: markers.placeholders,
             lastModified: item.lastModified,
         };
     });
-    return {folderFound: true, folderPath, templates, availableFolders: []};
+    return { folderFound: true, folderPath, templates, availableFolders: [] };
 }
 
 /**

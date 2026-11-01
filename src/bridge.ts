@@ -28,9 +28,9 @@ import {
     textList,
 } from './shared/args';
 import { composeReplyHtml, placeSignature, resolveSignatureHtml } from './shared/replyBody';
-import { accountSearchOrder, bestMatch, daysBackFor, requireDescribed, subjectPrefilter, } from './shared/locate';
+import { accountSearchOrder, bestMatch, daysBackFor, requireDescribed, subjectPrefilter } from './shared/locate';
 import { buildBounceReport } from './shared/bounceReport';
-import { folderOption, splitQuotedOriginal } from './mail';
+import { deleteMailResult, folderOption, splitQuotedOriginal } from './mail';
 import { AbortedError, InvalidRequestError, NotFoundError, UnsupportedPlatformError } from './errors';
 import {
     attachmentDestination,
@@ -155,7 +155,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         if (names.length === 0) return [];
         const destination = attachmentDestination(destDir === undefined ? undefined : path.resolve(destDir));
         try {
-            return await platform.saveEmailAttachments({email: target, fileNames: names, destDir: destination.dir});
+            return await platform.saveEmailAttachments({ email: target, fileNames: names, destDir: destination.dir });
         } catch (error) {
             destination.discardIfUnused();
             throw error;
@@ -194,7 +194,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const platform = backend();
             const p = requireObject(params, 'params');
             const account = requiredText(p.emailAccount, 'emailAccount');
-            const email = emailLocator({entryId: p.entryId as string, storeId: p.storeId}, 'params');
+            const email = emailLocator({ entryId: p.entryId as string, storeId: p.storeId }, 'params');
             const html = await composeReplyHtml({
                 account,
                 htmlBody: optionalContent(p.htmlBody, 'htmlBody'),
@@ -216,7 +216,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         async readInboxEmails(emailAccount, options) {
             const platform = backend();
             const o = optionsObject(options);
-            const {ref, label} = folderOption(optionalText(o.folder, 'folder'));
+            const { ref, label } = folderOption(optionalText(o.folder, 'folder'));
             return platform.readInboxEmails({
                 account: requiredText(emailAccount, 'emailAccount'),
                 folder: ref,
@@ -257,7 +257,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const raw = await platform.readEmailBody(target);
             // The quoted thread is context, never the sender's own answer, so it is
             // capped by the tighter of the two limits.
-            const {body, quoted, separator} = splitQuotedOriginal(raw.body);
+            const { body, quoted, separator } = splitQuotedOriginal(raw.body);
             return {
                 entryId: raw.entryId,
                 subject: raw.subject,
@@ -312,7 +312,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             for (const account of accounts) {
                 let matches;
                 try {
-                    matches = await platform.searchInboxByFilter({account, ...search});
+                    matches = await platform.searchInboxByFilter({ account, ...search });
                 } catch (error) {
                     if (error instanceof AbortedError) throw error;
                     // One mailbox that can't be read shouldn't decide the answer
@@ -341,15 +341,15 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const platform = backend();
             const account = requiredText(emailAccount, 'emailAccount');
             const ids = entryIdList(entryIds);
-            const {ref, label} = folderOption(requiredText(folder, 'folder'));
+            const { ref, label } = folderOption(requiredText(folder, 'folder'));
             const createIfMissing = flag(optionsObject(options).createIfMissing, 'createIfMissing', false);
-            if (ids.length === 0) return {folderPath: '', folderCreated: false, moved: 0, failed: []};
+            if (ids.length === 0) return { folderPath: '', folderCreated: false, moved: 0, failed: [] };
             return platform.moveOutlookEmails({
                 account,
                 entryIds: ids,
                 folder: ref,
                 folderLabel: label,
-                createIfMissing
+                createIfMissing,
             });
         },
 
@@ -367,21 +367,21 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const platform = backend();
             const account = requiredText(emailAccount, 'emailAccount');
             const ids = entryIdList(entryIds);
-            if (ids.length === 0) return {sent: 0, failed: []};
-            return platform.sendDrafts({account, entryIds: ids});
+            if (ids.length === 0) return { sent: 0, failed: [] };
+            return platform.sendDrafts({ account, entryIds: ids });
         },
 
         async sendAllDrafts(emailAccount) {
             const platform = backend();
-            return platform.sendAllDrafts({account: requiredText(emailAccount, 'emailAccount')});
+            return platform.sendAllDrafts({ account: requiredText(emailAccount, 'emailAccount') });
         },
 
         async deleteOutlookDrafts(emailAccount, entryIds) {
             const platform = backend();
             const account = requiredText(emailAccount, 'emailAccount');
             const ids = entryIdList(entryIds);
-            if (ids.length === 0) return {deleted: 0, failed: []};
-            return platform.deleteOutlookDrafts({account, entryIds: ids});
+            if (ids.length === 0) return { deleted: 0, failed: [] };
+            return platform.deleteOutlookDrafts({ account, entryIds: ids });
         },
 
         async deleteOutlookEmails(emailAccount, entryIds, options) {
@@ -391,8 +391,8 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const o = optionsObject(options);
             const allowProtected = flag(o.allowProtected, 'allowProtected', false);
             const dryRun = flag(o.dryRun, 'dryRun', false);
-            if (ids.length === 0) return {dryRun, deleted: 0, refused: 0, failed: 0, items: []};
-            return platform.deleteOutlookEmails({account, entryIds: ids, allowProtected, dryRun});
+            if (ids.length === 0) return deleteMailResult(dryRun, []);
+            return platform.deleteOutlookEmails({ account, entryIds: ids, allowProtected, dryRun });
         },
 
         async purgeDeletedItems(emailAccount, options) {
@@ -450,8 +450,8 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const o = optionsObject(options);
             const daysBack = count(o.daysBack, 'daysBack', DEFAULTS.bounceDaysBack, 1, MAX_DAYS);
             const includeDeletedItems = flag(o.includeDeletedItems, 'includeDeletedItems', true);
-            const bounced = await platform.collectBouncedRecipients({account, daysBack, includeDeletedItems});
-            const sent = await platform.readSentRecipientGroups({account, daysBack, limit: DEFAULTS.sentGroupsLimit});
+            const bounced = await platform.collectBouncedRecipients({ account, daysBack, includeDeletedItems });
+            const sent = await platform.readSentRecipientGroups({ account, daysBack, limit: DEFAULTS.sentGroupsLimit });
             return buildBounceReport(account, daysBack, bounced, sent);
         },
 
@@ -542,7 +542,7 @@ export function createBridge(backend: Backend | null, config: ResolvedConfig): O
     const operations = createOperations(backend) as unknown as Record<BridgeCapability, AnyOperation>;
     const map = capabilityMap(backend);
     const instance: Record<string, unknown> = {
-        options: Object.freeze({...config}),
+        options: Object.freeze({ ...config }),
         capabilities: () => map,
         supports: (operation: BridgeCapability) => map[operation] === true,
         withOptions: (options: BridgeOptions) => createBridge(backend, mergeOptions(config, options)),

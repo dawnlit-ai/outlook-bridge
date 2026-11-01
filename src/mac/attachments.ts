@@ -11,13 +11,13 @@ import {
     MessageDetail,
     messageDetailFields,
     messageDetailSnippet,
-    messageLookupSnippet
+    messageLookupSnippet,
 } from './scripts';
 import {
     attachmentNotFoundMessage,
     findAttachmentIndex,
     safeFileName,
-    uniqueSavePath
+    uniqueSavePath,
 } from '../shared/attachmentMatch';
 import { NotFoundError } from '../errors';
 import type { SaveAttachmentsRequest } from '../backend';
@@ -52,7 +52,7 @@ end tell`, 'quick'));
                 present: attachmentNames.join(', ') || '(none)',
             }));
         }
-        return {index, fileName: attachmentNames[index]};
+        return { index, fileName: attachmentNames[index] };
     });
 
     // Paths are claimed as they are chosen, so two picks with one name don't collide.
@@ -60,11 +60,11 @@ end tell`, 'quick'));
     const saves = picks.map(pick => {
         const file = uniqueSavePath(request.destDir, safeFileName(pick.fileName), path => claimed.has(path) || fs.existsSync(path));
         claimed.add(file);
-        return {...pick, path: file};
+        return { ...pick, path: file };
     });
     await runOsaScript(`tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
 ${saves.map(save => `    save (item ${asInt(save.index + 1)} of attachments of theMsg) in POSIX file ${asString(save.path)}`).join('\n')}
 end tell`, 'standard');
-    return saves.map(save => ({path: save.path, fileName: save.fileName, ...email}));
+    return saves.map(save => ({ path: save.path, fileName: save.fileName, ...email }));
 }

@@ -94,7 +94,7 @@ ${bounceClassifierScript()}
 $dryRun = ${psBool(request.dryRun)}
 $inbox = $store.GetDefaultFolder(${psInt(FolderId.Inbox)})
 ${cutoffScript(request.daysBack)}
-${itemsSinceScript('inbox', 'ReceivedTime', 'filtered')}
+${itemsSinceScript('inbox', 'ReceivedTime')}
 $reports = @()
 $matchedItems = @()
 $count = $filtered.Count
@@ -168,7 +168,7 @@ foreach ($role in @(${roles.map(psInt).join(', ')})) {
     $scanFolder = $null
     try { $scanFolder = $store.GetDefaultFolder($role) } catch {}
     if ($scanFolder -eq $null) { continue }
-    ${itemsSinceScript('scanFolder', 'ReceivedTime', 'filtered').trim()}
+    ${itemsSinceScript('scanFolder', 'ReceivedTime').trim()}
     $count = $filtered.Count
     for ($i = 1; $i -le $count; $i++) {
         $item = $null
@@ -196,7 +196,7 @@ export async function readSentRecipientGroups(request: SentGroupsRequest): Promi
 ${DELIVERY_STORE_PS}
 $sentFolder = $store.GetDefaultFolder(${psInt(FolderId.SentMail)})
 ${cutoffScript(request.daysBack)}
-${itemsSinceScript('sentFolder', 'SentOn', 'filtered')}
+${itemsSinceScript('sentFolder', 'SentOn')}
 $filtered.Sort('[SentOn]', $true)
 $limit = ${psInt(request.limit)}
 $rows = @()

@@ -7,6 +7,7 @@ import { removeTempFile, type RunBudget, tempFile } from '../runtime';
 import { runScriptProcess } from '../shared/exec';
 import { InvalidRequestError } from '../errors';
 import { WORD_SECTION_ANCHOR } from '../shared/replyBody';
+import type { ItemFailure } from '../types';
 
 const RUNNER = 'osascript' as const;
 
@@ -21,7 +22,7 @@ function parseFailure(stderr: string): { message: string } {
         .replace(/^(?:.*?:)?\d+:\d+:\s*execution error:\s*/m, '')
         .replace(/\s*\(-2700\)\s*$/, '')
         .trim();
-    return {message};
+    return { message };
 }
 
 /**
@@ -39,7 +40,7 @@ export async function runOsaScript(source: string, budget: RunBudget): Promise<s
     const file = tempFile('osa', 'applescript');
     fs.writeFileSync(file, script, 'utf8');
     try {
-        const {stdout} = await runScriptProcess({
+        const { stdout } = await runScriptProcess({
             runner: RUNNER,
             command: 'osascript',
             args: [file],
@@ -239,4 +240,25 @@ export function intField(fields: readonly string[], index: number, fallback = 0)
 /** A boolean field; AppleScript renders booleans as the bare words true/false. */
 export function boolField(fields: readonly string[], index: number): boolean {
     return field(fields, index).trim() === 'true';
+}
+
+// ── Batches ──────────────────────────────────────────────────────────────
+//
+// A script acting on a list of ids returns one summary record, then one record
+// per id that failed. The failure row and its decoder sit together so the two
+// can't come to disagree about the field order.
+
+/** The record a batch script appends, inside `on error errText`, for the id `theId` it failed on. */
+export const ITEM_FAILURE_ROW = asRow(['(theId as string)', 'subj', 'errText']);
+
+/** A batch script's output: the summary record's fields, and the items that failed. */
+export function splitBatch(raw: string): { summary: string[]; failed: ItemFailure[] } {
+    const [summary = '', ...failures] = splitRecords(raw);
+    return {
+        summary: splitFields(summary),
+        failed: failures.map(record => {
+            const parts = splitFields(record);
+            return { entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2) };
+        }),
+    };
 }

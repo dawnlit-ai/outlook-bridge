@@ -21,7 +21,7 @@ return acctList as string`, 'quick'),
     ]);
     const accounts = raw.split('\n').map(s => s.trim()).filter(Boolean);
     const seen = new Set(accounts.map(a => a.toLowerCase()));
-    for (const {emailAccount} of profile) {
+    for (const { emailAccount } of profile) {
         if (seen.has(emailAccount.toLowerCase())) continue;
         seen.add(emailAccount.toLowerCase());
         accounts.push(emailAccount);

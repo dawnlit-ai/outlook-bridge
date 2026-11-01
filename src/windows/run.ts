@@ -7,15 +7,15 @@
 import fs from 'fs';
 import { InvalidRequestError, ScriptError, UnsupportedPlatformError } from '../errors';
 import { removeTempFile, type RunBudget, tempFile } from '../runtime';
-import { runScriptProcess } from '../shared/exec';
+import { type ProcessOutput, runScriptProcess } from '../shared/exec';
 
 const RUNNER = 'powershell' as const;
 
 /** Opens the line a script's catch block writes its failure on. */
 const FAILURE_MARKER = '@@outlook-bridge-failure@@';
 
-/** Refuse before generating anything when this isn't Windows. */
-export function requireWindows(): void {
+/** Refuse before writing or running a script when this isn't Windows. */
+function requireWindows(): void {
     if (process.platform !== 'win32') throw new UnsupportedPlatformError(process.platform);
 }
 
@@ -103,21 +103,17 @@ function parseFailure(stderr: string): { message: string; line?: number } {
         try {
             const parsed = JSON.parse(json) as { message?: unknown; line?: unknown };
             const line = typeof parsed.line === 'number' && parsed.line > 0 ? parsed.line : undefined;
-            return {message: String(parsed.message ?? ''), line};
+            return { message: String(parsed.message ?? ''), line };
         } catch {
             // Fall through to the raw stderr.
         }
     }
     // A script that fails to PARSE never enters its try block, so PowerShell's
     // own report is all there is.
-    return {message: stderr.trim()};
+    return { message: stderr.trim() };
 }
 
-async function execute(body: string, budget: RunBudget): Promise<{
-    stdout: string;
-    script: string;
-    durationMs: number
-}> {
+async function execute(body: string, budget: RunBudget): Promise<ProcessOutput & { script: string }> {
     requireWindows();
     const script = buildScript(body);
     // Always from a file, never `-Command`: a file has no command-line length
@@ -127,7 +123,7 @@ async function execute(body: string, budget: RunBudget): Promise<{
     const file = tempFile('script', 'ps1');
     fs.writeFileSync(file, '\uFEFF' + script, 'utf8');
     try {
-        const {stdout, durationMs} = await runScriptProcess({
+        const { stdout, durationMs } = await runScriptProcess({
             runner: RUNNER,
             command: 'powershell.exe',
             args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file],
@@ -135,7 +131,7 @@ async function execute(body: string, budget: RunBudget): Promise<{
             budget,
             parseFailure,
         });
-        return {stdout, script, durationMs};
+        return { stdout, script, durationMs };
     } finally {
         removeTempFile(file);
     }
@@ -152,7 +148,7 @@ export async function runPowerShell(body: string, budget: RunBudget): Promise<st
  * the script, never a bare SyntaxError.
  */
 export async function runPowerShellJson(body: string, budget: RunBudget): Promise<unknown> {
-    const {stdout, script, durationMs} = await execute(body, budget);
+    const { stdout, script, durationMs } = await execute(body, budget);
     const output = stdout.trim();
     if (output === '' || output === 'null') return null;
     try {
@@ -179,7 +175,7 @@ export async function runPowerShellJson(body: string, budget: RunBudget): Promis
 export function scriptInput(kind: string, contents: string): { path: string; cleanup(): void } {
     const file = tempFile(kind, 'html');
     fs.writeFileSync(file, contents, 'utf8');
-    return {path: file, cleanup: () => removeTempFile(file)};
+    return { path: file, cleanup: () => removeTempFile(file) };
 }
 
 /**

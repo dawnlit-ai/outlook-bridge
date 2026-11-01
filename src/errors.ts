@@ -132,7 +132,7 @@ export class ScriptError extends OutlookError {
         line?: number;
         cause?: unknown;
     }) {
-        super('SCRIPT_FAILED', init.message || init.stderr || `${init.runner} failed with no output.`, {cause: init.cause});
+        super('SCRIPT_FAILED', init.message || init.stderr || `${init.runner} failed with no output.`, { cause: init.cause });
         this.runner = init.runner;
         this.script = init.script;
         this.stderr = init.stderr;
@@ -178,7 +178,7 @@ export class AbortedError extends OutlookError {
     readonly runner: ScriptRunner;
 
     constructor(runner: ScriptRunner, reason?: unknown) {
-        super('ABORTED', `${runner} run was aborted by the caller.`, {cause: reason});
+        super('ABORTED', `${runner} run was aborted by the caller.`, { cause: reason });
         this.runner = runner;
     }
 }
@@ -230,11 +230,6 @@ export function errorFromTaggedMessage(message: string): OutlookError | null {
     }
 }
 
-/** Remove any failure tags from a message meant for display — e.g. a per-item error. */
-export function stripFailureTags(message: string): string {
-    return message.replace(new RegExp(FAILURE_TAG.source, 'g'), '').trim();
-}
-
 /**
  * Turn a failed run into the most specific error that can be proven.
  *
@@ -261,16 +256,16 @@ export function classifyRunFailure(init: {
     maxBufferBytes?: number;
     signal?: AbortSignal;
 }): OutlookError {
-    const {runner, script, stderr, durationMs, nodeError, timeoutMs, signal} = init;
+    const { runner, script, stderr, durationMs, nodeError, timeoutMs, signal } = init;
 
     if (signal?.aborted || nodeError?.name === 'AbortError' || nodeError?.code === 'ABORT_ERR') {
         return new AbortedError(runner, signal?.reason);
     }
     if (nodeError?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-        return new OutputTooLargeError({runner, maxBufferBytes: init.maxBufferBytes ?? 0, script});
+        return new OutputTooLargeError({ runner, maxBufferBytes: init.maxBufferBytes ?? 0, script });
     }
     if (nodeError?.killed && timeoutMs) {
-        return new TimeoutError({runner, timeoutMs, script});
+        return new TimeoutError({ runner, timeoutMs, script });
     }
     const message = (init.message ?? '').trim() || stderr.trim() || nodeError?.message || '';
     const typed = errorFromTaggedMessage(message);
@@ -282,6 +277,6 @@ export function classifyRunFailure(init: {
         durationMs,
         message,
         line: init.line,
-        cause: nodeError ?? undefined
+        cause: nodeError ?? undefined,
     });
 }

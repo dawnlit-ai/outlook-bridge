@@ -43,7 +43,7 @@ ${NAMED_STORE_PS}
 ${mailScopeScript(request.folder, request.folderLabel)}
 $scopePath = [string]$scope.FolderPath
 ${cutoffScript(request.daysBack)}
-${itemsSinceScript('scope', dateProp, 'filtered')}
+${itemsSinceScript('scope', dateProp)}
 $filtered.Sort('[${dateProp}]', $true)
 $limit = ${psInt(request.limit)}
 $previewChars = ${psInt(request.previewChars)}
@@ -234,7 +234,7 @@ $seen = @{}
 for ($fx = 0; $fx -lt $folders.Count; $fx++) {
     if (-not $inScope[$fx]) { continue }
     $folder = $folders[$fx]
-    ${itemsSinceScript('folder', 'ReceivedTime', 'filtered').trim()}
+    ${itemsSinceScript('folder', 'ReceivedTime').trim()}
     if ($subjectDasl) {
         try {
             $candidate = $filtered.Restrict($subjectQuery)

@@ -33,7 +33,7 @@ export interface ReplyContent {
  * whole document. Signature files and saved templates are both whole documents,
  * and neither may nest its `<html>`/`<body>` inside another email's.
  */
-export function innerBodyHtml(html: string): string {
+function innerBodyHtml(html: string): string {
     const match = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html);
     return (match ? match[1] : html).trim();
 }
@@ -46,13 +46,13 @@ export function innerBodyHtml(html: string): string {
  * a folder of Word-sized templates overruns the output limit on a call that
  * only ever needed one of them.
  */
-export async function resolveTemplateHtml(
+async function resolveTemplateHtml(
     deps: ReplyBodyDeps,
     account: string,
     folder: string,
     subject: string,
 ): Promise<string> {
-    const result = await deps.readTemplateEmails({account, folder, limit: 50, includeBody: true, subject});
+    const result = await deps.readTemplateEmails({ account, folder, limit: 50, includeBody: true, subject });
     if (!result.folderFound) {
         const folders = result.availableFolders.join(', ') || '(none)';
         throw new NotFoundError('folder', `Template folder '${folder}' not found in ${account}. Top-level folders: ${folders}.`);
@@ -62,7 +62,7 @@ export async function resolveTemplateHtml(
     if (!match) {
         // The read above was filtered, so it can't name the alternatives. A
         // second read without bodies can, cheaply.
-        const all = await deps.readTemplateEmails({account, folder, limit: 200, includeBody: false});
+        const all = await deps.readTemplateEmails({ account, folder, limit: 200, includeBody: false });
         const names = all.templates.map(t => t.subject).filter(Boolean).join(', ') || '(none)';
         throw new NotFoundError('template', `Template '${subject}' not found in '${folder}'. Templates there: ${names}.`);
     }
@@ -131,7 +131,7 @@ export async function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDep
     let placeholders = content.templatePlaceholders;
     const signature = content.signatureName ? await resolveSignatureHtml(deps, content.signatureName) : '';
     const signatureInPlace = signature !== '' && asksForSignature(html);
-    if (signatureInPlace) placeholders = {...placeholders, SIGNATURE: signature};
+    if (signatureInPlace) placeholders = { ...placeholders, SIGNATURE: signature };
 
     const hasPlaceholders = !!placeholders && Object.keys(placeholders).length > 0;
     if (fromTemplate || content.templateSection || hasPlaceholders) {

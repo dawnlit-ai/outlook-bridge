@@ -118,7 +118,7 @@ function query(database: string, sql: string): Promise<string> {
         execFile(
             'sqlite3',
             ['-readonly', '-list', '-noheader', '-separator', SEP, database, sql],
-            {timeout: 5000, maxBuffer: 1024 * 1024},
+            { timeout: 5000, maxBuffer: 1024 * 1024 },
             (error, stdout) => resolve(error ? '' : stdout),
         );
     });
@@ -151,7 +151,7 @@ async function readAccounts(): Promise<ProfileAccount[]> {
         const term = termOf.get(Number(specialType));
         if (!address || !term || !/^\d+$/.test(folderId ?? '')) continue;
         const account = byAddress.get(address.toLowerCase())
-            ?? {emailAccount: address, folderIds: {}};
+            ?? { emailAccount: address, folderIds: {} };
         account.folderIds[term] = Number(folderId);
         byAddress.set(address.toLowerCase(), account);
     }

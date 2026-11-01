@@ -22,7 +22,7 @@ const {execFileSync} = require('node:child_process');
 const macRun = require('../dist/mac/run.js');
 const {macBackend} = require('../dist/mac/index.js');
 const {createOperations} = require('../dist/bridge.js');
-const {captureScripts, tempFileWith} = require('./support.js');
+const {captureScripts, tempDir, tempFileWith} = require('./support.js');
 
 const {FIELD_SEP: FS, RECORD_SEP: RS, LIST_SEP: LS} = macRun;
 const ACCOUNT = 'someone@example.com';
@@ -105,7 +105,7 @@ test('partition finds a literal, its escapes, and the code around it', () => {
 /** Every operation, driven with the probe wherever caller text is accepted. */
 function probeCases() {
     const attachment = tempFileWith('report.pdf');
-    const destDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-mac-probe-'));
+    const destDir = tempDir('ob-mac-probe-');
     return {
         sendOutlookEmail: {
             run: () => outlook.sendOutlookEmail({

@@ -103,12 +103,24 @@ async function captureScripts(runModule, runnerNames, operation, responses = [])
     return {scripts: captured, error};
 }
 
+/** Every directory `tempDir` made, removed when the test process exits. */
+const scratchDirs = [];
+process.on('exit', () => {
+    for (const dir of scratchDirs) fs.rmSync(dir, {recursive: true, force: true});
+});
+
+/** A fresh, empty directory that cleans itself up when the test process exits. */
+function tempDir(prefix = 'ob-test-') {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    scratchDirs.push(dir);
+    return dir;
+}
+
 /** A file that exists, for operations that check attachment paths. */
 function tempFileWith(name, contents = 'x') {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-test-'));
-    const file = path.join(dir, name);
+    const file = path.join(tempDir(), name);
     fs.writeFileSync(file, contents);
     return file;
 }
 
-module.exports = {fakeBackend, captureScripts, tempFileWith};
+module.exports = {fakeBackend, captureScripts, tempDir, tempFileWith};

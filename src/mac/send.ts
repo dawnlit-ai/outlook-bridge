@@ -1,5 +1,5 @@
 // Composing outgoing mail on macOS: a new email, and a reply to an existing one.
-import { asString, field, runOsaScript, splitFields } from './run';
+import { asRow, asString, field, runOsaScript, summaryFields } from './run';
 import { accountLookupSnippet, macMessageId, messageLookupSnippet, resolveMacAccount } from './scripts';
 import { parseRecipient } from '../shared/args';
 import type { Disposition, ReplyRequest, SendRequest } from '../backend';
@@ -23,9 +23,9 @@ import type { ReplyEmailResult, SendEmailResult } from '../types';
 function dispose(variable: string, disposition: Disposition): { prelude: string; action: string } {
     switch (disposition) {
         case 'send':
-            return {prelude: '    set filedDraftId to ""', action: `    send ${variable}`};
+            return { prelude: '    set filedDraftId to ""', action: `    send ${variable}` };
         case 'display':
-            return {prelude: '    set filedDraftId to ""', action: `    open ${variable}`};
+            return { prelude: '    set filedDraftId to ""', action: `    open ${variable}` };
         case 'save':
             return {
                 prelude: `    set filedDraftId to ""
@@ -62,7 +62,7 @@ function dispose(variable: string, disposition: Disposition): { prelude: string;
 /** One `make new … recipient` line per entry, keeping a display name when given. */
 function recipientLines(kind: 'to' | 'cc' | 'bcc', entries: readonly string[]): string[] {
     return entries.map(entry => {
-        const {name, address} = parseRecipient(entry);
+        const { name, address } = parseRecipient(entry);
         const emailAddress = name
             ? `{name:${asString(name)}, address:${asString(address)}}`
             : `{address:${asString(address)}}`;
@@ -73,7 +73,7 @@ function recipientLines(kind: 'to' | 'cc' | 'bcc', entries: readonly string[]): 
 /** Send, display or file a new email; a filed draft reports its id. */
 export async function sendOutlookEmail(request: SendRequest): Promise<SendEmailResult> {
     const acct = await resolveMacAccount(request.account);
-    const {prelude, action} = dispose('newMsg', request.disposition);
+    const { prelude, action } = dispose('newMsg', request.disposition);
     const lines = [
         ...recipientLines('to', request.to),
         ...recipientLines('cc', request.cc),
@@ -90,7 +90,7 @@ ${lines.join('\n')}
 ${action}
     return filedDraftId
 end tell`, 'standard');
-    return {draftEntryId: raw.trim()};
+    return { draftEntryId: raw.trim() };
 }
 
 /**
@@ -104,7 +104,7 @@ end tell`, 'standard');
 export async function replyOutlookEmail(request: ReplyRequest): Promise<ReplyEmailResult> {
     const id = macMessageId(request.email.entryId);
     const acct = await resolveMacAccount(request.account);
-    const {prelude, action} = dispose('theReply', request.disposition);
+    const { prelude, action } = dispose('theReply', request.disposition);
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct, true)}
 ${messageLookupSnippet(id)}
@@ -139,8 +139,8 @@ ${prelude}
         set subj to (subject of theReply) as string
     end try
 ${action}
-    return my sanitize(toLine) & (character id 31) & my sanitize(subj) & (character id 31) & my sanitize(repliedTo)
+    return ${asRow(['toLine', 'subj', 'repliedTo'])}
 end tell`, 'standard');
-    const parts = splitFields(raw);
-    return {to: field(parts, 0), subject: field(parts, 1), repliedToSender: field(parts, 2)};
+    const parts = summaryFields(raw);
+    return { to: field(parts, 0), subject: field(parts, 1), repliedToSender: field(parts, 2) };
 }

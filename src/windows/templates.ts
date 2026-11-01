@@ -3,21 +3,13 @@
 import { psBool, psInt, psString, readScriptOutput, runPowerShell, runPowerShellJson, scriptInput } from './run';
 import { accountScript, DELIVERY_STORE_PS, FIND_FOLDER_PS, SESSION_PS } from './scripts';
 import { bool, record, str, toArray } from '../shared/json';
-import { findTemplateMarkers } from '../templateBody';
+import { MAX_TEMPLATE_HTML, TEMPLATE_PREVIEW_CHARS, TEMPLATE_SEARCH_DEPTH } from '../shared/templateLimits';
+import { findTemplateMarkers, MARKER_TOKEN_SOURCE } from '../templateBody';
 import { FolderId } from '../mail';
 import { NotFoundError } from '../errors';
 import { tempFile } from '../runtime';
 import type { EditTemplateRequest, ReadTemplatesRequest, SaveTemplateRequest } from '../backend';
 import type { SaveTemplateResult, TemplateFolderResult } from '../types';
-
-/** How deep under the mailbox root a template folder is searched for. */
-const TEMPLATE_SEARCH_DEPTH = 3;
-
-/** Cap on one template body; a Word-generated one is large, and a runaway one shouldn't sink the call. */
-const MAX_TEMPLATE_HTML = 100_000;
-
-/** Plain text standing in for a body that wasn't asked for. */
-const PREVIEW_CHARS = 200;
 
 /**
  * The template emails in a mailbox folder, newest first. A missing folder is
@@ -40,7 +32,7 @@ $includeBody = ${psBool(request.includeBody)}
 $wanted = ${psString(request.subject ?? '')}
 $limit = ${psInt(request.limit)}
 $maxHtml = ${psInt(MAX_TEMPLATE_HTML)}
-$previewChars = ${psInt(PREVIEW_CHARS)}
+$previewChars = ${psInt(TEMPLATE_PREVIEW_CHARS)}
 $items = $folder.Items
 $items.Sort('[LastModificationTime]', $true)
 $rows = @()
@@ -75,7 +67,7 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
         $plain = ''
         try { $plain = [string]$item.Body } catch {}
         $found = @()
-        foreach ($m in [regex]::Matches($plain, '\\[\\[\\s*/?\\s*[A-Za-z0-9_-]{1,40}\\s*\\]\\]|\\{\\{\\s*[A-Za-z0-9_-]{1,40}\\s*\\}\\}')) {
+        foreach ($m in [regex]::Matches($plain, ${psString(MARKER_TOKEN_SOURCE)})) {
             $token = $m.Value -replace '\\s', ''
             if ($found -notcontains $token) { $found += $token }
         }
@@ -152,7 +144,7 @@ $mail.Save()
 ConvertTo-Json -Compress -InputObject ([PSCustomObject]@{ folderPath = [string]$folder.FolderPath; folderCreated = $folderCreated })
 `, 'standard');
         const e = record(output);
-        return {folderPath: str(e.folderPath), folderCreated: bool(e.folderCreated)};
+        return { folderPath: str(e.folderPath), folderCreated: bool(e.folderCreated) };
     } finally {
         body.cleanup();
     }

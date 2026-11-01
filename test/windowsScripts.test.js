@@ -21,7 +21,7 @@ const {execFileSync} = require('node:child_process');
 const run = require('../dist/windows/run.js');
 const {windowsBackend} = require('../dist/windows/index.js');
 const {createOperations} = require('../dist/bridge.js');
-const {captureScripts, tempFileWith} = require('./support.js');
+const {captureScripts, tempDir, tempFileWith} = require('./support.js');
 
 const skip = process.platform === 'win32' ? false : 'needs Windows PowerShell';
 
@@ -31,7 +31,7 @@ const EMAIL = {entryId: PROBE, storeId: PROBE};
 
 function probeCases() {
     const attachment = tempFileWith('report.pdf');
-    const destDir = fs.mkdtempSync(path.join(os.tmpdir(), "ob-probe-\u2019$(x)'-"));
+    const destDir = tempDir("ob-probe-\u2019$(x)'-");
     const escapedProbe = PROBE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const outlook = createOperations(windowsBackend);
     return {
@@ -198,5 +198,21 @@ test('a filed draft reports the EntryID Save() gave it; a sent or shown email re
         assert.deepEqual(result, {draftEntryId: ''});
         // A sent item is gone from under the reference; a shown one isn't saved.
         assert.doesNotMatch(other.scripts[0], /\$mail\.EntryID/);
+    }
+});
+
+test('a draft batch reads back the count its script reports, for either verb', async () => {
+    const outlook = createOperations(windowsBackend);
+    const failed = [{entryId: 'E2', subject: 'Stuck', error: 'draft is not bound to someone@example.com'}];
+    const verbs = [['sendDrafts', 'Send', 'sent'], ['deleteOutlookDrafts', 'Delete', 'deleted']];
+    for (const [operation, method, key] of verbs) {
+        let result;
+        const {scripts, error} = await captureScripts(run, ['runPowerShellJson'], async () => {
+            result = await outlook[operation]('someone@example.com', ['E1', 'E2']);
+        }, [{done: 1, failed}]);
+        if (error) throw error;
+        assert.match(scripts[0], new RegExp(`\\$draft\\.${method}\\(\\)`), operation);
+        assert.match(scripts[0], /@\{ done = \$done; failed = @\(\$failed\) \}/, `${operation}: the key it is read by`);
+        assert.deepEqual(result, {[key]: 1, failed}, operation);
     }
 });

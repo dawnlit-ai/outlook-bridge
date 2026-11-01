@@ -19,7 +19,6 @@ const {
     classifyRunFailure,
     errorFromTaggedMessage,
     failureTag,
-    stripFailureTags,
 } = require('../dist/errors.js');
 
 test('every error is an OutlookError carrying a stable code', () => {
@@ -79,10 +78,6 @@ test('a tagged script message becomes the typed error, with the tag removed', ()
     assert.equal(invalid.code, 'INVALID_REQUEST');
 
     assert.equal(errorFromTaggedMessage('Some COM error'), null);
-});
-
-test('stripFailureTags leaves a readable message', () => {
-    assert.equal(stripFailureTags(`${failureTag('NOT_FOUND', 'email')}No email.`), 'No email.');
 });
 
 test('classifyRunFailure turns a tagged failure into its code', () => {

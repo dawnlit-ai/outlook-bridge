@@ -25,7 +25,7 @@ export async function resolveMacAccount(emailAccount: string): Promise<MacAccoun
     const wanted = emailAccount.trim().toLowerCase();
     const found = (await readProfileAccounts())
         .find(account => account.emailAccount.trim().toLowerCase() === wanted);
-    return found ? {emailAccount, folderIds: found.folderIds} : {emailAccount};
+    return found ? { emailAccount, folderIds: found.folderIds } : { emailAccount };
 }
 
 /**
@@ -151,7 +151,7 @@ ${indent}end repeat`;
 }
 
 /** The dictionary term for a root, or NOT_IMPLEMENTED naming what was asked. */
-export function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
+function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
     const term = MAC_ROOT_TERMS[ref.rootId];
     if (!term) {
         const asked = folderLabel ? ` (asked for '${folderLabel}')` : '';
@@ -226,35 +226,34 @@ export function partitionMessageIds(entryIds: readonly string[]): { valid: strin
         try {
             valid.push(macMessageId(entryId));
         } catch (error) {
-            invalid.push({entryId: String(entryId), subject: '', error: (error as Error).message});
+            invalid.push({ entryId: String(entryId), subject: '', error: (error as Error).message });
         }
     }
-    return {valid, invalid};
+    return { valid, invalid };
 }
 
 /**
- * Resolve `variable` from a message id, or fail as NOT_FOUND. `message id N`
- * resolves against the application, so the message is found wherever it sits.
+ * Bind `theMsg` to a message id, or fail as NOT_FOUND. `message id N` resolves
+ * against the application, so the message is found wherever it sits.
  */
-export function messageLookupSnippet(id: string, variable = 'theMsg'): string {
+export function messageLookupSnippet(id: string): string {
     const complaint = `${failureTag('NOT_FOUND', 'email')}No email found for message id '${id}'. It may have been deleted - list the mail again for a current id.`;
-    return `    set ${variable} to missing value
+    return `    set theMsg to missing value
     try
-        set ${variable} to message id ${id}
+        set theMsg to message id ${id}
     end try
-    if ${variable} is missing value then error ${asString(complaint)}`;
+    if theMsg is missing value then error ${asString(complaint)}`;
 }
 
 /**
- * The sender's display name and address as `sndName` / `sndAddr`. `sender` is a
- * record, and `address of sender of m` doesn't coerce, so the record is bound
- * first.
+ * `theMsg`'s sender as `sndName` / `sndAddr`. `sender` is a record, and
+ * `address of sender of m` doesn't coerce, so the record is bound first.
  */
-export function senderSnippet(messageVariable = 'theMsg', indent = '    '): string {
+export function senderSnippet(indent = '    '): string {
     return `${indent}set sndName to ""
 ${indent}set sndAddr to ""
 ${indent}try
-${indent}    set snd to sender of ${messageVariable}
+${indent}    set snd to sender of theMsg
 ${indent}    try
 ${indent}        set sndAddr to (address of snd) as string
 ${indent}    end try
@@ -275,7 +274,7 @@ export function messageDetailSnippet(withBody = false, indent = '    '): string 
 ${indent}try
 ${indent}    set subj to (subject of theMsg) as string
 ${indent}end try
-${senderSnippet('theMsg', indent)}
+${senderSnippet(indent)}
 ${indent}set recvd to ""
 ${indent}try
 ${indent}    set recvd to my isoDate(time received of theMsg)
@@ -313,14 +312,14 @@ export const MessageDetail = {
 } as const;
 
 /**
- * The first recipient's name and address as `sndName` / `sndAddr` — what
- * outgoing mail reports in place of a sender.
+ * `theMsg`'s first recipient as `sndName` / `sndAddr` — what outgoing mail
+ * reports in place of a sender.
  */
-export function firstRecipientSnippet(messageVariable = 'theMsg', indent = '    '): string {
+export function firstRecipientSnippet(indent = '    '): string {
     return `${indent}set sndName to ""
 ${indent}set sndAddr to ""
 ${indent}try
-${indent}    set rcps to to recipients of ${messageVariable}
+${indent}    set rcps to to recipients of theMsg
 ${indent}    if (count of rcps) > 0 then
 ${indent}        set ea to email address of (item 1 of rcps)
 ${indent}        try
@@ -333,11 +332,11 @@ ${indent}    end if
 ${indent}end try`;
 }
 
-/** Every address a message was sent to — To, CC and BCC — as the list `addrList`. */
-export function allRecipientsSnippet(messageVariable = 'theMsg', indent = '    '): string {
+/** Every address `theMsg` was sent to — To, CC and BCC — as the list `addrList`. */
+export function allRecipientsSnippet(indent = '    '): string {
     return `${indent}set addrList to {}
 ${indent}try
-${indent}    repeat with r in (every recipient of ${messageVariable})
+${indent}    repeat with r in (every recipient of theMsg)
 ${indent}        try
 ${indent}            -- The record is bound before its field is read: a nested
 ${indent}            -- 'address of (email address of r)' doesn't coerce, and fails

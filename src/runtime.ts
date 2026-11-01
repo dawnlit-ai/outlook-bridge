@@ -84,7 +84,7 @@ const scoped = new AsyncLocalStorage<ResolvedConfig>();
 
 /** Caller options merged over a base; keys left out keep the base's value. */
 export function mergeOptions(base: ResolvedConfig, options: BridgeOptions = {}): ResolvedConfig {
-    const next = {...base};
+    const next = { ...base };
     if (options.timeoutMs === null) next.timeoutMs = undefined;
     else if (options.timeoutMs !== undefined) next.timeoutMs = nonNegative(options.timeoutMs, 'timeoutMs');
     if (options.maxBufferBytes !== undefined) next.maxBufferBytes = Math.max(1, nonNegative(options.maxBufferBytes, 'maxBufferBytes'));
@@ -156,7 +156,7 @@ export function timeoutFor(budget: RunBudget): number {
 
 /** Report one finished run to the configured debug hook. */
 export function reportRun(event: BridgeDebugEvent): void {
-    const {debug} = getConfig();
+    const { debug } = getConfig();
     if (!debug) return;
     if (typeof debug === 'function') {
         debug(event);
@@ -204,7 +204,7 @@ export interface AttachmentDestination {
 export function attachmentDestination(destDir?: string): AttachmentDestination {
     if (destDir) {
         const existed = fs.existsSync(destDir);
-        fs.mkdirSync(destDir, {recursive: true});
+        fs.mkdirSync(destDir, { recursive: true });
         return {
             dir: destDir,
             discardIfUnused() {
@@ -213,7 +213,7 @@ export function attachmentDestination(destDir?: string): AttachmentDestination {
         };
     }
     const dir = fs.mkdtempSync(path.join(getConfig().tempDir, 'outlook-bridge-attachments-'));
-    return {dir, discardIfUnused: () => removeIfEmpty(dir)};
+    return { dir, discardIfUnused: () => removeIfEmpty(dir) };
 }
 
 function removeIfEmpty(dir: string): void {

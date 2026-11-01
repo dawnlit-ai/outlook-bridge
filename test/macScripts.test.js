@@ -16,7 +16,7 @@ const {execFileSync} = require('node:child_process');
 const macRun = require('../dist/mac/run.js');
 const {macBackend} = require('../dist/mac/index.js');
 const {createOperations} = require('../dist/bridge.js');
-const {captureScripts, tempFileWith} = require('./support.js');
+const {captureScripts, tempDir, tempFileWith} = require('./support.js');
 
 const OUTLOOK_APP = '/Applications/Microsoft Outlook.app';
 const runnable = process.platform === 'darwin' && fs.existsSync(OUTLOOK_APP);
@@ -122,7 +122,9 @@ const CASES = {
         responses: [row('1263', 'false'), row('1', '0')],
     },
     saveEmailAttachments: {
-        run: () => outlook.saveEmailAttachments('1263', ['invoice.pdf']),
+        // A destDir of its own: with the runner stubbed nothing is saved, and
+        // the private directory a call makes by default would be left behind.
+        run: () => outlook.saveEmailAttachments('1263', ['invoice.pdf'], {destDir: tempDir()}),
         responses: [row('1263', 'Subject', 'Name', 'a@example.com', '2026-08-01 09:30', 'invoice.pdf')],
     },
     cleanUndeliverableEmails: {
