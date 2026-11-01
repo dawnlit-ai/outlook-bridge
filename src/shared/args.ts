@@ -125,11 +125,11 @@ export function entryIdList(value: unknown, name = 'entryIds'): string[] {
 
 /** Where an email lives, from an id or anything carrying a locator. */
 export function emailLocator(email: EmailRef | undefined | null, name = 'email'): EmailLocator {
-    if (typeof email === 'string') return {entryId: requiredText(email, name)};
+    if (typeof email === 'string') return { entryId: requiredText(email, name) };
     if (email && typeof email === 'object') {
         const entryId = requiredText(email.entryId, `${name}.entryId`);
         const storeId = optionalText(email.storeId, `${name}.storeId`);
-        return storeId ? {entryId, storeId} : {entryId};
+        return storeId ? { entryId, storeId } : { entryId };
     }
     throw new InvalidRequestError(`${name} must be an entry id or an object with an entryId (got ${describe(email)}).`);
 }
@@ -199,7 +199,7 @@ export interface ParsedRecipient {
 /** `"Doe, Jo" <jo@example.com>` → name + address; a bare address has no name. */
 export function parseRecipient(entry: string): ParsedRecipient {
     const angled = /^(.*)<([^<>]+)>\s*$/.exec(entry);
-    if (!angled) return {name: '', address: entry.trim()};
+    if (!angled) return { name: '', address: entry.trim() };
     const name = angled[1].trim().replace(/^"(.*)"$/, '$1').trim();
-    return {name, address: angled[2].trim()};
+    return { name, address: angled[2].trim() };
 }

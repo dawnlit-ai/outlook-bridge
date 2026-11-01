@@ -13,10 +13,12 @@ import {
     boolField,
     field,
     intField,
+    ITEM_FAILURE_ROW,
     runOsaScript,
+    splitBatch,
     splitFields,
     splitList,
-    splitRecords
+    splitRecords,
 } from './run';
 import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet } from './scripts';
 import { bounceReason, DSN_HEADER_MARKERS, failedRecipients } from '../shared/bounceRules';
@@ -144,11 +146,11 @@ end tell`, 'scan');
 /** Classify an index, then fill each match's failed recipients from its body. */
 async function collectBounces(indexed: readonly IndexedMessage[], accountAddress: string): Promise<UndeliverableEmail[]> {
     const matched = indexed
-        .map(message => ({message, reason: bounceReason(message)}))
+        .map(message => ({ message, reason: bounceReason(message) }))
         .filter(entry => entry.reason !== '');
     if (matched.length === 0) return [];
     const bodies = await readBodies(matched.map(entry => entry.message.id));
-    return matched.map(({message, reason}) => ({
+    return matched.map(({ message, reason }) => ({
         entryId: message.id,
         subject: message.subject,
         senderName: message.senderName,
@@ -168,9 +170,9 @@ async function collectBounces(indexed: readonly IndexedMessage[], accountAddress
 export async function cleanUndeliverableEmails(request: CleanUndeliverableRequest): Promise<CleanUndeliverableResult> {
     const matched = await collectBounces(await indexFolder(request.account, 'inbox', request.daysBack), request.account);
     let deletedCount = 0;
-    const failed: ItemFailure[] = [];
+    let failed: ItemFailure[] = [];
     if (!request.dryRun && matched.length > 0) {
-        const raw = await runOsaScript(`tell application "Microsoft Outlook"
+        const batch = splitBatch(await runOsaScript(`tell application "Microsoft Outlook"
     set deletedCount to 0
     set out to ""
     repeat with theId in ${asIdList(matched.map(m => m.entryId))}
@@ -187,17 +189,13 @@ export async function cleanUndeliverableEmails(request: CleanUndeliverableReques
             delete theMsg
             set deletedCount to deletedCount + 1
         on error errText
-            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
+            set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
     return ${asRow(['(deletedCount as string)'])} & out
-end tell`, 'scan');
-        const records = splitRecords(raw);
-        deletedCount = intField(splitFields(records[0] ?? ''), 0);
-        for (const record of records.slice(1)) {
-            const parts = splitFields(record);
-            failed.push({entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2)});
-        }
+end tell`, 'scan'));
+        deletedCount = intField(batch.summary, 0);
+        failed = batch.failed;
     }
     return {
         account: request.account,
@@ -252,7 +250,7 @@ ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
     return out
 end tell`, 'scan')).map(record => {
         const parts = splitFields(record);
-        return {id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2)};
+        return { id: field(parts, 0), subject: field(parts, 1).trim(), sentOn: field(parts, 2) };
     });
     indexed.sort((a, b) => b.sentOn.localeCompare(a.sentOn));
     const chosen = indexed.slice(0, request.limit);
@@ -268,7 +266,7 @@ end tell`, 'scan')).map(record => {
             set theMsg to message id theId
         end try
         if theMsg is not missing value then
-${allRecipientsSnippet('theMsg', '            ')}
+${allRecipientsSnippet('            ')}
             set out to out & ${asRow(['(theId as string)', 'my sanitizeList(addrList)'])}
         end if
     end repeat
@@ -283,7 +281,7 @@ end tell`, 'scan');
             entryId: row.id,
             subject: row.subject,
             sentOn: row.sentOn,
-            recipients: recipientsById.get(row.id) ?? []
+            recipients: recipientsById.get(row.id) ?? [],
         }))
         .filter(group => group.recipients.length > 0);
 }

@@ -1,8 +1,9 @@
-// Platform-neutral mail helpers: folder strings, reply prefixes, and splitting a
-// reply from the thread it quotes. Pure functions, usable without Outlook, and
-// shared by both platforms so neither can come to read these differently.
+// Platform-neutral mail helpers: folder strings, reply prefixes, splitting a
+// reply from the thread it quotes, and what deleting mail reports. Pure
+// functions, usable without Outlook, and shared by both platforms so neither can
+// come to read these differently.
 import { InvalidRequestError } from './errors';
-import type { MailFolderRef } from './types';
+import type { DeleteMailOutcome, DeleteMailResult, MailFolderRef } from './types';
 
 /**
  * Outlook's olDefaultFolders ids for the folders this package addresses by
@@ -38,7 +39,7 @@ export const WELL_KNOWN_FOLDERS: Readonly<Record<string, number>> = Object.freez
 });
 
 /** The Inbox root, as a folder reference. */
-export const INBOX_REF: Readonly<MailFolderRef> = Object.freeze({
+const INBOX_REF: Readonly<MailFolderRef> = Object.freeze({
     rootId: FolderId.Inbox,
     rootLabel: 'Inbox',
     segments: [],
@@ -50,6 +51,19 @@ export const INBOX_REF: Readonly<MailFolderRef> = Object.freeze({
  */
 export const PROTECTED_MAIL_REASON =
     'received or sent mail (Inbox/Sent Items or a subfolder) - pass allowProtected to override';
+
+const DELETE_STATUSES: readonly DeleteMailOutcome['status'][] = ['deleted', 'would-delete', 'refused', 'failed'];
+
+/** The status a delete script reported for one item; anything it shouldn't have said is a failure. */
+export function deleteStatus(reported: string): DeleteMailOutcome['status'] {
+    return DELETE_STATUSES.find(status => status === reported) ?? 'failed';
+}
+
+/** A deleteOutlookEmails result: every outcome, and how many ended each way. */
+export function deleteMailResult(dryRun: boolean, items: DeleteMailOutcome[]): DeleteMailResult {
+    const tally = (status: DeleteMailOutcome['status']) => items.filter(item => item.status === status).length;
+    return { dryRun, deleted: tally('deleted'), refused: tally('refused'), failed: tally('failed'), items };
+}
 
 /**
  * Roots whose items are outgoing mail, which carries a sent time where incoming
@@ -165,9 +179,9 @@ export function mailFolderRef(folder: string): MailFolderRef {
     const segments = folderSegments(folder);
     const head = segments[0]?.toLowerCase();
     if (head !== undefined && Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
-        return {rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1)};
+        return { rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1) };
     }
-    return {rootId: FolderId.Inbox, rootLabel: 'Inbox', segments};
+    return { rootId: FolderId.Inbox, rootLabel: 'Inbox', segments };
 }
 
 /**
@@ -176,11 +190,11 @@ export function mailFolderRef(folder: string): MailFolderRef {
  * than silently read as the Inbox root.
  */
 export function folderOption(folder: string | undefined): { ref: MailFolderRef; label: string } {
-    if (folder === undefined || folder.trim() === '') return {ref: INBOX_REF, label: 'Inbox'};
+    if (folder === undefined || folder.trim() === '') return { ref: INBOX_REF, label: 'Inbox' };
     if (folderSegments(folder).length === 0) {
         throw new InvalidRequestError(`Folder '${folder}' does not name a folder.`);
     }
-    return {ref: mailFolderRef(folder), label: folder.trim()};
+    return { ref: mailFolderRef(folder), label: folder.trim() };
 }
 
 /**
@@ -198,7 +212,7 @@ export function folderOption(folder: string | undefined): { ref: MailFolderRef; 
  */
 export function splitQuotedOriginal(text: string): { body: string; quoted: string; separator: string } {
     const lines = text.split(/\r?\n/);
-    const whole = {body: text, quoted: '', separator: ''};
+    const whole = { body: text, quoted: '', separator: '' };
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         let separator = '';
@@ -215,7 +229,7 @@ export function splitQuotedOriginal(text: string): { body: string; quoted: strin
         if (!separator) continue;
         const body = lines.slice(0, i).join('\n').trimEnd();
         if (!body.trim()) return whole;
-        return {body, quoted: lines.slice(i).join('\n').trim(), separator};
+        return { body, quoted: lines.slice(i).join('\n').trim(), separator };
     }
     return whole;
 }

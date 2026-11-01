@@ -209,9 +209,11 @@ helpers, the error taxonomy, and the generated scripts themselves:
 - **On Windows**, every PowerShell script every operation generates is put through PowerShell's own parser, with
   arguments built to break out of a badly escaped literal. The test fails on a syntax error, and on any caller text
   inside a double-quoted string.
-- **On a Mac with Outlook installed**, every AppleScript is compiled with `osacompile`, which resolves dictionary terms
-  without opening a session. Elsewhere, those tests skip; two guards that need no Outlook — no assignment to a reserved
-  AppleScript word, no record field read through a nested accessor — run everywhere.
+- **Everywhere**, the AppleScript counterpart: every macOS script is checked for caller text outside its string
+  literals and for the two mistakes compiling can't catch — an assignment to a reserved AppleScript word, a record
+  field read through a nested accessor — and canned script output is decoded into the result shapes Windows returns.
+- **On a Mac**, the hostile argument is also round-tripped through `osascript`, and with Outlook installed every
+  AppleScript is compiled with `osacompile`, which resolves dictionary terms without opening a session.
 
 What no test covers is the automation itself: that a move really filed the mail, or a reply threaded correctly, is
 verified against a live mailbox.

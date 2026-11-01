@@ -13,7 +13,7 @@ import path from 'path';
  * trivially reformatted file name still resolves. Both platforms' regex engines
  * count U+00A0 as whitespace.
  */
-export function normalizeAttachmentName(name: string): string {
+function normalizeAttachmentName(name: string): string {
     return name.replace(/\s+/g, ' ').trim();
 }
 

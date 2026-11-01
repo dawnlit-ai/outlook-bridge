@@ -12,7 +12,7 @@ import {
     splitFields,
     splitList,
     splitRecords,
-    summaryFields
+    summaryFields,
 } from './run';
 import {
     accountLookupSnippet,
@@ -20,13 +20,11 @@ import {
     macFolderPath,
     partitionMessageIds,
     resolveMacAccount,
-    rootFolderSnippet
+    rootFolderSnippet,
 } from './scripts';
-import { PROTECTED_MAIL_REASON } from '../mail';
+import { deleteMailResult, deleteStatus, PROTECTED_MAIL_REASON } from '../mail';
 import type { DeleteEmailsRequest, PurgeRequest } from '../backend';
 import type { DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult } from '../types';
-
-const OUTCOME_STATUSES: readonly DeleteMailOutcome['status'][] = ['deleted', 'would-delete', 'refused', 'failed'];
 
 /**
  * Delete mail by message id from anywhere in the account, into Deleted Items.
@@ -35,7 +33,7 @@ const OUTCOME_STATUSES: readonly DeleteMailOutcome['status'][] = ['deleted', 'wo
  * subject and folder of the item that actually resolved.
  */
 export async function deleteOutlookEmails(request: DeleteEmailsRequest): Promise<DeleteMailResult> {
-    const {valid, invalid} = partitionMessageIds(request.entryIds);
+    const { valid, invalid } = partitionMessageIds(request.entryIds);
     const items: DeleteMailOutcome[] = invalid.map(bad => ({
         entryId: bad.entryId,
         subject: '',
@@ -104,18 +102,12 @@ end reverseList`, 'scan');
                 entryId: field(parts, 0),
                 subject: field(parts, 1).trim(),
                 folderPath: segments.length ? macFolderPath(request.account, segments[0], segments.slice(1)) : '',
-                status: OUTCOME_STATUSES.find(s => s === field(parts, 3)) ?? 'failed',
+                status: deleteStatus(field(parts, 3)),
                 reason: field(parts, 4),
             });
         }
     }
-    return {
-        dryRun: request.dryRun,
-        deleted: items.filter(i => i.status === 'deleted').length,
-        refused: items.filter(i => i.status === 'refused').length,
-        failed: items.filter(i => i.status === 'failed').length,
-        items,
-    };
+    return deleteMailResult(request.dryRun, items);
 }
 
 /**
@@ -150,12 +142,12 @@ end tell`, 'scan');
 
     const rows = splitRecords(index).map(record => {
         const parts = splitFields(record);
-        return {id: field(parts, 0), keep: boolField(parts, 1)};
+        return { id: field(parts, 0), keep: boolField(parts, 1) };
     });
     const doomed = rows.filter(row => !row.keep);
     const kept = rows.length - doomed.length;
     if (request.dryRun || doomed.length === 0) {
-        return {folderPath, dryRun: request.dryRun, matched: doomed.length, purged: 0, kept, failed: 0};
+        return { folderPath, dryRun: request.dryRun, matched: doomed.length, purged: 0, kept, failed: 0 };
     }
 
     const summary = summaryFields(await runOsaScript(`tell application "Microsoft Outlook"

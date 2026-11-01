@@ -89,22 +89,22 @@ $storeId = $store.StoreID
 `;
 
 /**
- * Resolve one email into `$<variable>`, or fail as NOT_FOUND.
+ * Resolve one email into `$item`, or fail as NOT_FOUND.
  *
  * The StoreID is tried first, since it lets an id from any mounted mailbox
  * resolve; the bare lookup (default store) is the fallback for a caller holding
  * a stale StoreID or none.
  */
-export function itemLookupScript(email: EmailLocator, variable = 'item'): string {
+export function itemLookupScript(email: EmailLocator): string {
     const byStore = email.storeId
-        ? `try { $${variable} = $ns.GetItemFromID($lookupId, ${psString(email.storeId)}) } catch { $${variable} = $null }`
+        ? `try { $item = $ns.GetItemFromID($lookupId, ${psString(email.storeId)}) } catch { $item = $null }`
         : '';
     return `
 $lookupId = ${psString(email.entryId)}
-$${variable} = $null
+$item = $null
 ${byStore}
-if ($${variable} -eq $null) { try { $${variable} = $ns.GetItemFromID($lookupId) } catch { $${variable} = $null } }
-if ($${variable} -eq $null) {
+if ($item -eq $null) { try { $item = $ns.GetItemFromID($lookupId) } catch { $item = $null } }
+if ($item -eq $null) {
     throw "${failureTag('NOT_FOUND', 'email')}No email found for entry id '$lookupId'. It may have been moved or deleted - list the mail again for a current id."
 }
 `;
@@ -157,14 +157,14 @@ $cutoffFilter = $cutoff.ToString('g').Replace("'", "''")
 }
 
 /**
- * `$<variable>` = the items of `$<folderVariable>` with `property` on or after
+ * `$filtered` = the items of `$<folderVariable>` with `property` on or after
  * `$cutoff`. Requires `cutoffScript`. A store that rejects the filter outright
  * yields every item instead, which the per-item re-check then narrows.
  */
-export function itemsSinceScript(folderVariable: string, property: string, variable: string): string {
+export function itemsSinceScript(folderVariable: string, property: string): string {
     return `
-$${variable} = $null
-try { $${variable} = $${folderVariable}.Items.Restrict("[${property}] >= '$cutoffFilter'") } catch { $${variable} = $${folderVariable}.Items }
+$filtered = $null
+try { $filtered = $${folderVariable}.Items.Restrict("[${property}] >= '$cutoffFilter'") } catch { $filtered = $${folderVariable}.Items }
 `;
 }
 

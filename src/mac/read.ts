@@ -17,7 +17,7 @@ import {
     splitFields,
     splitList,
     splitRecords,
-    summaryFields
+    summaryFields,
 } from './run';
 import { readProfileAccounts } from './profile';
 import {
@@ -79,7 +79,7 @@ end tell`, 'standard'))
         .filter(Boolean)
         .map(line => {
             const [id, receivedTime] = line.split('\t');
-            return {id, receivedTime: receivedTime || ''};
+            return { id, receivedTime: receivedTime || '' };
         });
     // 'yyyy-MM-dd HH:mm' sorts correctly as a string.
     index.sort((a, b) => b.receivedTime.localeCompare(a.receivedTime));
@@ -106,7 +106,7 @@ end tell`, 'standard'))
             try
                 set subj to (subject of theMsg) as string
             end try
-${outgoing ? firstRecipientSnippet('theMsg', '            ') : senderSnippet('theMsg', '            ')}
+${outgoing ? firstRecipientSnippet('            ') : senderSnippet('            ')}
 ${preview}
             set attNames to {}
             try
@@ -285,12 +285,6 @@ return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames,
                 set bodyText to (plain text content of theMsg) as string
             end try`
         : '            set bodyText to ""';
-    const details = new Map<string, {
-        senderName: string;
-        senderEmail: string;
-        attachmentNames: string[];
-        body: string
-    }>();
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(candidates.map(c => c.id))}
@@ -299,7 +293,7 @@ return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames,
             set theMsg to message id theId
         end try
         if theMsg is not missing value then
-${senderSnippet('theMsg', '            ')}
+${senderSnippet('            ')}
             set attNames to {}
             try
                 set attNames to name of every attachment of theMsg
@@ -310,15 +304,16 @@ ${body}
     end repeat
     return out
 end tell`, 'scan');
-    for (const record of splitRecords(raw)) {
+    const details = new Map(splitRecords(raw).map(record => {
         const parts = splitFields(record);
-        details.set(field(parts, 0), {
+        const detail = {
             senderName: field(parts, 1),
             senderEmail: field(parts, 2),
             attachmentNames: splitList(field(parts, 3)),
             body: field(parts, 4),
-        });
-    }
+        };
+        return [field(parts, 0), detail] as const;
+    }));
 
     const matches: InboxSearchMatch[] = [];
     for (const candidate of candidates) {

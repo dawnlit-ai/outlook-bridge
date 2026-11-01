@@ -4,7 +4,7 @@ import { accountScript, DELIVERY_STORE_PS } from './scripts';
 import { bool, itemFailures, num, record, str, strList, toArray } from '../shared/json';
 import { FolderId } from '../mail';
 import type { AccountRequest, EntryIdsRequest, ListDraftsRequest } from '../backend';
-import type { DeleteDraftsResult, ListDraftsResult, SendDraftsResult } from '../types';
+import type { DeleteDraftsResult, ItemFailure, ListDraftsResult, SendDraftsResult } from '../types';
 
 /**
  * Resolve the Drafts folders belonging to one account into `$scan`, and define
@@ -143,26 +143,35 @@ ConvertTo-Json -Depth 4 -InputObject ([PSCustomObject]@{
     };
 }
 
-/** Send the named drafts, each proved to be this account's first. */
-export async function sendDrafts(request: EntryIdsRequest): Promise<SendDraftsResult> {
+/** Run `verb` over the named drafts of the account, each proved to be its own first. */
+async function actOnDrafts(
+    request: EntryIdsRequest,
+    verb: 'send' | 'delete',
+): Promise<{ done: number; failed: ItemFailure[] }> {
     const output = await runPowerShellJson(`${draftsScript(request.account)}
-$sent = 0
+$done = 0
 $failed = @()
 foreach ($id in ${psArray(request.entryIds)}) {
     $subject = ''
     try {
-        $draft = Resolve-OwnDraft $id 'send'
+        $draft = Resolve-OwnDraft $id '${verb}'
         try { $subject = [string]$draft.Subject } catch {}
-        $draft.Send()
-        $sent++
+        $draft.${verb === 'send' ? 'Send' : 'Delete'}()
+        $done++
     } catch {
         $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
     }
 }
-ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ sent = $sent; failed = @($failed) })
+ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ done = $done; failed = @($failed) })
 `, 'scan');
     const e = record(output);
-    return {sent: num(e.sent), failed: itemFailures(e.failed)};
+    return { done: num(e.done), failed: itemFailures(e.failed) };
+}
+
+/** Send the named drafts. */
+export async function sendDrafts(request: EntryIdsRequest): Promise<SendDraftsResult> {
+    const { done, failed } = await actOnDrafts(request, 'send');
+    return { sent: done, failed };
 }
 
 /**
@@ -197,32 +206,16 @@ foreach ($draft in $drafts) {
 ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ sent = $sent; failed = @($failed) })
 `, 'scan');
     const e = record(output);
-    return {sent: num(e.sent), failed: itemFailures(e.failed)};
+    return { sent: num(e.sent), failed: itemFailures(e.failed) };
 }
 
 /**
- * Delete the named drafts, each proved to be this account's first. Outlook's
- * Delete() moves an item to Deleted Items, so a mistake stays recoverable.
- * Without the proof this would be a general "delete any email by id" call,
+ * Delete the named drafts. Outlook's Delete() moves an item to Deleted Items,
+ * so a mistake stays recoverable. Without the proof that each is this
+ * account's draft, this would be a general "delete any email by id" call,
  * which is not what it is for.
  */
 export async function deleteOutlookDrafts(request: EntryIdsRequest): Promise<DeleteDraftsResult> {
-    const output = await runPowerShellJson(`${draftsScript(request.account)}
-$deleted = 0
-$failed = @()
-foreach ($id in ${psArray(request.entryIds)}) {
-    $subject = ''
-    try {
-        $draft = Resolve-OwnDraft $id 'delete'
-        try { $subject = [string]$draft.Subject } catch {}
-        $draft.Delete()
-        $deleted++
-    } catch {
-        $failed += [PSCustomObject]@{ entryId = $id; subject = $subject; error = $_.Exception.Message }
-    }
-}
-ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{ deleted = $deleted; failed = @($failed) })
-`, 'scan');
-    const e = record(output);
-    return {deleted: num(e.deleted), failed: itemFailures(e.failed)};
+    const { done, failed } = await actOnDrafts(request, 'delete');
+    return { deleted: done, failed };
 }

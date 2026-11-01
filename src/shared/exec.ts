@@ -27,7 +27,7 @@ export interface ProcessOutput {
 
 /** Run one script to completion, rejecting with the most specific OutlookError on failure. */
 export function runScriptProcess(run: ScriptProcess): Promise<ProcessOutput> {
-    const {maxBufferBytes, signal} = getConfig();
+    const { maxBufferBytes, signal } = getConfig();
     const timeout = timeoutFor(run.budget);
     const startedAt = Date.now();
     return new Promise((resolve, reject) => {
@@ -36,11 +36,11 @@ export function runScriptProcess(run: ScriptProcess): Promise<ProcessOutput> {
             [...run.args],
             // windowsHide keeps a GUI host (an Electron app, say) from flashing a
             // console window on every run.
-            {maxBuffer: maxBufferBytes, timeout, signal, windowsHide: true, encoding: 'utf8'},
+            { maxBuffer: maxBufferBytes, timeout, signal, windowsHide: true, encoding: 'utf8' },
             (error, stdout, stderr) => {
                 const durationMs = Date.now() - startedAt;
                 if (error) {
-                    const {message, line} = run.parseFailure(stderr ?? '');
+                    const { message, line } = run.parseFailure(stderr ?? '');
                     const failure = classifyRunFailure({
                         runner: run.runner,
                         script: run.script,
@@ -53,12 +53,12 @@ export function runScriptProcess(run: ScriptProcess): Promise<ProcessOutput> {
                         maxBufferBytes,
                         signal,
                     });
-                    reportRun({runner: run.runner, script: run.script, durationMs, error: failure.message});
+                    reportRun({ runner: run.runner, script: run.script, durationMs, error: failure.message });
                     reject(failure);
                     return;
                 }
-                reportRun({runner: run.runner, script: run.script, durationMs});
-                resolve({stdout, durationMs});
+                reportRun({ runner: run.runner, script: run.script, durationMs });
+                resolve({ stdout, durationMs });
             },
         );
     });

@@ -7,10 +7,12 @@ import {
     boolField,
     field,
     intField,
+    ITEM_FAILURE_ROW,
     runOsaScript,
+    splitBatch,
     splitFields,
     splitList,
-    splitRecords
+    splitRecords,
 } from './run';
 import {
     accountLookupSnippet,
@@ -81,8 +83,8 @@ return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
  */
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
     const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
-    const {valid, invalid} = partitionMessageIds(request.entryIds);
-    if (valid.length === 0) return {folderPath, folderCreated: false, moved: 0, failed: invalid};
+    const { valid, invalid } = partitionMessageIds(request.entryIds);
+    if (valid.length === 0) return { folderPath, folderCreated: false, moved: 0, failed: invalid };
     const acct = await resolveMacAccount(request.account);
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
@@ -104,7 +106,7 @@ ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMi
             move theMsg to scopeFolder
             set movedCount to movedCount + 1
         on error errText
-            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
+            set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
     set countAfter to count of messages of scopeFolder
@@ -113,18 +115,11 @@ ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMi
     end if
     return ${asRow(['(movedCount as string)', '(scopeCreated as string)'])} & out
 end tell`, 'scan');
-    const records = splitRecords(raw);
-    const summary = splitFields(records[0] ?? '');
+    const { summary, failed } = splitBatch(raw);
     return {
         folderPath,
         folderCreated: boolField(summary, 1),
         moved: intField(summary, 0),
-        failed: [
-            ...invalid,
-            ...records.slice(1).map(record => {
-                const parts = splitFields(record);
-                return {entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2)};
-            }),
-        ],
+        failed: [...invalid, ...failed],
     };
 }

@@ -74,7 +74,7 @@ ${attach}
 ${dispose('mail', request.disposition)}
 ConvertTo-Json -Compress @{ draftEntryId = ${draftEntryId} }
 `, 'standard');
-        return {draftEntryId: str(record(output).draftEntryId)};
+        return { draftEntryId: str(record(output).draftEntryId) };
     } finally {
         body.cleanup();
     }
@@ -106,7 +106,7 @@ ${dispose('reply', request.disposition)}
 ConvertTo-Json -Compress @{ to = $to; subject = $subject; repliedToSender = $senderSmtp }
 `, 'standard');
         const result = record(output);
-        return {to: str(result.to), subject: str(result.subject), repliedToSender: str(result.repliedToSender)};
+        return { to: str(result.to), subject: str(result.subject), repliedToSender: str(result.repliedToSender) };
     } finally {
         insert.cleanup();
     }

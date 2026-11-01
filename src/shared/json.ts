@@ -4,6 +4,7 @@
 // single-element array into a bare object, and it renders an empty one as
 // nothing at all. Every list crossing that boundary goes through `toArray`, and
 // every scalar through a coercion that survives a missing property.
+import type { ItemFailure } from '../types';
 
 /** One value as a list: an array stays, null and undefined become empty, anything else wraps. */
 export function toArray(value: unknown): unknown[] {
@@ -40,9 +41,9 @@ export function base64Text(value: unknown): string {
 }
 
 /** A list of per-item failures, as the scripts report them. */
-export function itemFailures(value: unknown): { entryId: string; subject: string; error: string }[] {
+export function itemFailures(value: unknown): ItemFailure[] {
     return toArray(value).map(row => {
         const e = record(row);
-        return {entryId: str(e.entryId), subject: str(e.subject), error: str(e.error)};
+        return { entryId: str(e.entryId), subject: str(e.subject), error: str(e.error) };
     });
 }

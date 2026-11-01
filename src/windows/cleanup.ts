@@ -2,14 +2,12 @@
 import { psArray, psBool, psInt, psString, runPowerShellJson } from './run';
 import { accountScript, cutoffScript, DELIVERY_STORE_PS } from './scripts';
 import { num, record, str, toArray } from '../shared/json';
-import { FolderId, PROTECTED_MAIL_REASON } from '../mail';
+import { deleteMailResult, deleteStatus, FolderId, PROTECTED_MAIL_REASON } from '../mail';
 import type { DeleteEmailsRequest, PurgeRequest } from '../backend';
 import type { DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult } from '../types';
 
 /** Folders whose contents are received or sent mail rather than working state. */
 const PROTECTED_FOLDER_IDS = [FolderId.Inbox, FolderId.SentMail];
-
-const OUTCOME_STATUSES: readonly DeleteMailOutcome['status'][] = ['deleted', 'would-delete', 'refused', 'failed'];
 
 /**
  * Delete mail by entry id from anywhere in the account. Delete() moves each item
@@ -77,22 +75,15 @@ ConvertTo-Json -Depth 3 -InputObject @($items)
 `, 'scan');
     const items: DeleteMailOutcome[] = toArray(output).map(row => {
         const e = record(row);
-        const status = OUTCOME_STATUSES.find(s => s === str(e.status)) ?? 'failed';
         return {
             entryId: str(e.entryId),
             subject: str(e.subject),
             folderPath: str(e.folderPath),
-            status,
+            status: deleteStatus(str(e.status)),
             reason: str(e.reason),
         };
     });
-    return {
-        dryRun: request.dryRun,
-        deleted: items.filter(i => i.status === 'deleted').length,
-        refused: items.filter(i => i.status === 'refused').length,
-        failed: items.filter(i => i.status === 'failed').length,
-        items,
-    };
+    return deleteMailResult(request.dryRun, items);
 }
 
 /**

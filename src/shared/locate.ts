@@ -96,7 +96,7 @@ function senderMatches(wanted: string, match: InboxSearchMatch): boolean {
  * ranked, so an exact minute beats the same day: a sender who wrote twice in
  * one afternoon still resolves to the email described.
  */
-export function matchScore(wanted: WantedEmail, match: InboxSearchMatch): number {
+function matchScore(wanted: WantedEmail, match: InboxSearchMatch): number {
     if (recordedCount(wanted) < 2) return 0;
 
     const wantSubject = wanted.subject ? subjectKey(wanted.subject) : '';

@@ -16,17 +16,19 @@ import {
     asString,
     field,
     intField,
+    ITEM_FAILURE_ROW,
     runOsaScript,
+    splitBatch,
     splitFields,
     splitList,
-    splitRecords
+    splitRecords,
 } from './run';
 import {
     accountLookupSnippet,
     macFolderPath,
     partitionMessageIds,
     resolveMacAccount,
-    rootFolderSnippet
+    rootFolderSnippet,
 } from './scripts';
 import type { AccountRequest, EntryIdsRequest, ListDraftsRequest } from '../backend';
 import type { DeleteDraftsResult, ItemFailure, ListDraftsResult, SendDraftsResult } from '../types';
@@ -127,12 +129,12 @@ function ownDraftGuard(emailAccount: string, verb: 'send' | 'delete'): string {
 }
 
 /** Run `verb` over named drafts of the account, each proved to be its own first. */
-async function actOnDrafts(request: EntryIdsRequest, verb: 'send' | 'delete'): Promise<{
-    done: number;
-    failed: ItemFailure[]
-}> {
-    const {valid, invalid} = partitionMessageIds(request.entryIds);
-    if (valid.length === 0) return {done: 0, failed: invalid};
+async function actOnDrafts(
+    request: EntryIdsRequest,
+    verb: 'send' | 'delete',
+): Promise<{ done: number; failed: ItemFailure[] }> {
+    const { valid, invalid } = partitionMessageIds(request.entryIds);
+    if (valid.length === 0) return { done: 0, failed: invalid };
     const acct = await resolveMacAccount(request.account);
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
@@ -156,28 +158,19 @@ ${ownDraftGuard(request.account, verb)}
             ${verb} theMsg
             set doneCount to doneCount + 1
         on error errText
-            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
+            set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
     return ${asRow(['(doneCount as string)'])} & out
 end tell`, 'scan');
-    const records = splitRecords(raw);
-    return {
-        done: intField(splitFields(records[0] ?? ''), 0),
-        failed: [
-            ...invalid,
-            ...records.slice(1).map(record => {
-                const parts = splitFields(record);
-                return {entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2)};
-            }),
-        ],
-    };
+    const { summary, failed } = splitBatch(raw);
+    return { done: intField(summary, 0), failed: [...invalid, ...failed] };
 }
 
 /** Send the named drafts. */
 export async function sendDrafts(request: EntryIdsRequest): Promise<SendDraftsResult> {
-    const {done, failed} = await actOnDrafts(request, 'send');
-    return {sent: done, failed};
+    const { done, failed } = await actOnDrafts(request, 'send');
+    return { sent: done, failed };
 }
 
 /**
@@ -185,8 +178,8 @@ export async function sendDrafts(request: EntryIdsRequest): Promise<SendDraftsRe
  * mistaken call stays recoverable.
  */
 export async function deleteOutlookDrafts(request: EntryIdsRequest): Promise<DeleteDraftsResult> {
-    const {done, failed} = await actOnDrafts(request, 'delete');
-    return {deleted: done, failed};
+    const { done, failed } = await actOnDrafts(request, 'delete');
+    return { deleted: done, failed };
 }
 
 /**
@@ -216,17 +209,11 @@ ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
             send theMsg
             set sentCount to sentCount + 1
         on error errText
-            set out to out & ${asRow(['(theId as string)', 'subj', 'errText'])}
+            set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
     return ${asRow(['(sentCount as string)'])} & out
 end tell`, 'scan');
-    const records = splitRecords(raw);
-    return {
-        sent: intField(splitFields(records[0] ?? ''), 0),
-        failed: records.slice(1).map(record => {
-            const parts = splitFields(record);
-            return {entryId: field(parts, 0), subject: field(parts, 1), error: field(parts, 2)};
-        }),
-    };
+    const { summary, failed } = splitBatch(raw);
+    return { sent: intField(summary, 0), failed };
 }
