@@ -257,8 +257,13 @@ return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames,
 
     const subjectFiltered = !!(request.subjectLike || request.subjectPattern || request.excludeReplies);
     const likeRe = request.subjectLike ? new RegExp(subjectGlobSource(request.subjectLike), 'i') : null;
-    // PowerShell's -match is case-insensitive, so the Windows test is too.
-    const patternRe = request.subjectPattern ? new RegExp(request.subjectPattern.source, 'i') : null;
+    // PowerShell's -match is case-insensitive, so this test is too, whatever the
+    // caller's flags. Only u and v are kept: they decide how the source parses,
+    // and without u, /\p{L}/u would match the literal text "p{L}". Keeping g or y
+    // would carry lastIndex from one subject to the next.
+    const patternRe = request.subjectPattern
+        ? new RegExp(request.subjectPattern.source, 'i' + request.subjectPattern.flags.replace(/[^uv]/g, ''))
+        : null;
     const candidates = indexed
         .map(record => {
             const parts = splitFields(record);

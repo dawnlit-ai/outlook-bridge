@@ -348,6 +348,18 @@ test('searchInboxByFilter rebuilds each folder path and drops what the details d
     assert.deepEqual(matches[0].attachmentNames, ['inv.pdf']);
 });
 
+test('searchInboxByFilter keeps the flags that decide how a pattern parses, and no others', async () => {
+    const index = row('INBOX', '1', 'Invoice 42', '2026-08-01 09:30') + row('INBOX', '2', '42 invoice', '2026-08-02 09:30');
+    const details = row('1', 'Jo Doe', 'jo@x.com', '', '') + row('2', 'Jo Doe', 'jo@x.com', '', '');
+    const ids = async pattern => (await decode(
+        () => outlook.searchInboxByFilter(ACCOUNT, {subjectPattern: pattern}), [index, details],
+    )).map(m => m.entryId).sort();
+    // Without u, \p{L} is an identity escape and matches only the text "p{L}".
+    assert.deepEqual(await ids(/^\p{L}/u), ['1']);
+    // A kept g would carry lastIndex into the next subject and miss it.
+    assert.deepEqual(await ids(/invoice/g), ['1', '2']);
+});
+
 test('listOutlookDrafts sorts newest first and reports truncation against the whole folder', async () => {
     const result = await decode(() => outlook.listOutlookDrafts(ACCOUNT, {limit: 1}), [
         row('1', 'Older', 'Jo Doe', 'jo@x.com', '  spaced   body  ', '2', '2026-08-01 09:30') +
@@ -537,6 +549,14 @@ test('readTemplateEmails reports a missing folder with the folders there are', a
     assert.equal(result.folderFound, false);
     assert.deepEqual(result.availableFolders, ['Inbox', 'Archive']);
     assert.deepEqual(result.templates, []);
+});
+
+test('readTemplateEmails reports the whole path of a folder found below the top level', async () => {
+    const result = await decode(() => outlook.readTemplateEmails(ACCOUNT, {folder: 'Templates'}), [
+        row('1', `Templates${LS}Work${LS}Inbox`),
+    ]);
+    assert.equal(result.folderFound, true);
+    assert.equal(result.folderPath, '\\\\someone@example.com\\Inbox\\Work\\Templates', 'as Windows FolderPath reports it');
 });
 
 test('readTemplateEmails strips embedded images and reports the markers a template uses', async () => {

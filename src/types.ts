@@ -354,8 +354,9 @@ export interface InboxSearchFilter {
     subjectLike?: string;
     /**
      * Regular expression tested against each subject, case-insensitively
-     * whatever the RegExp's own flags. On Windows the pattern runs in .NET's
-     * regex engine, so keep to syntax JavaScript and .NET share.
+     * whatever the RegExp's own flags; on macOS a `u` or `v` flag is kept,
+     * since it decides how the pattern parses. On Windows the pattern runs in
+     * .NET's regex engine, so keep to syntax JavaScript and .NET share.
      */
     subjectPattern?: RegExp;
     /** Drop subjects carrying a reply or forward prefix (RE:, FW:, AW:, 回复:, …). */
