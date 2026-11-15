@@ -12,6 +12,7 @@ const {
     AccountNotFoundError,
     NotFoundError,
     InvalidRequestError,
+    PermissionDeniedError,
     ScriptError,
     OutputTooLargeError,
     TimeoutError,
@@ -28,6 +29,7 @@ test('every error is an OutlookError carrying a stable code', () => {
         [new AccountNotFoundError('a@b.com'), 'ACCOUNT_NOT_FOUND'],
         [new NotFoundError('folder', 'nope'), 'NOT_FOUND'],
         [new InvalidRequestError('nope'), 'INVALID_REQUEST'],
+        [new PermissionDeniedError('nope'), 'PERMISSION_DENIED'],
         [new ScriptError({runner: 'powershell', script: 's', stderr: 'boom', durationMs: 1}), 'SCRIPT_FAILED'],
         [new OutputTooLargeError({runner: 'powershell', maxBufferBytes: 10, script: 's'}), 'OUTPUT_TOO_LARGE'],
         [new TimeoutError({runner: 'osascript', timeoutMs: 5, script: 's'}), 'TIMEOUT'],
@@ -76,6 +78,10 @@ test('a tagged script message becomes the typed error, with the tag removed', ()
 
     const invalid = errorFromTaggedMessage(`${failureTag('INVALID_REQUEST')}Mailbox can't send.`);
     assert.equal(invalid.code, 'INVALID_REQUEST');
+
+    const refused = errorFromTaggedMessage(`${failureTag('PERMISSION_DENIED')}macOS is not letting Terminal read it.`);
+    assert.ok(refused instanceof PermissionDeniedError);
+    assert.equal(refused.message, 'macOS is not letting Terminal read it.');
 
     assert.equal(errorFromTaggedMessage('Some COM error'), null);
 });

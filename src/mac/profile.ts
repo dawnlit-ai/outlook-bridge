@@ -18,7 +18,9 @@
 // folder id wherever the account probe comes up empty.
 //
 // Strictly read-only, and never fatal: every failure here leaves the caller with
-// exactly what AppleScript could see on its own.
+// exactly what AppleScript could see on its own. When macOS privacy control is
+// what failed, `profileRefusal` says so, for the callers that would otherwise
+// report a mailbox in plain sight as missing.
 import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -122,6 +124,74 @@ function query(database: string, sql: string): Promise<string> {
             (error, stdout) => resolve(error ? '' : stdout),
         );
     });
+}
+
+/** The app macOS holds this process's file access against, once asked. */
+let responsible: Promise<string> | null = null;
+
+/**
+ * The app macOS privacy control asks about this process's file access, by name:
+ * the outermost app bundle among its ancestors, the one launchd started. A
+ * process started from a terminal or an editor is that app's to grant, not its
+ * own, so naming this process would send the person to the wrong switch. '' when
+ * it can't be told.
+ */
+function responsibleApp(): Promise<string> {
+    responsible ??= new Promise(resolve => {
+        execFile('ps', ['-A', '-o', 'pid=,ppid=,comm='], {
+            timeout: 5000,
+            maxBuffer: 4 * 1024 * 1024
+        }, (error, stdout) => {
+            if (error) return resolve('');
+            const processes = new Map<number, { ppid: number; command: string }>();
+            for (const line of stdout.split('\n')) {
+                const row = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+                if (row) processes.set(Number(row[1]), { ppid: Number(row[2]), command: row[3] ?? '' });
+            }
+            let app = '';
+            const climbed = new Set<number>();
+            for (let pid = process.pid; pid > 1 && !climbed.has(pid);) {
+                climbed.add(pid);
+                const entry = processes.get(pid);
+                if (!entry) break;
+                // The first bundle in a path is the outer one: a helper app sits
+                // inside its parent's. Each one higher up replaces the last.
+                const bundle = /\/([^/]+)\.app(?:\/|$)/.exec(entry.command)?.[1];
+                if (bundle) app = bundle;
+                pid = entry.ppid;
+            }
+            resolve(app);
+        });
+    });
+    return responsible;
+}
+
+/**
+ * Why Outlook's profile can't be read, when macOS privacy control is the
+ * reason: the sentence to act on, naming the app to grant access to. null when
+ * the profile can be read, or simply isn't there — New Outlook, or no Outlook
+ * profile on this Mac.
+ *
+ * Everything else in this module stays silent on purpose, which is right for an
+ * enrichment pass and wrong when the pass was the only way to see a mailbox:
+ * the caller then hears "no accounts" or "not found" about a mailbox in plain
+ * sight in Outlook. The callers that would say that ask here first.
+ */
+export async function profileRefusal(): Promise<string | null> {
+    try {
+        fs.readdirSync(PROFILES_DIR);
+        return null;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EPERM' && code !== 'EACCES') return null;
+    }
+    const app = await responsibleApp();
+    const who = app || 'the app this runs in (the terminal or editor it was started from, if it was)';
+    const it = app || 'that app';
+    // Plain ASCII: the sentence also travels inside a generated script's string literal.
+    return `macOS is not letting ${who} read Outlook's profile, the only place Outlook for Mac lists `
+        + "a Microsoft 365 mailbox it syncs through Microsoft's cloud. "
+        + `Turn on ${it} under System Settings > Privacy & Security > Full Disk Access, then quit ${it} and open it again.`;
 }
 
 /**

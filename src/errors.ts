@@ -14,6 +14,7 @@
  * - `ACCOUNT_NOT_FOUND` — no mailbox in the Outlook profile matches the address.
  * - `NOT_FOUND` — a folder, email, attachment, template, signature or file didn't resolve.
  * - `INVALID_REQUEST` — the arguments can't produce a call.
+ * - `PERMISSION_DENIED` — macOS privacy control kept the package from what it needed.
  * - `SCRIPT_FAILED` — the automation script ran and failed.
  * - `OUTPUT_TOO_LARGE` — the script printed more than `maxBufferBytes` and was killed.
  * - `TIMEOUT` — the run exceeded its time budget and was killed.
@@ -25,6 +26,7 @@ export type OutlookErrorCode =
     | 'ACCOUNT_NOT_FOUND'
     | 'NOT_FOUND'
     | 'INVALID_REQUEST'
+    | 'PERMISSION_DENIED'
     | 'SCRIPT_FAILED'
     | 'OUTPUT_TOO_LARGE'
     | 'TIMEOUT'
@@ -105,6 +107,17 @@ export class NotFoundError extends OutlookError {
 export class InvalidRequestError extends OutlookError {
     constructor(message: string) {
         super('INVALID_REQUEST', message);
+    }
+}
+
+/**
+ * macOS privacy control kept the package from what it needed: on a Mac, Outlook's
+ * profile, which is the only place a Microsoft 365 mailbox synced through
+ * Microsoft's cloud is listed. The message names the app to grant access to.
+ */
+export class PermissionDeniedError extends OutlookError {
+    constructor(message: string) {
+        super('PERMISSION_DENIED', message);
     }
 }
 
@@ -192,20 +205,20 @@ export class AbortedError extends OutlookError {
 // the tag, so a caller can branch on NOT_FOUND without reading the sentence.
 
 /** The codes a script may raise by tagging its failure message. */
-export type ScriptFailureCode = 'ACCOUNT_NOT_FOUND' | 'NOT_FOUND' | 'INVALID_REQUEST';
+export type ScriptFailureCode = 'ACCOUNT_NOT_FOUND' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'PERMISSION_DENIED';
 
 /**
  * The tag that opens a typed script failure, ready to be followed by the
  * human-readable message. Plain ASCII with no quote or `$`, so it can sit
  * inside a PowerShell or AppleScript string literal unescaped.
  */
-export function failureTag(code: 'ACCOUNT_NOT_FOUND' | 'INVALID_REQUEST'): string;
+export function failureTag(code: 'ACCOUNT_NOT_FOUND' | 'INVALID_REQUEST' | 'PERMISSION_DENIED'): string;
 export function failureTag(code: 'NOT_FOUND', kind: NotFoundKind): string;
 export function failureTag(code: ScriptFailureCode, kind?: NotFoundKind): string {
     return `[outlook-bridge:${code}${kind ? `:${kind}` : ''}] `;
 }
 
-const FAILURE_TAG = /\[outlook-bridge:(ACCOUNT_NOT_FOUND|NOT_FOUND|INVALID_REQUEST)(?::([a-z]+))?\]\s*/;
+const FAILURE_TAG = /\[outlook-bridge:(ACCOUNT_NOT_FOUND|NOT_FOUND|INVALID_REQUEST|PERMISSION_DENIED)(?::([a-z]+))?\]\s*/;
 
 /** A script's account-not-found message names the address in single quotes. */
 const QUOTED_ACCOUNT = /'(.*)'/;
@@ -221,6 +234,8 @@ export function errorFromTaggedMessage(message: string): OutlookError | null {
     switch (match[1]) {
         case 'ACCOUNT_NOT_FOUND':
             return new AccountNotFoundError(QUOTED_ACCOUNT.exec(text)?.[1] ?? '', text);
+        case 'PERMISSION_DENIED':
+            return new PermissionDeniedError(text);
         case 'NOT_FOUND': {
             const kind = NOT_FOUND_KINDS.find(k => k === match[2]) ?? 'email';
             return new NotFoundError(kind, text);

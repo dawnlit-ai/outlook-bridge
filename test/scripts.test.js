@@ -146,6 +146,12 @@ end tell`;
 /** An account only the AppleScript probe can reach. */
 const PROBED = {emailAccount: 'someone@example.com'};
 
+/** An account the profile had no row for, because macOS refused the profile. */
+const REFUSED = {
+    emailAccount: 'someone@example.com',
+    profileRefusal: "macOS is not letting WebStorm read Outlook's profile, the only place Outlook for Mac lists a Microsoft 365 mailbox it syncs through Microsoft's cloud. Turn on WebStorm under System Settings > Privacy & Security > Full Disk Access, then quit WebStorm and open it again.",
+};
+
 /** An account the profile database also describes, by folder id. */
 const PROFILED = {
     emailAccount: 'someone@example.com',
@@ -169,6 +175,7 @@ test('the account and message lookups compile', macOnly, () => {
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROBED))), '');
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED))), '');
     assert.equal(compileError(inTell(macScripts.accountLookupSnippet(PROFILED, true))), '');
+    assert.equal(compileError(inTell(macScripts.accountLookupSnippet(REFUSED))), '');
     assert.equal(compileError(inTell(macScripts.messageLookupSnippet('123'))), '');
 });
 
@@ -180,6 +187,16 @@ test('only a genuinely absent account raises ACCOUNT_NOT_FOUND', () => {
     assert.equal(tagged(macScripts.accountLookupSnippet(PROBED)).code, 'ACCOUNT_NOT_FOUND');
     assert.equal(tagged(macScripts.accountLookupSnippet(PROFILED)), null, 'a profiled mailbox is found by folder id');
     assert.equal(tagged(macScripts.accountLookupSnippet(PROFILED, true)).code, 'INVALID_REQUEST', 'found, but cannot compose');
+});
+
+test('an account the probe misses while macOS refuses the profile fails as PERMISSION_DENIED, naming the fix', () => {
+    const literal = /error "((?:[^"\\]|\\.)*)"/.exec(macScripts.accountLookupSnippet(REFUSED));
+    const error = errorFromTaggedMessage(literal[1].replace(/\\(.)/g, '$1'));
+    assert.equal(error.code, 'PERMISSION_DENIED');
+    assert.match(error.message, /^Account 'someone@example\.com' is not one Outlook's scripting can see\./);
+    assert.match(error.message, /Full Disk Access/);
+    // The probe still runs first: a classic account resolves without the profile.
+    assert.match(macScripts.accountLookupSnippet(REFUSED), /repeat with a in \(exchange accounts/);
 });
 
 test('a well-known root resolves by account, by id, or names the folder out of reach', macOnly, () => {

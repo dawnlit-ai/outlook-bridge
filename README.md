@@ -7,7 +7,10 @@ cloud permissions: this automates the desktop client itself, the way a person wo
 - **Windows** — PowerShell and Outlook's COM object model.
 - **macOS** — AppleScript. Requires **legacy** Outlook for Mac: New Outlook implements only a slice of the AppleScript
   dictionary (accounts don't enumerate, the inbox reports no messages), so every call fails with `ACCOUNT_NOT_FOUND`
-  there rather than quietly doing the wrong thing.
+  there rather than quietly doing the wrong thing. A Microsoft 365 mailbox Outlook syncs through Microsoft's cloud is
+  listed only in Outlook's profile, which macOS lets an app read once it has **Full Disk Access** — the app running
+  this package, or the terminal or editor it was started from. Without it, calls about such a mailbox fail with
+  `PERMISSION_DENIED`, naming the app to turn on.
 - **Anywhere else** — `capabilities()` reports nothing supported and every call rejects with `UNSUPPORTED_PLATFORM`.
 
 ## Install
@@ -170,6 +173,7 @@ try {
 | `ACCOUNT_NOT_FOUND`    | `AccountNotFoundError`     | No mailbox in the profile matches the address. Carries `account`.                                                                                              |
 | `NOT_FOUND`            | `NotFoundError`            | A `folder`, `email`, `attachment`, `template`, `signature` or `file` didn't resolve. Carries `kind`.                                                           |
 | `INVALID_REQUEST`      | `InvalidRequestError`      | The arguments can't produce a call — a wrong type, a missing value, a template edited into an unusable state, or a mailbox that can be read but not sent from. |
+| `PERMISSION_DENIED`    | `PermissionDeniedError`    | macOS refused Outlook's profile, so a mailbox only it lists could not be seen. The message names the app to give Full Disk Access.                             |
 | `SCRIPT_FAILED`        | `ScriptError`              | The script ran and failed. Carries `script`, `line`, `stderr`, `runner`, `durationMs`.                                                                         |
 | `OUTPUT_TOO_LARGE`     | `OutputTooLargeError`      | The script printed more than `maxBufferBytes`.                                                                                                                 |
 | `TIMEOUT`              | `TimeoutError`             | The run exceeded its time budget and was killed. Carries `timeoutMs`.                                                                                          |

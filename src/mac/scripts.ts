@@ -1,6 +1,6 @@
 // The AppleScript fragments more than one macOS operation is built from.
 import { asString } from './run';
-import { readProfileAccounts } from './profile';
+import { profileRefusal, readProfileAccounts } from './profile';
 import { failureTag, InvalidRequestError, NotImplementedError } from '../errors';
 import { FolderId, isOutgoingRoot } from '../mail';
 import type { ItemFailure, MailFolderRef } from '../types';
@@ -18,6 +18,12 @@ import type { ItemFailure, MailFolderRef } from '../types';
 export interface MacAccount {
     readonly emailAccount: string;
     readonly folderIds?: Readonly<Record<string, number>>;
+    /**
+     * Set when the profile has no row for the address because macOS refused it:
+     * the sentence to fail with should AppleScript not find the account either,
+     * since the profile is where a mailbox AppleScript can't see would have been.
+     */
+    readonly profileRefusal?: string;
 }
 
 /** Look an address up in Outlook's profile database, for the folder ids it can add. */
@@ -25,7 +31,11 @@ export async function resolveMacAccount(emailAccount: string): Promise<MacAccoun
     const wanted = emailAccount.trim().toLowerCase();
     const found = (await readProfileAccounts())
         .find(account => account.emailAccount.trim().toLowerCase() === wanted);
-    return found ? { emailAccount, folderIds: found.folderIds } : { emailAccount };
+    if (found) return { emailAccount, folderIds: found.folderIds };
+    // Asked only for an address the profile did not give: the script still looks
+    // for an account object first, so a classic account works without access.
+    const refusal = await profileRefusal();
+    return refusal ? { emailAccount, profileRefusal: refusal } : { emailAccount };
 }
 
 /**
@@ -53,10 +63,16 @@ export function accountLookupSnippet(acct: MacAccount, needsAccountObject = fals
         end repeat
     end try`;
     if (acct.folderIds && !needsAccountObject) return probe;
-    const complaint = acct.folderIds
-        ? `${failureTag('INVALID_REQUEST')}Outlook publishes no account object for '${acct.emailAccount}', `
-        + 'so the account a message is sent from cannot be set. Its folders can be read; mail cannot be composed from it.'
-        : `${failureTag('ACCOUNT_NOT_FOUND')}Account '${acct.emailAccount}' not found in Outlook.`;
+    let complaint: string;
+    if (acct.folderIds) {
+        complaint = `${failureTag('INVALID_REQUEST')}Outlook publishes no account object for '${acct.emailAccount}', `
+            + 'so the account a message is sent from cannot be set. Its folders can be read; mail cannot be composed from it.';
+    } else if (acct.profileRefusal) {
+        complaint = `${failureTag('PERMISSION_DENIED')}Account '${acct.emailAccount}' is not one Outlook's scripting `
+            + `can see. ${acct.profileRefusal}`;
+    } else {
+        complaint = `${failureTag('ACCOUNT_NOT_FOUND')}Account '${acct.emailAccount}' not found in Outlook.`;
+    }
     return `${probe}
     if targetAcct is missing value then error ${asString(complaint)}`;
 }

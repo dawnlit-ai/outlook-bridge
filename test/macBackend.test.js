@@ -701,3 +701,80 @@ test('a profile database that cannot be read loses no mailbox AppleScript found'
         Object.assign(fs, real);
     }
 });
+
+// ── A profile macOS refuses is said, not taken for an empty one ──────────
+
+const REFUSAL = "macOS is not letting Terminal read Outlook's profile. Turn on Terminal under Full Disk Access.";
+
+/** Runs `check` with the profile reporting `accounts` and `refusal`, then puts the real ones back. */
+async function withProfile(accounts, refusal, check) {
+    const profile = require('../dist/mac/profile.js');
+    const real = {readProfileAccounts: profile.readProfileAccounts, profileRefusal: profile.profileRefusal};
+    profile.readProfileAccounts = async () => accounts;
+    profile.profileRefusal = async () => refusal;
+    try {
+        await check();
+    } finally {
+        Object.assign(profile, real);
+    }
+}
+
+test('nothing to list while macOS refuses the profile is that refusal, not an empty list', async () => {
+    await withProfile([], REFUSAL, async () => {
+        const {error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.getOutlookAccounts(), ['']);
+        assert.equal(error?.code, 'PERMISSION_DENIED');
+        assert.equal(error.message, `No Outlook mailbox could be listed. ${REFUSAL}`);
+        assert.deepEqual(
+            await decode(() => outlook.getOutlookAccounts(), ['ops@example.com']),
+            ['ops@example.com'],
+            'a list that found something is kept: what it holds works',
+        );
+    });
+    await withProfile([], null, async () => {
+        assert.deepEqual(await decode(() => outlook.getOutlookAccounts(), ['']), [], 'nothing refused, nothing found');
+    });
+});
+
+test('an address the refused profile could not confirm fails as PERMISSION_DENIED when the probe misses it too', async () => {
+    const lookup = async () => {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.readInboxEmails(ACCOUNT));
+        if (error) throw error;
+        return scripts[0];
+    };
+    await withProfile([], REFUSAL, async () => {
+        const script = await lookup();
+        assert.match(script, /\[outlook-bridge:PERMISSION_DENIED\] Account 'someone@example\.com' is not one/);
+        assert.ok(script.includes(REFUSAL.replace(/"/g, '\\"')), 'the refusal says what to do');
+    });
+    await withProfile([], null, async () => {
+        assert.match(await lookup(), /\[outlook-bridge:ACCOUNT_NOT_FOUND\]/, 'with nothing refused, not found is not found');
+    });
+    await withProfile([{emailAccount: ACCOUNT, folderIds: {'inbox': 148}}], REFUSAL, async () => {
+        assert.doesNotMatch(await lookup(), /PERMISSION_DENIED/, 'a mailbox the profile names needs no access said about it');
+    });
+});
+
+test('profileRefusal tells macOS refusing the profile apart from there being none', async () => {
+    const profile = require('../dist/mac/profile.js');
+    const real = fs.readdirSync;
+    const failWith = code => () => {
+        const error = new Error(`${code}: on the profiles folder`);
+        error.code = code;
+        throw error;
+    };
+    try {
+        fs.readdirSync = failWith('ENOENT');
+        assert.equal(await profile.profileRefusal(), null, 'no profiles folder: New Outlook, or none at all');
+        for (const code of ['EPERM', 'EACCES']) {
+            fs.readdirSync = failWith(code);
+            const refusal = await profile.profileRefusal();
+            assert.match(refusal, /^macOS is not letting .+ read Outlook's profile/, code);
+            assert.match(refusal, /System Settings > Privacy & Security > Full Disk Access/, code);
+            assert.doesNotMatch(refusal, /[^\x20-\x7e]/, 'plain ASCII, since it travels inside a script literal');
+        }
+        fs.readdirSync = () => ['Main Profile'];
+        assert.equal(await profile.profileRefusal(), null, 'a profile that can be read is not refused');
+    } finally {
+        fs.readdirSync = real;
+    }
+});

@@ -51,6 +51,7 @@ export {
     AccountNotFoundError,
     NotFoundError,
     InvalidRequestError,
+    PermissionDeniedError,
     ScriptError,
     OutputTooLargeError,
     TimeoutError,
