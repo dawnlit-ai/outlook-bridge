@@ -1,7 +1,7 @@
 // The mailboxes a Windows Outlook profile can reach.
 import { runPowerShellJson } from './run';
 import { SESSION_PS } from './scripts';
-import { strList } from '../shared/json';
+import { strList } from './json';
 
 /**
  * Every mailbox this profile can reach, as SMTP addresses.

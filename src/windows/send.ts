@@ -3,7 +3,7 @@ import { psString, runPowerShellJson, scriptInput } from './run';
 import { accountScript, itemLookupScript, SENDER_SMTP_PS } from './scripts';
 import { WORD_SECTION_ANCHOR } from '../shared/replyBody';
 import { failureTag } from '../errors';
-import { record, str } from '../shared/json';
+import { record, str } from './json';
 import type { Disposition, ReplyRequest, SendRequest } from '../backend';
 import type { ReplyEmailResult, SendEmailResult } from '../types';
 

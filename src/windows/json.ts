@@ -1,4 +1,5 @@
-// Coercing the JSON a PowerShell script prints into the package's types.
+// Coercing the JSON a PowerShell script prints into the package's types — the
+// Windows counterpart of the record framing in mac/run.ts.
 //
 // ConvertTo-Json has two habits a caller must never see: it unwraps a
 // single-element array into a bare object, and it renders an empty one as

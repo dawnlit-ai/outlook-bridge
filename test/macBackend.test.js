@@ -360,6 +360,29 @@ test('searchInboxByFilter keeps the flags that decide how a pattern parses, and 
     assert.deepEqual(await ids(/invoice/g), ['1', '2']);
 });
 
+test('searchInboxByFilter reads the Inbox root when it is one of the folders named, as on Windows', async () => {
+    for (const filter of [{}, {includeFolders: ['Inbox']}, {includeFolders: ['Clients']}]) {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.searchInboxByFilter(ACCOUNT, filter));
+        if (error) throw error;
+        // Decided in the script, against the root's own name: only Outlook
+        // knows what this mailbox calls its Inbox.
+        assert.match(scripts[0], /set rootScope to \(count of onlyNames\) is 0\s+try\s+if onlyNames contains rootName then set rootScope to true/);
+        assert.match(scripts[0], /return my scanFolder\(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames, rootScope\)/);
+    }
+});
+
+test('searchInboxByFilter never walks into a root that holds no incoming mail', async () => {
+    const {NON_INCOMING_ROOTS} = require('../dist/mail.js');
+    const {MAC_ROOT_TERMS} = require('../dist/mac/scripts.js');
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.searchInboxByFilter(ACCOUNT));
+    if (error) throw error;
+    // The roots Windows cuts, from the one list both platforms read.
+    for (const rootId of NON_INCOMING_ROOTS) {
+        const term = MAC_ROOT_TERMS[rootId];
+        assert.ok(scripts[0].includes(`set end of skipIds to (id of (${term} of targetAcct))`), term);
+    }
+});
+
 test('listOutlookDrafts sorts newest first and reports truncation against the whole folder', async () => {
     const result = await decode(() => outlook.listOutlookDrafts(ACCOUNT, {limit: 1}), [
         row('1', 'Older', 'Jo Doe', 'jo@x.com', '  spaced   body  ', '2', '2026-08-01 09:30') +
@@ -419,7 +442,8 @@ test('each move is confirmed on its own, so a silent no-op fails as that item', 
     if (error) throw error;
     const [script] = scripts;
     const start = script.indexOf('repeat with theId');
-    const end = script.indexOf('end repeat', start);
+    // The last one: the loop holds the folder-chain walk, a repeat of its own.
+    const end = script.lastIndexOf('end repeat');
     const loop = script.slice(start, end);
     assert.match(loop, /if fromId is not scopeId then/, 'mail already in the folder is not moved again');
     assert.match(loop, /set countBefore to count of messages of scopeFolder\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then error/);
@@ -435,6 +459,50 @@ test('an id macOS cannot use is reported beside the ids that worked', async () =
     assert.equal(moved.moved, 1);
     assert.deepEqual(moved.failed.map(f => f.entryId), ['AABBCC']);
     assert.match(moved.failed[0].error, /Outlook for Mac message id/);
+});
+
+test('a delete or a move refuses mail it cannot show to be the account\'s, before touching it', async () => {
+    // A message id resolves against the whole application, so this is the
+    // counterpart of Windows resolving every id in the account's own store.
+    const cases = [
+        ['delete', 'delete theMsg', () => outlook.deleteOutlookEmails(ACCOUNT, ['1263'], {allowProtected: true}), ''],
+        ['move', 'move theMsg to scopeFolder', () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), row('1', 'false')],
+    ];
+    for (const [verb, action, run, response] of cases) {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], run, [response]);
+        if (error) throw error;
+        const [script] = scripts;
+        const refusal = script.indexOf(`if not inAccount then error "item is in another mailbox, not this account - refusing to ${verb}"`);
+        assert.ok(refusal > 0, `${verb}: every item is checked against the account`);
+        assert.ok(refusal < script.indexOf(action), `${verb}: and before it is touched, whatever allowProtected says`);
+        // Either sign vouches for an item: its folder chain ending at the
+        // account's root folder, or its own account carrying the address.
+        assert.match(script, /\(id of cur\) is acctRootId then set inAccount to true/, verb);
+        assert.match(script, /\(ownerAddr as string\) is "someone@example\.com" then set inAccount to true/, verb);
+    }
+});
+
+test('a mailbox with no account object is vouched for by the root folder the profile names', async () => {
+    const profiled = {emailAccount: ACCOUNT, folderIds: {'inbox': 148, 'sent items': 149, 'root folder': 142}};
+    await withProfile([profiled], null, async () => {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+        if (error) throw error;
+        assert.match(scripts[0], /if acctRootId is missing value then set acctRootId to 142/);
+    });
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+    if (error) throw error;
+    assert.doesNotMatch(scripts[0], /set acctRootId to \d/, 'with no profile row, only the account object can name the root');
+});
+
+test('deleteOutlookEmails protects the roots Windows does, by the names this account gives them', async () => {
+    const {PROTECTED_ROOTS} = require('../dist/mail.js');
+    const {MAC_ROOT_TERMS} = require('../dist/mac/scripts.js');
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+    if (error) throw error;
+    for (const rootId of PROTECTED_ROOTS) {
+        assert.ok(scripts[0].includes(`set protectedFolder to ${MAC_ROOT_TERMS[rootId]} of targetAcct`), MAC_ROOT_TERMS[rootId]);
+    }
+    assert.match(scripts[0], /set isProtected to \(protectedNames contains rootName\)/);
 });
 
 test('deleteOutlookEmails counts each outcome and rebuilds the folder path it was found in', async () => {

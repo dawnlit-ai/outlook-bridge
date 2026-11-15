@@ -20,7 +20,14 @@ import {
     splitList,
     splitRecords,
 } from './run';
-import { accountLookupSnippet, allRecipientsSnippet, resolveMacAccount, rootFolderSnippet } from './scripts';
+import {
+    accountLookupSnippet,
+    allRecipientsSnippet,
+    bodyTextSnippet,
+    messageByIdSnippet,
+    resolveMacAccount,
+    rootFolderSnippet,
+} from './scripts';
 import { bounceReason, DSN_HEADER_MARKERS, failedRecipients } from '../shared/bounceRules';
 import type { CleanUndeliverableRequest, CollectBouncesRequest, SentGroupsRequest } from '../backend';
 import type { CleanUndeliverableResult, ItemFailure, SentRecipientGroup, UndeliverableEmail } from '../types';
@@ -73,15 +80,17 @@ ${rootFolderSnippet(acct, folderTerm, 'scanFolder')}
         set hdrList to {}
     end try
     set hasHeaders to ((count of hdrList) is (count of idList))
+    set hasTimes to ((count of timeList) is (count of idList))
+    set hasSenders to ((count of sndList) is (count of idList))
     set cutoff to (current date) - (${asInt(daysBack)} * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
-        if (count of timeList) is (count of idList) then set stamp to item i of timeList
+        if hasTimes then set stamp to item i of timeList
         if stamp is missing value or stamp is greater than or equal to cutoff then
             set sndName to ""
             set sndAddr to ""
-            if (count of sndList) is (count of idList) then
+            if hasSenders then
                 set snd to item i of sndList
                 try
                     set sndAddr to (address of snd) as string
@@ -122,15 +131,9 @@ async function readBodies(ids: readonly string[]): Promise<Map<string, string>> 
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(ids)}
-        set theMsg to missing value
-        try
-            set theMsg to message id theId
-        end try
+${messageByIdSnippet('        ')}
         if theMsg is not missing value then
-            set bodyText to ""
-            try
-                set bodyText to (plain text content of theMsg) as string
-            end try
+${bodyTextSnippet('            ')}
             set out to out & ${asRow(['(theId as string)', 'bodyText'])}
         end if
     end repeat
@@ -178,10 +181,7 @@ export async function cleanUndeliverableEmails(request: CleanUndeliverableReques
     repeat with theId in ${asIdList(matched.map(m => m.entryId))}
         set subj to ""
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "message is no longer in the mailbox"
             try
                 set subj to (subject of theMsg) as string
@@ -238,11 +238,12 @@ ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
         set timeList to {}
     end try
     set subjList to subject of every message of sentFolder
+    set hasTimes to ((count of timeList) is (count of idList))
     set cutoff to (current date) - (${asInt(request.daysBack)} * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
-        if (count of timeList) is (count of idList) then set stamp to item i of timeList
+        if hasTimes then set stamp to item i of timeList
         if stamp is missing value or stamp is greater than or equal to cutoff then
             set out to out & ${asRow(['(item i of idList as string)', '(item i of subjList)', 'my isoDate(stamp)'])}
         end if
@@ -261,10 +262,7 @@ end tell`, 'scan')).map(record => {
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(chosen.map(row => row.id))}
-        set theMsg to missing value
-        try
-            set theMsg to message id theId
-        end try
+${messageByIdSnippet('        ')}
         if theMsg is not missing value then
 ${allRecipientsSnippet('            ')}
             set out to out & ${asRow(['(theId as string)', 'my sanitizeList(addrList)'])}

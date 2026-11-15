@@ -1,7 +1,7 @@
 // Saving attachments off an email.
 import { psArray, psInt, psString, runPowerShellJson } from './run';
-import { itemLookupScript, SENDER_SMTP_PS, SESSION_PS } from './scripts';
-import { record, str, toArray } from '../shared/json';
+import { itemLookupScript, SENDER_SMTP_PS, SESSION_PS, stampPs } from './scripts';
+import { record, str, toArray } from './json';
 import {
     attachmentNotFoundMessage,
     MAX_FILE_STEM,
@@ -71,7 +71,7 @@ try { $subject = [string]$item.Subject } catch {}
 $senderName = ''
 try { $senderName = [string]$item.SenderName } catch {}
 $received = ''
-try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+try { $received = ${stampPs('$item.ReceivedTime')} } catch {}
 $attachments = @()
 foreach ($att in $item.Attachments) { $attachments += $att }
 $picks = @()

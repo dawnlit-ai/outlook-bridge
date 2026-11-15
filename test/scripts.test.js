@@ -16,7 +16,7 @@ const {accountScript, itemLookupScript, mailScopeScript} = require('../dist/wind
 const {buildScript, psEscape, psInt} = require('../dist/windows/run.js');
 const {mailFolderRef} = require('../dist/mail.js');
 const {errorFromTaggedMessage} = require('../dist/errors.js');
-const {itemFailurePs, itemFailures} = require('../dist/shared/json.js');
+const {itemFailurePs, itemFailures} = require('../dist/windows/json.js');
 const {EMBEDDED_IMAGE_SOURCE} = require('../dist/shared/templateLimits.js');
 const windowsRun = require('../dist/windows/run.js');
 const {windowsBackend} = require('../dist/windows/index.js');
@@ -220,6 +220,29 @@ test('the per-message field snippets compile', macOnly, () => {
     for (const snippet of [macScripts.senderSnippet(), macScripts.firstRecipientSnippet(), macScripts.allRecipientsSnippet()]) {
         assert.equal(compileError(inTell(`    set theMsg to missing value\n${snippet}`)), '');
     }
+});
+
+test('the batch lookup, body and ownership snippets compile', macOnly, () => {
+    for (const acct of [PROBED, PROFILED]) {
+        const source = inTell(`    set targetAcct to item 1 of imap accounts
+    set theId to 1
+${macScripts.accountRootIdSnippet(acct)}
+${macScripts.messageByIdSnippet('    ')}
+${macScripts.bodyTextSnippet('    ')}
+${macScripts.bodyTextSnippet('    ', 200)}
+${macScripts.bodyTextSnippet('    ', 0)}
+    set theFolder to folder of theMsg
+${macScripts.folderChainSnippet('    ')}
+${macScripts.ownMailGuardSnippet(acct.emailAccount, 'delete', '    ')}`);
+        assert.equal(compileError(source), '');
+    }
+});
+
+test('a body is read whole, cut to a preview, or not at all', () => {
+    assert.doesNotMatch(macScripts.bodyTextSnippet('', 0), /plain text content/, 'a preview of 0 never reads the body');
+    assert.match(macScripts.bodyTextSnippet('', 300), /if \(length of bodyText\) > 300 then set bodyText to text 1 thru 300 of bodyText/);
+    assert.match(macScripts.bodyTextSnippet(''), /set bodyText to \(plain text content of theMsg\) as string/);
+    assert.doesNotMatch(macScripts.bodyTextSnippet(''), /text 1 thru/, 'no cap asked for, none applied');
 });
 
 test('a folder scope compiles for every root, walked and created', macOnly, () => {

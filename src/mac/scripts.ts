@@ -1,5 +1,5 @@
 // The AppleScript fragments more than one macOS operation is built from.
-import { asString } from './run';
+import { asInt, asString } from './run';
 import { profileRefusal, readProfileAccounts } from './profile';
 import { failureTag, InvalidRequestError, NotImplementedError } from '../errors';
 import { FolderId, isOutgoingRoot } from '../mail';
@@ -166,6 +166,54 @@ ${indent}    set guard to guard + 1
 ${indent}end repeat`;
 }
 
+/**
+ * Bind `acctRootId` to the id of the account's root folder — the folder every
+ * one of its top-level folders sits in — through the account object when the
+ * probe found one, else from the profile database. Requires
+ * `accountLookupSnippet`.
+ *
+ * Never fails: an account neither names a root for leaves `acctRootId` as
+ * `missing value`, which `ownMailGuardSnippet` reads as a root nothing can be
+ * shown to sit under.
+ */
+export function accountRootIdSnippet(acct: MacAccount): string {
+    const profiled = acct.folderIds?.['root folder'];
+    return `    set acctRootId to missing value
+    try
+        if targetAcct is not missing value then set acctRootId to id of (root folder of targetAcct)
+    end try` + (profiled === undefined ? '' : `
+    if acctRootId is missing value then set acctRootId to ${asInt(profiled)}`);
+}
+
+/**
+ * Fail unless `theMsg` is the account's own mail — the macOS counterpart of
+ * Windows resolving an id in the account's store. `message id N` resolves
+ * against the application, so an id alone says nothing about whose mailbox the
+ * message is in, and a stale or wrong one can name mail in another.
+ *
+ * Either of two signs is enough, because neither exists for every mailbox:
+ *  - the message's folder chain ends at the account's root folder. Requires
+ *    `folderChainSnippet` (for `cur`) and `accountRootIdSnippet`.
+ *  - the message's own account carries the address. A mailbox the dictionary
+ *    publishes no account object for answers this with `missing value` (see
+ *    profile.ts), which is why the first sign has to be able to stand alone.
+ * An item neither vouches for is refused rather than given the benefit of the
+ * doubt: what follows moves or deletes it.
+ */
+export function ownMailGuardSnippet(emailAccount: string, verb: 'delete' | 'move', indent: string): string {
+    return `${indent}set inAccount to false
+${indent}try
+${indent}    if acctRootId is not missing value and (id of cur) is acctRootId then set inAccount to true
+${indent}end try
+${indent}if not inAccount then
+${indent}    try
+${indent}        set ownerAddr to email address of (account of theMsg)
+${indent}        if ownerAddr is not missing value and (ownerAddr as string) is ${asString(emailAccount)} then set inAccount to true
+${indent}    end try
+${indent}end if
+${indent}if not inAccount then error "item is in another mailbox, not this account - refusing to ${verb}"`;
+}
+
 /** The dictionary term for a root, or NOT_IMPLEMENTED naming what was asked. */
 function rootTerm(ref: MailFolderRef, folderLabel = ''): string {
     const term = MAC_ROOT_TERMS[ref.rootId];
@@ -262,6 +310,35 @@ export function messageLookupSnippet(id: string): string {
 }
 
 /**
+ * Bind `theMsg` to the id a batch loop holds in `theId`, leaving it `missing
+ * value` when the id no longer resolves — the per-item counterpart of
+ * `messageLookupSnippet`, for a loop that skips or reports a miss and goes on
+ * rather than failing the whole run.
+ */
+export function messageByIdSnippet(indent: string): string {
+    return `${indent}set theMsg to missing value
+${indent}try
+${indent}    set theMsg to message id theId
+${indent}end try`;
+}
+
+/**
+ * `theMsg`'s plain-text body as `bodyText`: whole, cut to `maxChars`, or — with
+ * a `maxChars` of 0 — not read at all, the body being the one expensive
+ * property of a message.
+ */
+export function bodyTextSnippet(indent: string, maxChars?: number): string {
+    if (maxChars === 0) return `${indent}set bodyText to ""`;
+    const read = `${indent}set bodyText to ""
+${indent}try
+${indent}    set bodyText to (plain text content of theMsg) as string
+${indent}end try`;
+    if (maxChars === undefined) return read;
+    return `${read}
+${indent}if (length of bodyText) > ${asInt(maxChars)} then set bodyText to text 1 thru ${asInt(maxChars)} of bodyText`;
+}
+
+/**
  * `theMsg`'s sender as `sndName` / `sndAddr`. `sender` is a record, and
  * `address of sender of m` doesn't coerce, so the record is bound first.
  */
@@ -302,11 +379,7 @@ ${indent}end try
 ${indent}set attNames to {}
 ${indent}try
 ${indent}    set attNames to name of every attachment of theMsg
-${indent}end try` + (withBody ? `
-${indent}set bodyText to ""
-${indent}try
-${indent}    set bodyText to (plain text content of theMsg) as string
-${indent}end try` : '');
+${indent}end try` + (withBody ? `\n${bodyTextSnippet(indent)}` : '');
 }
 
 /** The fields `messageDetailSnippet` fills, in row order — see `MessageDetail`. */

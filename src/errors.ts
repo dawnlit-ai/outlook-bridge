@@ -44,15 +44,19 @@ const NOT_FOUND_KINDS: readonly NotFoundKind[] = ['folder', 'email', 'attachment
 export class OutlookError extends Error {
     readonly code: OutlookErrorCode;
 
-    /** The underlying failure, when there was one. */
-    readonly cause?: unknown;
+    /**
+     * The underlying failure, when there was one. Declared rather than defined:
+     * a class field would give every error a `cause` of undefined, and an error
+     * with no cause should not have the property at all.
+     */
+    declare readonly cause?: unknown;
 
     constructor(code: OutlookErrorCode, message: string, options?: { cause?: unknown }) {
         // `cause` is an own enumerable field rather than `super`'s option: that
         // is what puts it in a JSON dump of the error, which is where someone
         // logging a failure looks for it.
         super(message);
-        if (options && 'cause' in options) this.cause = options.cause;
+        if (options?.cause !== undefined) this.cause = options.cause;
         this.code = code;
         // `name` is what an unhandled-rejection dump shows, so make it the subclass.
         this.name = new.target.name;
@@ -133,8 +137,8 @@ export class ScriptError extends OutlookError {
     readonly script: string;
     readonly stderr: string;
     readonly durationMs: number;
-    /** The line of `script` the failure was raised on, when the runner reports one. */
-    readonly line?: number;
+    /** The line of `script` the failure was raised on, when the runner reports one; absent otherwise, as `cause` is. */
+    declare readonly line?: number;
 
     constructor(init: {
         runner: ScriptRunner;
@@ -205,7 +209,7 @@ export class AbortedError extends OutlookError {
 // the tag, so a caller can branch on NOT_FOUND without reading the sentence.
 
 /** The codes a script may raise by tagging its failure message. */
-export type ScriptFailureCode = 'ACCOUNT_NOT_FOUND' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'PERMISSION_DENIED';
+type ScriptFailureCode = 'ACCOUNT_NOT_FOUND' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'PERMISSION_DENIED';
 
 /**
  * The tag that opens a typed script failure, ready to be followed by the

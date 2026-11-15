@@ -74,10 +74,11 @@ to keep a `storeId` with its own `entryId`; the store id is what lets an email r
 default one.
 
 **Ids are not portable between platforms.** Windows returns MAPI EntryIDs; macOS returns Outlook for macOS small integer
-message ids, and has no store id (it reports `''` and ignores one passed in). Each platform rejects the other's ids with
-`INVALID_REQUEST`. **Moving an email rewrites its id** on both, so ids saved before a move are stale afterward. Keep the
-subject, sender and received time beside a saved id, and `locateEmail` finds the email again from them wherever it has
-moved under the Inbox, on either platform.
+message ids, and has no store id (it reports `''` and ignores one passed in). macOS refuses a Windows EntryID outright,
+with `INVALID_REQUEST`; on Windows a macOS id simply resolves to nothing and fails as `NOT_FOUND`. A batch reports
+either as that item's failure. **Moving an email rewrites its id** on both, so ids saved before a move are stale
+afterward. Keep the subject, sender and received time beside a saved id, and `locateEmail` finds the email again from
+them wherever it has moved under the Inbox, on either platform.
 
 Timestamps are local time as `yyyy-MM-dd HH:mm`, which sorts correctly as a string.
 

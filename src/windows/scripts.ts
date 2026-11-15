@@ -4,7 +4,7 @@
 // operation stays beside that operation, where its rules read next to the code
 // relying on them. Every fragment follows run.ts's escaping rule: caller text
 // only ever appears as a psString literal.
-import { psInt, psString } from './run';
+import { psArray, psBool, psInt, psString } from './run';
 import { failureTag } from '../errors';
 import type { EmailLocator, MailFolderRef } from '../types';
 
@@ -124,6 +124,15 @@ try {
 if (-not $senderSmtp) { try { $senderSmtp = [string]$item.SenderEmailAddress } catch {} }
 `;
 
+/**
+ * A date expression rendered as the timestamp every result carries: local time
+ * as 'yyyy-MM-dd HH:mm', which sorts correctly as a plain string and is what
+ * macOS's `isoDate` handler produces.
+ */
+export function stampPs(dateExpression: string): string {
+    return `${dateExpression}.ToString('yyyy-MM-dd HH:mm')`;
+}
+
 /** Recursive, case-insensitive folder search by name, depth-capped so a huge tree can't hang it. */
 export const FIND_FOLDER_PS = `
 function Find-FolderByName($root, [string]$name, [int]$depth) {
@@ -184,7 +193,7 @@ export function mailScopeScript(ref: MailFolderRef, folderLabel: string, createM
     return `
 ${FIND_FOLDER_PS}
 $folderLabel = ${psString(folderLabel)}
-$segments = @(${ref.segments.map(psString).join(', ')})
+$segments = ${psArray(ref.segments)}
 $scopeRoot = ${root}
 $scope = $scopeRoot
 $deepest = $scopeRoot
@@ -198,7 +207,7 @@ foreach ($seg in $segments) {
 if ($scope -eq $null -and $segments.Count -eq 1) {
     $scope = Find-FolderByName $scopeRoot $segments[0] 3
 }
-if ($scope -eq $null -and ${createMissing ? '$true' : '$false'}) {
+if ($scope -eq $null -and ${psBool(createMissing)}) {
     # Rebuild the chain from the root, creating only what is genuinely absent.
     $scope = $scopeRoot
     foreach ($seg in $segments) {

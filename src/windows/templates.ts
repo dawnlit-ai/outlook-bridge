@@ -1,8 +1,8 @@
 // Template emails: ordinary mail items kept in a mailbox folder and reused as
 // email bodies, plus the compose-window editor for one.
 import { psBool, psInt, psString, readScriptOutput, runPowerShell, runPowerShellJson, scriptInput } from './run';
-import { accountScript, DELIVERY_STORE_PS, FIND_FOLDER_PS, SESSION_PS } from './scripts';
-import { bool, record, str, toArray } from '../shared/json';
+import { accountScript, DELIVERY_STORE_PS, FIND_FOLDER_PS, SESSION_PS, stampPs } from './scripts';
+import { bool, record, str, toArray } from './json';
 import {
     EMBEDDED_IMAGE_SOURCE,
     MAX_TEMPLATE_HTML,
@@ -80,7 +80,7 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
         if ($preview.Length -gt $previewChars) { $preview = $preview.Substring(0, $previewChars) }
     }
     $modified = ''
-    try { $modified = $item.LastModificationTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+    try { $modified = ${stampPs('$item.LastModificationTime')} } catch {}
     $rows += [PSCustomObject]@{
         entryId      = [string]$item.EntryID
         subject      = $subject

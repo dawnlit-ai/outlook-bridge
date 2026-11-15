@@ -2,7 +2,6 @@
   "compilerOptions": {
     "target": "ES2025",
     "module": "nodenext",
-    "moduleResolution": "nodenext",
     "lib": [
       "ES2025"
     ],
@@ -15,14 +14,12 @@
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
-    "noImplicitAny": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true
+    "skipLibCheck": true
   },
   "include": [
     "src/**/*"

@@ -46,6 +46,13 @@ const INBOX_REF: Readonly<MailFolderRef> = Object.freeze({
 });
 
 /**
+ * Roots whose contents are received or sent mail rather than working state —
+ * what `deleteOutlookEmails` refuses to touch, subfolders included, unless
+ * allowed. Matched by id on both platforms, as every role is.
+ */
+export const PROTECTED_ROOTS: readonly number[] = Object.freeze([FolderId.Inbox, FolderId.SentMail]);
+
+/**
  * Why `deleteOutlookEmails` refuses an item, worded once for both platforms —
  * it reaches the caller verbatim as a per-item `reason`.
  */

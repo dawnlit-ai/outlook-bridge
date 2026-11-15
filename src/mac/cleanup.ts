@@ -16,21 +16,33 @@ import {
 } from './run';
 import {
     accountLookupSnippet,
+    accountRootIdSnippet,
     folderChainSnippet,
+    MAC_ROOT_TERMS,
     macFolderPath,
+    messageByIdSnippet,
+    ownMailGuardSnippet,
     partitionMessageIds,
     resolveMacAccount,
     rootFolderSnippet,
 } from './scripts';
-import { deleteMailResult, deleteStatus, PROTECTED_MAIL_REASON } from '../mail';
+import { deleteMailResult, deleteStatus, PROTECTED_MAIL_REASON, PROTECTED_ROOTS } from '../mail';
 import type { DeleteEmailsRequest, PurgeRequest } from '../backend';
 import type { DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult } from '../types';
 
 /**
  * Delete mail by message id from anywhere in the account, into Deleted Items.
- * Inbox and Sent Items (and their subfolders) are refused unless
- * `allowProtected`; `dryRun` reports without deleting; every outcome names the
- * subject and folder of the item that actually resolved.
+ * The same four things hold the line as on Windows:
+ *  - An id that resolves outside this account is refused, whatever
+ *    `allowProtected` says. A message id resolves against the whole
+ *    application, and the Inbox/Sent check below only knows this account's
+ *    folders by name, so another mailbox's mail would otherwise pass it.
+ *  - Inbox and Sent Items (and their subfolders) are refused unless
+ *    `allowProtected`.
+ *  - `dryRun` reports without deleting.
+ *  - Every outcome names the subject and folder of the item that actually
+ *    resolved — the folder only once the item is known to be this account's,
+ *    since the path is built from this account's address.
  */
 export async function deleteOutlookEmails(request: DeleteEmailsRequest): Promise<DeleteMailResult> {
     const { valid, invalid } = partitionMessageIds(request.entryIds);
@@ -43,21 +55,23 @@ export async function deleteOutlookEmails(request: DeleteEmailsRequest): Promise
     }));
     if (valid.length > 0) {
         const acct = await resolveMacAccount(request.account);
+        // The protected roots' names, read off this account: the roots are the
+        // ones Windows protects, from the one list both read.
+        const readProtectedNames = PROTECTED_ROOTS
+            .map(rootId => `${rootFolderSnippet(acct, MAC_ROOT_TERMS[rootId], 'protectedFolder')}
+    set end of protectedNames to (name of protectedFolder) as string`)
+            .join('\n');
         const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
-${rootFolderSnippet(acct, 'inbox', 'inboxFolder')}
-${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
-    set inboxName to (name of inboxFolder) as string
-    set sentName to (name of sentFolder) as string
+${accountRootIdSnippet(acct)}
+    set protectedNames to {}
+${readProtectedNames}
     set out to ""
     repeat with theId in ${asIdList(valid)}
         set subj to ""
         set pathText to ""
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "no item with that message id in this Outlook"
             try
                 set subj to (subject of theMsg) as string
@@ -68,10 +82,11 @@ ${rootFolderSnippet(acct, 'sent items', 'sentFolder')}
             end try
             if theFolder is missing value then error "item has no parent folder - refusing to delete"
 ${folderChainSnippet('            ')}
+${ownMailGuardSnippet(request.account, 'delete', '            ')}
             set pathText to my sanitizeList(my reverseList(chainNames))
             -- The chain's top is what extends the refusal to Inbox and Sent Items SUBFOLDERS.
             set rootName to item (count of chainNames) of chainNames
-            set isProtected to (rootName is inboxName) or (rootName is sentName)
+            set isProtected to (protectedNames contains rootName)
             if isProtected and not ${asBool(request.allowProtected)} then
                 set out to out & ${asRow(['(theId as string)', 'subj', 'pathText', '"refused"', asString(PROTECTED_MAIL_REASON)])}
             else if ${asBool(request.dryRun)} then
@@ -127,12 +142,13 @@ ${rootFolderSnippet(acct, 'deleted items', 'trashFolder')}
     on error
         set timeList to {}
     end try
+    set hasTimes to ((count of timeList) is (count of idList))
     set olderThanDays to ${asInt(request.olderThanDays)}
     set cutoff to (current date) - (olderThanDays * days)
     set out to ""
     repeat with i from 1 to (count of idList)
         set stamp to missing value
-        if (count of timeList) is (count of idList) then set stamp to item i of timeList
+        if hasTimes then set stamp to item i of timeList
         set keepIt to false
         if olderThanDays > 0 and stamp is not missing value and stamp is greater than cutoff then set keepIt to true
         set out to out & ${asRow(['(item i of idList as string)', '(keepIt as string)'])}
@@ -155,10 +171,7 @@ end tell`, 'scan');
     set failedCount to 0
     repeat with theId in ${asIdList(doomed.map(row => row.id))}
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "gone"
             permanently delete theMsg
             set purgedCount to purgedCount + 1

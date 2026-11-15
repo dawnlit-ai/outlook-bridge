@@ -22,6 +22,7 @@ import {
     FIND_FOLDER_HANDLER,
     folderChainSnippet,
     macFolderPath,
+    messageByIdSnippet,
     resolveMacAccount,
     rootFolderSnippet,
 } from './scripts';
@@ -114,10 +115,7 @@ end tell`, 'standard'));
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(chosen.map(item => item.id))}
-        set theMsg to missing value
-        try
-            set theMsg to message id theId
-        end try
+${messageByIdSnippet('        ')}
         if theMsg is not missing value then
             set bodyText to ""
             try

@@ -375,8 +375,8 @@ export interface InboxSearchFilter {
     /**
      * Folders under the Inbox to leave out, by full folder path or bare name,
      * case-insensitively. An excluded folder takes its whole subtree with it.
-     * Sent, Drafts, Deleted and Junk are always skipped, even where the profile
-     * nests them under the Inbox. macOS matches the leaf name only.
+     * Sent, Drafts, Deleted, Junk and the Outbox are always skipped, even where
+     * the profile nests them under the Inbox. macOS matches the leaf name only.
      */
     excludeFolders?: readonly string[];
     /**
@@ -636,7 +636,11 @@ export interface OutlookBridge {
     /** The folders under an account's Inbox. */
     listInboxFolders(emailAccount: string, options?: ListFoldersOptions): Promise<InboxFolderInfo[]>;
 
-    /** File emails into a folder. Moving rewrites each email's entry id. */
+    /**
+     * File emails into a folder. Moving rewrites each email's entry id. Only the
+     * account's own mail is moved: an id that resolves in another mailbox fails
+     * as that item.
+     */
     moveOutlookEmails(
         emailAccount: string,
         entryIds: readonly string[],
@@ -656,7 +660,10 @@ export interface OutlookBridge {
     /** Delete the named drafts (into Deleted Items) — each has to be one of this account's drafts. */
     deleteOutlookDrafts(emailAccount: string, entryIds: readonly string[]): Promise<DeleteDraftsResult>;
 
-    /** Delete mail by id into Deleted Items, refusing received and sent mail unless allowed. */
+    /**
+     * Delete mail by id into Deleted Items, refusing received and sent mail
+     * unless allowed — and mail in any other mailbox whatever is allowed.
+     */
     deleteOutlookEmails(
         emailAccount: string,
         entryIds: readonly string[],

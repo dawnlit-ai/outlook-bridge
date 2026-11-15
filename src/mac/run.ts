@@ -95,13 +95,13 @@ export function asIdList(ids: readonly string[]): string {
 // bodies contain tabs, newlines and commas, but never these — and every emitted
 // field passes through the `sanitize` handler, which makes the framing safe
 // rather than merely unlikely to break.
-export const FIELD_SEP = '';
-export const RECORD_SEP = '';
-export const LIST_SEP = '';
+export const FIELD_SEP = '\x1f';
+export const RECORD_SEP = '\x1e';
+export const LIST_SEP = '\x1d';
 
-/** The same three, as AppleScript expressions. */
-export const AS_FIELD_SEP = '(character id 31)';
-export const AS_RECORD_SEP = '(character id 30)';
+/** The same three, as AppleScript expressions. Only the list one is written outside this module. */
+const AS_FIELD_SEP = '(character id 31)';
+const AS_RECORD_SEP = '(character id 30)';
 export const AS_LIST_SEP = '(character id 29)';
 
 /**

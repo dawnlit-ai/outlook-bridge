@@ -1,7 +1,7 @@
 // Drafts: which ones belong to an account, and listing, sending or deleting them.
 import { psArray, psInt, runPowerShellJson } from './run';
-import { accountScript, DELIVERY_STORE_PS } from './scripts';
-import { bool, itemFailurePs, itemFailures, num, record, str, strList, toArray } from '../shared/json';
+import { accountScript, DELIVERY_STORE_PS, stampPs } from './scripts';
+import { bool, itemFailurePs, itemFailures, num, record, str, strList, toArray } from './json';
 import { FolderId } from '../mail';
 import type { AccountRequest, EntryIdsRequest, ListDraftsRequest } from '../backend';
 import type { DeleteDraftsResult, ItemFailure, ListDraftsResult, SendDraftsResult } from '../types';
@@ -95,7 +95,7 @@ foreach ($entry in $scan) {
             if ($preview.Length -gt $previewChars) { $preview = $preview.Substring(0, $previewChars) }
         }
         $modified = ''
-        try { $modified = $it.LastModificationTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+        try { $modified = ${stampPs('$it.LastModificationTime')} } catch {}
         $hasAttachments = $false
         try { $hasAttachments = ($it.Attachments.Count -gt 0) } catch {}
         $rows += [PSCustomObject]@{

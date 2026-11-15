@@ -66,6 +66,24 @@ test('errors carry the detail a caller would otherwise have to parse out', () =>
     assert.equal(script.line, 7);
 });
 
+test('an error carries a cause or a line only when there is one', () => {
+    const bare = [
+        new InvalidRequestError('nope'),
+        new ScriptError({runner: 'powershell', script: 's', stderr: 'boom', durationMs: 1}),
+        new AbortedError('powershell'),
+    ];
+    for (const error of bare) {
+        // Absent, not undefined: `'cause' in error` is how a caller asks.
+        assert.ok(!Object.hasOwn(error, 'cause'), `${error.name} has no cause to report`);
+        assert.ok(!Object.hasOwn(error, 'line'), `${error.name} has no line to report`);
+    }
+    const root = new Error('root');
+    const failed = new ScriptError({runner: 'powershell', script: 's', stderr: 'boom', durationMs: 1, line: 4, cause: root});
+    assert.equal(failed.cause, root);
+    assert.equal(failed.line, 4);
+    assert.ok(Object.keys(failed).includes('cause'), 'an own enumerable field, so a JSON dump of the error shows it');
+});
+
 test('a tagged script message becomes the typed error, with the tag removed', () => {
     const notFound = errorFromTaggedMessage(`${failureTag('NOT_FOUND', 'folder')}Folder 'Invoices' not found.`);
     assert.ok(notFound instanceof NotFoundError);

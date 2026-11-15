@@ -23,12 +23,15 @@ import {
 import { readProfileAccounts } from './profile';
 import {
     accountLookupSnippet,
+    bodyTextSnippet,
     dateProperty,
     firstRecipientSnippet,
     folderChainSnippet,
+    MAC_ROOT_TERMS,
     macFolderPath,
     macMessageId,
     mailScopeSnippet,
+    messageByIdSnippet,
     MessageDetail,
     messageDetailFields,
     messageDetailSnippet,
@@ -38,7 +41,7 @@ import {
     senderSnippet,
 } from './scripts';
 import { failureTag, NotFoundError } from '../errors';
-import { folderLeafName, isOutgoingRoot, REPLY_PREFIX, subjectGlobSource } from '../mail';
+import { folderLeafName, isOutgoingRoot, NON_INCOMING_ROOTS, REPLY_PREFIX, subjectGlobSource } from '../mail';
 import type { RawEmail, ReadInboxRequest, SearchRequest } from '../backend';
 import type { EmailLocator, InboxEmail, InboxSearchMatch, SelectedEmail } from '../types';
 
@@ -88,27 +91,17 @@ end tell`, 'standard'))
     if (chosen.length === 0) return [];
 
     // Pass 2 — the expensive reads, only for the messages kept.
-    const preview = request.previewChars > 0
-        ? `            set bodyText to ""
-            try
-                set bodyText to (plain text content of theMsg) as string
-            end try
-            if (length of bodyText) > ${asInt(request.previewChars)} then set bodyText to text 1 thru ${asInt(request.previewChars)} of bodyText`
-        : '            set bodyText to ""';
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(chosen.map(c => c.id))}
-        set theMsg to missing value
-        try
-            set theMsg to message id theId
-        end try
+${messageByIdSnippet('        ')}
         if theMsg is not missing value then
             set subj to ""
             try
                 set subj to (subject of theMsg) as string
             end try
 ${outgoing ? firstRecipientSnippet('            ') : senderSnippet('            ')}
-${preview}
+${bodyTextSnippet('            ', request.previewChars)}
             set attNames to {}
             try
                 set attNames to name of every attachment of theMsg
@@ -173,11 +166,12 @@ export async function searchInboxByFilter(request: SearchRequest): Promise<Inbox
     const acct = await resolveMacAccount(request.account);
     // AppleScript reaches a child folder by name, so a path entry narrows to its leaf.
     const asNameList = (list: readonly string[]) => `{${list.map(folderLeafName).filter(Boolean).map(asString).join(', ')}}`;
-    const rootInScope = request.includeFolders.length === 0 ? 'true' : 'false';
     // Sent, Drafts, Deleted and Junk hang UNDER the Inbox on an IMAP profile, so
     // their ids are collected first and the walk never descends into them — by
     // the profile's own id where it records one, through the account otherwise.
-    const skipIds = ['sent items', 'deleted items', 'drafts', 'junk mail']
+    // The roots are the ones Windows cuts, from the one list both read.
+    const skipIds = NON_INCOMING_ROOTS
+        .map(rootId => MAC_ROOT_TERMS[rootId])
         .map(term => {
             const id = acct.folderIds?.[term];
             return id !== undefined
@@ -252,8 +246,14 @@ ${skipIds}
     set skipNames to ${asNameList(request.excludeFolders)}
     set onlyNames to ${asNameList(request.includeFolders)}
 end tell
+-- The root is read on the terms its children are: when no folder is named, or
+-- when it is one of those named.
+set rootScope to (count of onlyNames) is 0
+try
+    if onlyNames contains rootName then set rootScope to true
+end try
 set cutoff to (current date) - (${asInt(request.daysBack)} * days)
-return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames, ${rootInScope})`, 'scan'));
+return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames, rootScope)`, 'scan'));
 
     const subjectFiltered = !!(request.subjectLike || request.subjectPattern || request.excludeReplies);
     const likeRe = request.subjectLike ? new RegExp(subjectGlobSource(request.subjectLike), 'i') : null;
@@ -285,26 +285,17 @@ return my scanFolder(rootInbox, rootName, cutoff, skipIds, skipNames, onlyNames,
     if (candidates.length === 0) return [];
 
     // Pass 2 — senders, attachment names and (when asked) bodies, for the survivors only.
-    const body = request.includeBody
-        ? `            set bodyText to ""
-            try
-                set bodyText to (plain text content of theMsg) as string
-            end try`
-        : '            set bodyText to ""';
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
     set out to ""
     repeat with theId in ${asIdList(candidates.map(c => c.id))}
-        set theMsg to missing value
-        try
-            set theMsg to message id theId
-        end try
+${messageByIdSnippet('        ')}
         if theMsg is not missing value then
 ${senderSnippet('            ')}
             set attNames to {}
             try
                 set attNames to name of every attachment of theMsg
             end try
-${body}
+${bodyTextSnippet('            ', request.includeBody ? undefined : 0)}
             set out to out & ${asRow(['(id of theMsg as string)', 'sndName', 'sndAddr', 'my sanitizePositionalList(attNames)', 'bodyText'])}
         end if
     end repeat

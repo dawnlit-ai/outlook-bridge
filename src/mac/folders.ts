@@ -16,8 +16,12 @@ import {
 } from './run';
 import {
     accountLookupSnippet,
+    accountRootIdSnippet,
+    folderChainSnippet,
     macFolderPath,
     mailScopeSnippet,
+    messageByIdSnippet,
+    ownMailGuardSnippet,
     partitionMessageIds,
     resolveMacAccount,
     rootFolderSnippet,
@@ -82,6 +86,11 @@ return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
  * one real move cover for silent failures, and give no per-item results when it
  * tripped. A message already in the destination counts as moved without being
  * moved, as Windows' Move() to its own folder does.
+ *
+ * Only the account's own mail is moved. A message id resolves against the whole
+ * application, so each one is first shown to sit in this account — as Windows
+ * resolves every id in the account's store — and one that doesn't fails as its
+ * own item rather than being filed out of another mailbox.
  */
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
     const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
@@ -90,6 +99,7 @@ export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmail
     const acct = await resolveMacAccount(request.account);
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
+${accountRootIdSnippet(acct)}
 ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMissing)}
     set scopeId to id of scopeFolder
     set movedCount to 0
@@ -97,17 +107,20 @@ ${mailScopeSnippet(acct, request.folder, request.folderLabel, request.createIfMi
     repeat with theId in ${asIdList(valid)}
         set subj to ""
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "no message with that id in this Outlook"
             try
                 set subj to (subject of theMsg) as string
             end try
+            set theFolder to missing value
+            try
+                set theFolder to folder of theMsg
+            end try
+${folderChainSnippet('            ')}
+${ownMailGuardSnippet(request.account, 'move', '            ')}
             set fromId to missing value
             try
-                set fromId to id of (folder of theMsg)
+                set fromId to id of theFolder
             end try
             if fromId is not scopeId then
                 set countBefore to count of messages of scopeFolder

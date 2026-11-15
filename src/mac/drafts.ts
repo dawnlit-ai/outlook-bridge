@@ -11,7 +11,6 @@
 // `targetAcct`: there may be no account object to ask.
 import {
     asIdList,
-    asInt,
     asRow,
     asString,
     field,
@@ -25,7 +24,9 @@ import {
 } from './run';
 import {
     accountLookupSnippet,
+    bodyTextSnippet,
     macFolderPath,
+    messageByIdSnippet,
     partitionMessageIds,
     resolveMacAccount,
     rootFolderSnippet,
@@ -36,13 +37,6 @@ import type { DeleteDraftsResult, ItemFailure, ListDraftsResult, SendDraftsResul
 /** The account's drafts, newest first. Bodies are previewed, never returned whole. */
 export async function listOutlookDrafts(request: ListDraftsRequest): Promise<ListDraftsResult> {
     const acct = await resolveMacAccount(request.account);
-    const preview = request.previewChars > 0
-        ? `        set bodyText to ""
-        try
-            set bodyText to (plain text content of theMsg) as string
-        end try
-        if (length of bodyText) > ${asInt(request.previewChars)} then set bodyText to text 1 thru ${asInt(request.previewChars)} of bodyText`
-        : '        set bodyText to ""';
     const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
 ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
@@ -72,7 +66,7 @@ ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
                 end try
             end repeat
         end try
-${preview}
+${bodyTextSnippet('        ', request.previewChars)}
         set attCount to 0
         try
             set attCount to count of attachments of theMsg
@@ -158,10 +152,7 @@ ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     repeat with theId in ${asIdList(valid)}
         set subj to ""
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "no such item in this account's Drafts folder"
             try
                 set subj to (subject of theMsg) as string
@@ -212,10 +203,7 @@ ${rootFolderSnippet(acct, 'drafts', 'draftsFolder')}
     repeat with theId in wanted
         set subj to ""
         try
-            set theMsg to missing value
-            try
-                set theMsg to message id theId
-            end try
+${messageByIdSnippet('            ')}
             if theMsg is missing value then error "draft is no longer in the Drafts folder"
 ${boundElsewhereSnippet(request.account, '            ')}
             if not boundElsewhere then

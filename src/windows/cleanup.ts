@@ -1,13 +1,10 @@
 // Deleting mail, and emptying what was already deleted.
 import { psArray, psBool, psInt, psString, runPowerShellJson } from './run';
 import { accountScript, cutoffScript, DELIVERY_STORE_PS } from './scripts';
-import { num, record, str, toArray } from '../shared/json';
-import { deleteMailResult, deleteStatus, FolderId, PROTECTED_MAIL_REASON } from '../mail';
+import { num, record, str, toArray } from './json';
+import { deleteMailResult, deleteStatus, FolderId, PROTECTED_MAIL_REASON, PROTECTED_ROOTS } from '../mail';
 import type { DeleteEmailsRequest, PurgeRequest } from '../backend';
 import type { DeleteMailOutcome, DeleteMailResult, PurgeDeletedItemsResult } from '../types';
-
-/** Folders whose contents are received or sent mail rather than working state. */
-const PROTECTED_FOLDER_IDS = [FolderId.Inbox, FolderId.SentMail];
 
 /**
  * Delete mail by entry id from anywhere in the account. Delete() moves each item
@@ -33,7 +30,7 @@ $allowProtected = ${psBool(request.allowProtected)}
 $dryRun = ${psBool(request.dryRun)}
 $protectedReason = ${psString(PROTECTED_MAIL_REASON)}
 $protectedIds = @{}
-foreach ($role in @(${PROTECTED_FOLDER_IDS.map(psInt).join(', ')})) {
+foreach ($role in @(${PROTECTED_ROOTS.map(psInt).join(', ')})) {
     try { $protectedIds[[string]$store.GetDefaultFolder($role).EntryID] = $true } catch {}
 }
 function Test-UnderProtectedFolder($folder) {

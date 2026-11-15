@@ -1,8 +1,8 @@
 // Bounce-backs: finding them, clearing them away, and mining them for the
 // addresses that failed.
 import { psArray, psBool, psInt, psString, runPowerShellJson } from './run';
-import { accountScript, cutoffScript, DELIVERY_STORE_PS, itemsSinceScript, NAMED_STORE_PS } from './scripts';
-import { itemFailurePs, itemFailures, num, record, str, strList, toArray } from '../shared/json';
+import { accountScript, cutoffScript, DELIVERY_STORE_PS, itemsSinceScript, NAMED_STORE_PS, stampPs } from './scripts';
+import { itemFailurePs, itemFailures, num, record, str, strList, toArray } from './json';
 import {
     BODY_ADDRESS_PATTERN,
     BOUNCE_DAEMON_ADDRESSES,
@@ -66,7 +66,7 @@ function Get-BounceReport($item) {
         if ($failedRecipients.Count -ge $maxFailed) { break }
     }
     $received = ''
-    try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+    try { $received = ${stampPs('$item.ReceivedTime')} } catch {}
     return [PSCustomObject]@{
         entryId          = [string]$item.EntryID
         subject          = $subject.Trim()
@@ -227,7 +227,7 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
     $rows += [PSCustomObject]@{
         entryId    = [string]$m.EntryID
         subject    = ([string]$m.Subject).Trim()
-        sentOn     = if ($sentOn -ne $null) { $sentOn.ToString('yyyy-MM-dd HH:mm') } else { '' }
+        sentOn     = if ($sentOn -ne $null) { ${stampPs('$sentOn')} } else { '' }
         recipients = @($addresses)
     }
 }

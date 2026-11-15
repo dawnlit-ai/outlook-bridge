@@ -10,8 +10,9 @@ import {
     NAMED_STORE_PS,
     SENDER_SMTP_PS,
     SESSION_PS,
+    stampPs,
 } from './scripts';
-import { base64Text, record, str, strList, toArray } from '../shared/json';
+import { base64Text, record, str, toArray } from './json';
 import { FolderId, isOutgoingRoot, NON_INCOMING_ROOTS, REPLY_PREFIX_SOURCE, subjectGlobSource } from '../mail';
 import { failureTag } from '../errors';
 import type { RawEmail, ReadInboxRequest, SearchRequest } from '../backend';
@@ -33,6 +34,13 @@ function dateProperty(rootId: number): string {
  * escaping in two languages intact.
  */
 const BODY_B64_PS = `[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$bodyRaw))`;
+
+/**
+ * The item's attachment file names as `$attachmentNames`, unnamed ones
+ * included: a name's position is its attachment's. Requires `$item`.
+ */
+const ATTACHMENT_NAMES_PS = `$attachmentNames = @()
+try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}`;
 
 /** Recent mail from the Inbox root or one folder, newest first. */
 export async function readInboxEmails(request: ReadInboxRequest): Promise<InboxEmail[]> {
@@ -63,8 +71,7 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
         try { $bodyText = [string]$item.Body } catch {}
         $preview = if ($bodyText.Length -gt $previewChars) { $bodyText.Substring(0, $previewChars) } else { $bodyText }
     }
-    $attachmentNames = @()
-    try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+${ATTACHMENT_NAMES_PS}
     $who = ''
     $whoEmail = ''
     if (${psBool(outgoing)}) {
@@ -82,7 +89,7 @@ for ($i = 1; $i -le $count -and $rows.Count -lt $limit; $i++) {
         subject         = ([string]$item.Subject).Trim()
         senderName      = $who
         senderEmail     = $whoEmail
-        receivedTime    = if ($stamp -ne $null) { $stamp.ToString('yyyy-MM-dd HH:mm') } else { '' }
+        receivedTime    = if ($stamp -ne $null) { ${stampPs('$stamp')} } else { '' }
         bodyPreview     = $preview
         attachmentNames = @($attachmentNames)
     }
@@ -125,11 +132,10 @@ if ($class -ne 43 -and $class -ne 46) {
 }
 $bodyRaw = ''
 try { $bodyRaw = [string]$item.Body } catch {}
-$attachmentNames = @()
-try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+${ATTACHMENT_NAMES_PS}
 ${SENDER_SMTP_PS}
 $received = ''
-try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+try { $received = ${stampPs('$item.ReceivedTime')} } catch {}
 ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
     entryId         = [string]$item.EntryID
     subject         = ([string]$item.Subject).Trim()
@@ -262,8 +268,7 @@ for ($fx = 0; $fx -lt $folders.Count; $fx++) {
         $received = $null
         try { $received = $item.ReceivedTime } catch {}
         if ($received -ne $null -and $received -lt $cutoff) { continue }
-        $attachmentNames = @()
-        try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+${ATTACHMENT_NAMES_PS}
         if ($requireAttachment -and $attachmentNames.Count -eq 0) { continue }
         $bodyRaw = ''
         if ($includeBody) { try { $bodyRaw = [string]$item.Body } catch {} }
@@ -274,7 +279,7 @@ ${SENDER_SMTP_PS}
             subject         = $subject
             senderName      = [string]$item.SenderName
             senderEmail     = $senderSmtp
-            receivedTime    = if ($received -ne $null) { $received.ToString('yyyy-MM-dd HH:mm') } else { '' }
+            receivedTime    = if ($received -ne $null) { ${stampPs('$received')} } else { '' }
             body            = ${BODY_B64_PS}
             attachmentNames = @($attachmentNames)
             folderPath      = $folderPath
@@ -320,8 +325,7 @@ if ($item -eq $null) {
 if ([string]$item.MessageClass -notlike 'IPM.Note*') {
     throw "${failureTag('INVALID_REQUEST')}The item selected in Outlook is not an email."
 }
-$attachmentNames = @()
-try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}
+${ATTACHMENT_NAMES_PS}
 $bodyRaw = ''
 try { $bodyRaw = [string]$item.Body } catch {}
 $storeId = ''
@@ -330,7 +334,7 @@ $folderPath = ''
 try { $folderPath = [string]$item.Parent.FolderPath } catch {}
 ${SENDER_SMTP_PS}
 $received = ''
-try { $received = $item.ReceivedTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+try { $received = ${stampPs('$item.ReceivedTime')} } catch {}
 ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
     entryId         = [string]$item.EntryID
     storeId         = $storeId
@@ -352,7 +356,8 @@ ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
         senderEmail: str(e.senderEmail),
         receivedTime: str(e.receivedTime),
         body: base64Text(e.body),
-        attachmentNames: strList(e.attachmentNames),
+        // Unnamed attachments keep their place, as in every other reader here.
+        attachmentNames: toArray(e.attachmentNames).map(str),
         folderPath: str(e.folderPath),
     };
 }
