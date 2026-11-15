@@ -576,13 +576,32 @@ test('readTemplateEmails strips embedded images and reports the markers a templa
 test('replyOutlookEmail reports the addresses the reply actually resolved to', async () => {
     const result = await decode(
         () => outlook.replyOutlookEmail({emailAccount: ACCOUNT, entryId: '1263', htmlBody: '<p>ok</p>'}),
-        [['a@example.com, b@example.com', 'RE: Rates', 'jo@x.com'].join(FS)],
+        [['a@example.com, b@example.com', 'RE: Rates', 'jo@x.com', ''].join(FS)],
     );
     assert.deepEqual(result, {
         to: 'a@example.com, b@example.com',
         subject: 'RE: Rates',
         repliedToSender: 'jo@x.com',
+        draftEntryId: '',
     });
+});
+
+test('replyOutlookEmail reports the id of the reply it filed in Drafts', async () => {
+    const reply = {emailAccount: ACCOUNT, entryId: '1263', htmlBody: '<p>ok</p>', openDraftWindow: false};
+    const result = await decode(
+        () => outlook.replyOutlookEmail(reply),
+        [['jo@x.com', 'RE: Rates', 'jo@x.com', '1290'].join(FS)],
+    );
+    assert.equal(result.draftEntryId, '1290');
+
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.replyOutlookEmail(reply));
+    if (error) throw error;
+    const [script] = scripts;
+    assert.ok(
+        script.indexOf('set draftIdsBefore') < script.indexOf('set theReply to reply to'),
+        'Drafts is listed before the reply exists, so the reply is among the ids it gains',
+    );
+    assert.doesNotMatch(script, /id of theReply/, 'moving rewrites the id, so the one read before it is stale');
 });
 
 test('sendOutlookEmail reports the id of the draft it filed, and none for a window', async () => {

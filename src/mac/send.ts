@@ -99,7 +99,8 @@ end tell`, 'standard');
  * `reply to` builds the same quoted body COM's Reply() returns, so the insertion
  * point is the one thing the platforms must agree on (see WORD_SECTION_ANCHOR).
  * `to` comes back as the reply's resolved addresses: Outlook for Mac exposes
- * recipients as records, and the address is the half worth checking.
+ * recipients as records, and the address is the half worth checking. A filed
+ * draft is named by the id Drafts gained, as a new email's is.
  */
 export async function replyOutlookEmail(request: ReplyRequest): Promise<ReplyEmailResult> {
     const id = macMessageId(request.email.entryId);
@@ -139,8 +140,13 @@ ${prelude}
         set subj to (subject of theReply) as string
     end try
 ${action}
-    return ${asRow(['toLine', 'subj', 'repliedTo'])}
+    return ${asRow(['toLine', 'subj', 'repliedTo', 'filedDraftId'])}
 end tell`, 'standard');
     const parts = summaryFields(raw);
-    return { to: field(parts, 0), subject: field(parts, 1), repliedToSender: field(parts, 2) };
+    return {
+        to: field(parts, 0),
+        subject: field(parts, 1),
+        repliedToSender: field(parts, 2),
+        draftEntryId: field(parts, 3),
+    };
 }

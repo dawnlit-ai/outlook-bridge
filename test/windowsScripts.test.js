@@ -216,3 +216,28 @@ test('a draft batch reads back the count its script reports, for either verb', a
         assert.deepEqual(result, {[key]: 1, failed}, operation);
     }
 });
+
+test('a filed reply reports the EntryID Save() gave it; a sent or shown reply reports none', async () => {
+    const outlook = createOperations(windowsBackend);
+    const base = {emailAccount: 'someone@example.com', entryId: '00000000E1', htmlBody: '<p>x</p>'};
+    let result;
+    const filed = await captureScripts(run, ['runPowerShellJson'], async () => {
+        result = await outlook.replyOutlookEmail({...base, openDraftWindow: false});
+    }, [{to: 'Jo', subject: 'RE: Rates', repliedToSender: 'jo@x.com', draftEntryId: '00000000ABCDEF'}]);
+    if (filed.error) throw filed.error;
+    assert.equal(result.draftEntryId, '00000000ABCDEF');
+    const [script] = filed.scripts;
+    assert.ok(
+        script.indexOf('$reply.Save()') < script.indexOf('[string]$reply.EntryID'),
+        'the id exists only once the reply is saved',
+    );
+
+    for (const flags of [{sendImmediately: true}, {}]) {
+        const other = await captureScripts(run, ['runPowerShellJson'], async () => {
+            result = await outlook.replyOutlookEmail({...base, ...flags});
+        }, [{to: 'Jo', subject: 'RE: Rates', repliedToSender: 'jo@x.com', draftEntryId: ''}]);
+        if (other.error) throw other.error;
+        assert.equal(result.draftEntryId, '');
+        assert.doesNotMatch(other.scripts[0], /\$reply\.EntryID/);
+    }
+});

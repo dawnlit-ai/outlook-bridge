@@ -404,6 +404,18 @@ test('replyOutlookEmail names the signatures there are when one is missing', asy
     );
 });
 
+test("replyOutlookEmail hands back the backend's draft id", async () => {
+    const {outlook} = setup({
+        replyOutlookEmail: request => ({
+            to: 'jo@x.com', subject: 'RE: s', repliedToSender: 'jo@x.com',
+            draftEntryId: request.disposition === 'save' ? 'D1' : '',
+        }),
+    });
+    const base = {emailAccount: ACCOUNT, entryId: 'E1', htmlBody: '<p>b</p>'};
+    assert.equal((await outlook.replyOutlookEmail({...base, openDraftWindow: false})).draftEntryId, 'D1');
+    assert.equal((await outlook.replyOutlookEmail({...base, sendImmediately: true})).draftEntryId, '');
+});
+
 test('replyOutlookEmail needs a body or a template', async () => {
     const {outlook, calls} = setup();
     await rejectsWith(outlook.replyOutlookEmail({emailAccount: ACCOUNT, entryId: 'E1'}), 'INVALID_REQUEST');

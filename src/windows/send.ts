@@ -80,9 +80,14 @@ ConvertTo-Json -Compress @{ draftEntryId = ${draftEntryId} }
     }
 }
 
-/** Reply to an email, with the composed HTML above the quoted original. */
+/**
+ * Reply to an email, with the composed HTML above the quoted original. A reply
+ * filed as a draft reports its EntryID, read after `Save()` assigns it, as a
+ * new email's does.
+ */
 export async function replyOutlookEmail(request: ReplyRequest): Promise<ReplyEmailResult> {
     const insert = scriptInput('reply-insert', request.html);
+    const draftEntryId = request.disposition === 'save' ? '[string]$reply.EntryID' : "''";
     try {
         const output = await runPowerShellJson(`${accountScript(request.account)}
 ${itemLookupScript(request.email)}
@@ -103,10 +108,15 @@ $to = [string]$reply.To
 $subject = [string]$reply.Subject
 ${SENDER_SMTP_PS}
 ${dispose('reply', request.disposition)}
-ConvertTo-Json -Compress @{ to = $to; subject = $subject; repliedToSender = $senderSmtp }
+ConvertTo-Json -Compress @{ to = $to; subject = $subject; repliedToSender = $senderSmtp; draftEntryId = ${draftEntryId} }
 `, 'standard');
         const result = record(output);
-        return { to: str(result.to), subject: str(result.subject), repliedToSender: str(result.repliedToSender) };
+        return {
+            to: str(result.to),
+            subject: str(result.subject),
+            repliedToSender: str(result.repliedToSender),
+            draftEntryId: str(result.draftEntryId),
+        };
     } finally {
         insert.cleanup();
     }

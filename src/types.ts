@@ -125,6 +125,15 @@ export interface ReplyEmailResult {
     subject: string;
     /** The original email's sender — check it is who you meant to answer. */
     repliedToSender: string;
+    /**
+     * The draft's entry id when the reply was filed silently into Drafts
+     * (`openDraftWindow: false`), as `SendEmailResult.draftEntryId` reports a
+     * new email's: the id `listOutlookDrafts` gives it, so a caller can later
+     * send or delete exactly the replies it drafted. '' when the reply was
+     * sent or opened in a compose window, and on macOS when Drafts gained
+     * another draft with the same subject in the same moment.
+     */
+    draftEntryId: string;
 }
 
 // ── Per-item outcomes ────────────────────────────────────────────────────
