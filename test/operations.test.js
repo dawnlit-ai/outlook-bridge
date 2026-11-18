@@ -322,6 +322,96 @@ test('sendOutlookEmail checks the request before reading a signature, and names 
     assert.ok(!calls.some(call => call.name === 'sendOutlookEmail'), 'nothing is sent unsigned');
 });
 
+const SECTIONED_TEMPLATE = [
+    '<html><head><style>p{margin:0}</style></head><body>',
+    '<p>Hello,</p>',
+    '<p>[[YES]]Accepted.[[/YES]]</p>',
+    '<p>[[NO]]Declined.[[/NO]]</p>',
+    '<p>{{NOTE}}</p>',
+    '<p>{{SIGNATURE}}</p>',
+    '</body></html>',
+].join('');
+
+const templateFolder = (htmlBody, placeholders) => request => ({
+    folderFound: true,
+    folderPath: '\\\\me\\Templates',
+    templates: [{
+        entryId: 'T1',
+        subject: 'Notice',
+        htmlBody,
+        bodyPreview: '',
+        sections: ['YES', 'NO'],
+        placeholders,
+        lastModified: ''
+    }],
+    availableFolders: [],
+    request,
+});
+
+test('sendOutlookEmail writes a new email from a template, keeping its whole document', async () => {
+    const {outlook, last, calls} = setup({
+        readTemplateEmails: templateFolder(SECTIONED_TEMPLATE, ['NOTE', 'SIGNATURE']),
+        readOutlookSignatureHtml: () => SIGNATURE_FILE,
+    });
+    await outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT,
+        to: 'ops@example.com',
+        subject: 'B/L 123 received',
+        templateSubject: 'Notice',
+        templateSection: 'yes',
+        templatePlaceholders: {NOTE: 'ETA 5-Oct.'},
+        signatureName: 'Work',
+        openDraftWindow: false,
+    });
+    assert.deepEqual(calls.find(call => call.name === 'readTemplateEmails').args[0], {
+        account: ACCOUNT,
+        folder: 'Templates',
+        limit: 50,
+        includeBody: true,
+        subject: 'Notice',
+    });
+    const [request] = last('sendOutlookEmail').args;
+    assert.equal(request.subject, 'B/L 123 received', 'the email keeps its own subject, not the template’s');
+    assert.match(request.htmlBody, /^<html><head><style>p\{margin:0\}<\/style><\/head><body>/);
+    assert.match(request.htmlBody, /Accepted\./);
+    assert.match(request.htmlBody, /ETA 5-Oct\./);
+    assert.match(request.htmlBody, /<p><b>Jo<\/b><\/p><\/body><\/html>$/);
+    assert.doesNotMatch(request.htmlBody, /Declined|\[\[|\{\{/);
+    assert.equal(request.disposition, 'save');
+});
+
+test('a template with no signature placeholder is signed inside its document', async () => {
+    const {outlook, last} = setup({
+        readTemplateEmails: templateFolder('<html><body><p>Hello</p></body></html>', []),
+        readOutlookSignatureHtml: () => SIGNATURE_FILE,
+    });
+    await outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's', templateSubject: 'Notice', signatureName: 'Work'});
+    assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<html><body><p>Hello</p><br><b>Jo</b></body></html>');
+});
+
+test('sendOutlookEmail refuses a template it cannot fill, sending nothing', async () => {
+    const {outlook, calls} = setup({readTemplateEmails: templateFolder(SECTIONED_TEMPLATE, ['NOTE', 'SIGNATURE'])});
+    await rejectsWith(outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, subject: 's', templateSubject: 'Notice', templateSection: 'YES',
+    }), 'INVALID_REQUEST');
+    assert.ok(!calls.some(call => call.name === 'sendOutlookEmail'));
+});
+
+test('sendOutlookEmail needs a body or a template, and checks the request before reading either', async () => {
+    const {outlook, calls} = setup();
+    await rejectsWith(outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's'}), 'INVALID_REQUEST');
+    await rejectsWith(outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, subject: 's', templateSubject: 'Notice', sendImmediately: true,
+    }), 'INVALID_REQUEST');
+    assert.equal(calls.length, 0);
+});
+
+test('a body of its own with nothing to fill keeps a {{…}} it holds as text', async () => {
+    const {outlook, last} = setup();
+    await outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's', htmlBody: '<p>Use {{name}} here</p>'});
+    assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<p>Use {{name}} here</p>');
+});
+
 test('replyOutlookEmail puts a signature with no placeholder below the new text', async () => {
     const {outlook, last} = setup({readOutlookSignatureHtml: () => SIGNATURE_FILE});
     await outlook.replyOutlookEmail({

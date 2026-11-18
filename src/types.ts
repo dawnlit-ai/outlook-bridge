@@ -46,7 +46,23 @@ export interface SendEmailParams {
     cc?: Recipients;
     bcc?: Recipients;
     subject: string;
-    htmlBody: string;
+    /**
+     * The body, as HTML. Optional when `templateSubject` is given; when both
+     * are, this wins, as it does for a reply.
+     */
+    htmlBody?: string;
+    /**
+     * Write the email from a template email saved in the mailbox, found by
+     * subject, as a reply can. Its whole document is kept, so the styles in its
+     * `<head>` come with it. The email's own `subject` is still the caller's.
+     */
+    templateSubject?: string;
+    /** Folder holding the template. Default 'Templates'. */
+    templateFolder?: string;
+    /** The template's [[SECTION]] to keep. Required if it has sections. */
+    templateSection?: string;
+    /** `{{PLACEHOLDER}}` → HTML substituted into the composed body. */
+    templatePlaceholders?: Readonly<Record<string, string>>;
     /** Absolute paths of files to attach. Each has to exist. */
     attachments?: readonly string[];
     /**

@@ -27,7 +27,7 @@ import {
     stringRecord,
     textList,
 } from './shared/args';
-import { composeReplyHtml, placeSignature, resolveSignatureHtml } from './shared/replyBody';
+import { composeEmailHtml, composeReplyHtml, placeSignature, resolveSignatureHtml } from './shared/replyBody';
 import { accountSearchOrder, bestMatch, daysBackFor, requireDescribed, subjectPrefilter } from './shared/locate';
 import { buildBounceReport } from './shared/bounceReport';
 import { deleteMailResult, folderOption, splitQuotedOriginal } from './mail';
@@ -170,21 +170,42 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         async sendOutlookEmail(params) {
             const platform = backend();
             const p = requireObject(params, 'params');
+            const account = requiredText(p.emailAccount, 'emailAccount');
             const signatureName = optionalText(p.signatureName, 'signatureName');
+            const templateSubject = optionalText(p.templateSubject, 'templateSubject');
+            const templateSection = optionalText(p.templateSection, 'templateSection');
+            const templatePlaceholders = stringRecord(p.templatePlaceholders, 'templatePlaceholders');
+            const htmlBody = templateSubject
+                ? optionalContent(p.htmlBody, 'htmlBody')
+                : requiredContent(p.htmlBody, 'htmlBody');
             const request = {
-                account: requiredText(p.emailAccount, 'emailAccount'),
+                account,
                 to: recipientList(p.to, 'to'),
                 cc: recipientList(p.cc, 'cc'),
                 bcc: recipientList(p.bcc, 'bcc'),
                 subject: requiredContent(p.subject, 'subject'),
-                htmlBody: requiredContent(p.htmlBody, 'htmlBody'),
+                htmlBody: htmlBody ?? '',
                 attachments: attachmentFiles(p.attachments),
                 disposition: dispositionOf(p.sendImmediately, p.openDraftWindow),
             };
             if (request.disposition === 'send' && request.to.length + request.cc.length + request.bcc.length === 0) {
                 throw new InvalidRequestError('An email sent immediately needs at least one recipient.');
             }
-            if (signatureName) {
+            // Composed as a reply's body is, from a template or with something
+            // to fill, but kept whole. A body with neither is left as written:
+            // a {{…}} in it is the caller's text, not a placeholder.
+            const hasPlaceholders = !!templatePlaceholders && Object.keys(templatePlaceholders).length > 0;
+            if (templateSubject || templateSection || hasPlaceholders) {
+                request.htmlBody = await composeEmailHtml({
+                    account,
+                    htmlBody,
+                    templateSubject,
+                    templateFolder: optionalText(p.templateFolder, 'templateFolder') ?? DEFAULTS.templateFolder,
+                    templateSection,
+                    templatePlaceholders,
+                    signatureName,
+                }, platform);
+            } else if (signatureName) {
                 request.htmlBody = placeSignature(request.htmlBody, await resolveSignatureHtml(platform, signatureName));
             }
             return platform.sendOutlookEmail(request);

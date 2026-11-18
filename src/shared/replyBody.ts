@@ -1,8 +1,9 @@
 // Everything a reply needs before it touches Outlook: resolving a named
 // template, keeping its section, filling placeholders and a named signature,
 // and reducing the result to HTML that can be inserted into another document.
-// Signing a new email uses the signature half of it. String work plus three
-// reads each platform already provides, so it is done once here for both.
+// A new email written from a template goes the same way but keeps the whole
+// document; one written as HTML uses only the signature half. String work plus
+// three reads each platform already provides, so it is done once here for both.
 import { composeTemplateBody, findTokens, replaceToken } from '../templateBody';
 import { InvalidRequestError, NotFoundError } from '../errors';
 import type { ReadTemplatesRequest } from '../backend';
@@ -17,7 +18,7 @@ export interface ReplyBodyDeps {
     listOutlookSignatures(): Promise<string[]>;
 }
 
-/** A reply's content, as the caller described it — already validated. */
+/** A reply's or a new email's content, as the caller described it — already validated. */
 export interface ReplyContent {
     readonly account: string;
     readonly htmlBody?: string;
@@ -107,14 +108,16 @@ export function placeSignature(html: string, signature: string): string {
 }
 
 /**
- * The HTML to insert above the quoted original: template resolved, section
- * kept, placeholders and signature filled, document wrapper removed.
+ * A body composed: template resolved, section kept, placeholders and signature
+ * filled. `whole` keeps the document it came in, `<head>` styles and all;
+ * otherwise only the content of its `<body>` is returned, for inserting into
+ * another document.
  *
  * A body taken from a template is always put through composition, even with
  * nothing to fill, so a stray [[SECTION]] marker is caught here rather than
  * mailed out.
  */
-export async function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDeps): Promise<string> {
+async function composeBody(content: ReplyContent, deps: ReplyBodyDeps, whole: boolean): Promise<string> {
     let html = content.htmlBody;
     let fromTemplate = false;
     if ((!html || html.trim() === '') && content.templateSubject) {
@@ -141,8 +144,22 @@ export async function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDep
             label: content.templateSubject,
         });
     }
-    const body = innerBodyHtml(html);
+    const body = whole ? html : innerBodyHtml(html);
     return signature !== '' && !signatureInPlace ? placeSignature(body, signature) : body;
+}
+
+/** The HTML to insert above the quoted original, its document wrapper removed. */
+export function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDeps): Promise<string> {
+    return composeBody(content, deps, false);
+}
+
+/**
+ * A new email's whole HTML, from a template or a body with sections or
+ * placeholders to fill. Unlike a reply's, the document is kept: no other
+ * email's wraps it, and a saved template's styles live in its `<head>`.
+ */
+export function composeEmailHtml(content: ReplyContent, deps: ReplyBodyDeps): Promise<string> {
+    return composeBody(content, deps, true);
 }
 
 /**
