@@ -8,6 +8,12 @@ permissions:
   contents: read
 
 jobs:
+  # Publishes through npm trusted publishing: npm exchanges this job's OIDC
+  # token (id-token: write) for a short-lived publish credential, so no npm
+  # token is stored anywhere. The package's trusted publisher on npmjs.com names
+  # this workflow by filename, publish.yml; renaming the file, or running the
+  # job on a self-hosted runner, makes the publish fail with ENEEDAUTH.
+  # Provenance is attested automatically; --provenance only makes it explicit.
   publish:
     runs-on: ubuntu-latest
     permissions:
@@ -22,5 +28,3 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
