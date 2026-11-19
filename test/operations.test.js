@@ -403,6 +403,10 @@ test('sendOutlookEmail needs a body or a template, and checks the request before
     await rejectsWith(outlook.sendOutlookEmail({
         emailAccount: ACCOUNT, subject: 's', templateSubject: 'Notice', sendImmediately: true,
     }), 'INVALID_REQUEST');
+    // Placeholders with nothing to fill them in: refused as an email, not a reply.
+    await assert.rejects(outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, subject: 's', htmlBody: '', templatePlaceholders: {NOTE: 'x'},
+    }), error => error.code === 'INVALID_REQUEST' && /email/.test(error.message) && !/reply/i.test(error.message));
     assert.equal(calls.length, 0);
 });
 

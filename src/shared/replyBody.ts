@@ -109,15 +109,15 @@ export function placeSignature(html: string, signature: string): string {
 
 /**
  * A body composed: template resolved, section kept, placeholders and signature
- * filled. `whole` keeps the document it came in, `<head>` styles and all;
- * otherwise only the content of its `<body>` is returned, for inserting into
- * another document.
+ * filled. A new email keeps the document it came in, `<head>` styles and all;
+ * a reply gets only the content of its `<body>`, for inserting into another
+ * document.
  *
  * A body taken from a template is always put through composition, even with
  * nothing to fill, so a stray [[SECTION]] marker is caught here rather than
  * mailed out.
  */
-async function composeBody(content: ReplyContent, deps: ReplyBodyDeps, whole: boolean): Promise<string> {
+async function composeBody(content: ReplyContent, deps: ReplyBodyDeps, kind: 'reply' | 'email'): Promise<string> {
     let html = content.htmlBody;
     let fromTemplate = false;
     if ((!html || html.trim() === '') && content.templateSubject) {
@@ -125,7 +125,12 @@ async function composeBody(content: ReplyContent, deps: ReplyBodyDeps, whole: bo
         fromTemplate = true;
     }
     if (!html || html.trim() === '') {
-        throw new InvalidRequestError('A reply needs either htmlBody or templateSubject.');
+        // A new email is only composed when it has a template, section or
+        // placeholders, so one that gets here has the last two and nothing to
+        // fill them in.
+        throw new InvalidRequestError(kind === 'reply'
+            ? 'A reply needs either htmlBody or templateSubject.'
+            : 'An email with templateSection or templatePlaceholders needs either htmlBody or templateSubject.');
     }
 
     // A signature with a placeholder to go in is filled with the others, so
@@ -144,13 +149,13 @@ async function composeBody(content: ReplyContent, deps: ReplyBodyDeps, whole: bo
             label: content.templateSubject,
         });
     }
-    const body = whole ? html : innerBodyHtml(html);
+    const body = kind === 'email' ? html : innerBodyHtml(html);
     return signature !== '' && !signatureInPlace ? placeSignature(body, signature) : body;
 }
 
 /** The HTML to insert above the quoted original, its document wrapper removed. */
 export function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDeps): Promise<string> {
-    return composeBody(content, deps, false);
+    return composeBody(content, deps, 'reply');
 }
 
 /**
@@ -159,7 +164,7 @@ export function composeReplyHtml(content: ReplyContent, deps: ReplyBodyDeps): Pr
  * email's wraps it, and a saved template's styles live in its `<head>`.
  */
 export function composeEmailHtml(content: ReplyContent, deps: ReplyBodyDeps): Promise<string> {
-    return composeBody(content, deps, true);
+    return composeBody(content, deps, 'email');
 }
 
 /**
