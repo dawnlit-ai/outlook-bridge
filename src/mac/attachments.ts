@@ -5,13 +5,13 @@
 // and the second run saves what matched. That keeps one definition of "does this
 // name match", one wording for the error, and one file-naming rule.
 import fs from 'fs';
-import { asInt, asRow, asString, field, runOsaScript, splitPositionalList, summaryFields } from './run';
+import { asInt, asRow, asString, runOsaScript, summaryFields } from './run';
 import {
     macMessageId,
-    MessageDetail,
     messageDetailFields,
     messageDetailSnippet,
     messageLookupSnippet,
+    parseMessageDetail,
 } from './scripts';
 import {
     attachmentNotFoundMessage,
@@ -30,18 +30,13 @@ import type { SavedAttachment } from '../types';
  */
 export async function saveEmailAttachments(request: SaveAttachmentsRequest): Promise<SavedAttachment[]> {
     const id = macMessageId(request.email.entryId);
-    const parts = summaryFields(await runOsaScript(`tell application "Microsoft Outlook"
+    const raw = await runOsaScript(`tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
 ${messageDetailSnippet()}
     return ${asRow(messageDetailFields())}
-end tell`, 'quick'));
-    const email = {
-        subject: field(parts, MessageDetail.subject).trim(),
-        senderName: field(parts, MessageDetail.senderName),
-        senderEmail: field(parts, MessageDetail.senderEmail),
-        receivedTime: field(parts, MessageDetail.receivedTime),
-    };
-    const attachmentNames = splitPositionalList(field(parts, MessageDetail.attachmentNames));
+end tell`, 'quick');
+    const { subject, senderName, senderEmail, receivedTime, attachmentNames } = parseMessageDetail(summaryFields(raw));
+    const email = { subject, senderName, senderEmail, receivedTime };
 
     const picks = request.fileNames.map(fileName => {
         const index = findAttachmentIndex(attachmentNames, fileName);

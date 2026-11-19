@@ -32,10 +32,10 @@ import {
     macMessageId,
     mailScopeSnippet,
     messageByIdSnippet,
-    MessageDetail,
     messageDetailFields,
     messageDetailSnippet,
     messageLookupSnippet,
+    parseMessageDetail,
     resolveMacAccount,
     rootFolderSnippet,
     senderSnippet,
@@ -138,20 +138,12 @@ end tell`, 'standard');
  */
 export async function readEmailBody(email: EmailLocator): Promise<RawEmail> {
     const id = macMessageId(email.entryId);
-    const parts = summaryFields(await runOsaScript(`tell application "Microsoft Outlook"
+    const detail = parseMessageDetail(summaryFields(await runOsaScript(`tell application "Microsoft Outlook"
 ${messageLookupSnippet(id)}
 ${messageDetailSnippet(true)}
     return ${asRow(messageDetailFields(true))}
-end tell`, 'quick'));
-    return {
-        entryId: field(parts, MessageDetail.id) || id,
-        subject: field(parts, MessageDetail.subject).trim(),
-        senderName: field(parts, MessageDetail.senderName),
-        senderEmail: field(parts, MessageDetail.senderEmail),
-        receivedTime: field(parts, MessageDetail.receivedTime),
-        body: field(parts, MessageDetail.body),
-        attachmentNames: splitPositionalList(field(parts, MessageDetail.attachmentNames)),
-    };
+end tell`, 'quick')));
+    return { ...detail, entryId: detail.entryId || id };
 }
 
 /**
@@ -370,19 +362,14 @@ ${folderChainSnippet('        ')}
     return ${asRow(messageDetailFields(true))} & ${asRow(['acctAddr', 'my sanitizeList(chainNames)', 'rootId'])}
 end tell`, 'quick'));
     if (records.length === 0) throw new NotFoundError('email', 'Outlook reported no selected email.');
-    const parts = splitFields(records[0]);
+    const { entryId, ...email } = parseMessageDetail(splitFields(records[0]));
     const where = splitFields(records[1] ?? '');
     const chain = splitList(field(where, 1)).reverse();
     const account = field(where, 0) || (chain.length ? await accountByRootFolder(field(where, 2)) : '');
     return {
-        entryId: field(parts, MessageDetail.id),
+        entryId,
         storeId: '',
-        subject: field(parts, MessageDetail.subject).trim(),
-        senderName: field(parts, MessageDetail.senderName),
-        senderEmail: field(parts, MessageDetail.senderEmail),
-        receivedTime: field(parts, MessageDetail.receivedTime),
-        body: field(parts, MessageDetail.body),
-        attachmentNames: splitPositionalList(field(parts, MessageDetail.attachmentNames)),
+        ...email,
         folderPath: account && chain.length ? macFolderPath(account, chain[0], chain.slice(1)) : '',
     };
 }

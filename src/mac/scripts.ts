@@ -1,9 +1,9 @@
 // The AppleScript fragments more than one macOS operation is built from.
-import { asInt, asString } from './run';
+import { asInt, asString, field, splitPositionalList } from './run';
 import { profileRefusal, readProfileAccounts } from './profile';
 import { failureTag, InvalidRequestError, NotImplementedError } from '../errors';
 import { FolderId, isOutgoingRoot } from '../mail';
-import type { ItemFailure, MailFolderRef } from '../types';
+import type { InboxSearchMatch, ItemFailure, MailFolderRef } from '../types';
 
 /**
  * An account as the generated AppleScript reaches it.
@@ -359,7 +359,7 @@ ${indent}end try`;
 /**
  * Everything a reader wants off one message bound to `theMsg`, emitted together
  * with the row it produces (see `messageDetailFields`) so the read order and the
- * positions the decoders index into cannot drift apart. `bodyText` is emitted
+ * positions `parseMessageDetail` reads back cannot drift apart. `bodyText` is emitted
  * LAST when asked for, so a stray separator in an earlier field can't shift it.
  */
 export function messageDetailSnippet(withBody = false, indent = '    '): string {
@@ -390,7 +390,7 @@ export function messageDetailFields(withBody = false): string[] {
 }
 
 /** Where each of those fields lands in the row. */
-export const MessageDetail = {
+const MessageDetail = {
     id: 0,
     subject: 1,
     senderName: 2,
@@ -399,6 +399,19 @@ export const MessageDetail = {
     attachmentNames: 5,
     body: 6,
 } as const;
+
+/** A `messageDetailFields` row, decoded; `body` is '' when the row was built without one. */
+export function parseMessageDetail(parts: readonly string[]): Omit<InboxSearchMatch, 'storeId' | 'folderPath'> {
+    return {
+        entryId: field(parts, MessageDetail.id),
+        subject: field(parts, MessageDetail.subject).trim(),
+        senderName: field(parts, MessageDetail.senderName),
+        senderEmail: field(parts, MessageDetail.senderEmail),
+        receivedTime: field(parts, MessageDetail.receivedTime),
+        body: field(parts, MessageDetail.body),
+        attachmentNames: splitPositionalList(field(parts, MessageDetail.attachmentNames)),
+    };
+}
 
 /**
  * `theMsg`'s first recipient as `sndName` / `sndAddr` — what outgoing mail

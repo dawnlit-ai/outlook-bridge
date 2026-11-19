@@ -42,6 +42,25 @@ const BODY_B64_PS = `[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetB
 const ATTACHMENT_NAMES_PS = `$attachmentNames = @()
 try { foreach ($att in $item.Attachments) { $attachmentNames += [string]$att.FileName } } catch {}`;
 
+/** One email row as the single-email readers print it, with `BODY_B64_PS` and `ATTACHMENT_NAMES_PS`, decoded. */
+function emailRow(row: Record<string, unknown>): Omit<InboxSearchMatch, 'storeId' | 'folderPath'> {
+    return {
+        entryId: str(row.entryId),
+        subject: str(row.subject),
+        senderName: str(row.senderName),
+        senderEmail: str(row.senderEmail),
+        receivedTime: str(row.receivedTime),
+        body: base64Text(row.body),
+        attachmentNames: toArray(row.attachmentNames).map(str),
+    };
+}
+
+/** That row plus where the email sits — a search match, or the selected email. */
+function locatedEmailRow(row: Record<string, unknown>): InboxSearchMatch {
+    const { entryId, ...email } = emailRow(row);
+    return { entryId, storeId: str(row.storeId), ...email, folderPath: str(row.folderPath) };
+}
+
 /** Recent mail from the Inbox root or one folder, newest first. */
 export async function readInboxEmails(request: ReadInboxRequest): Promise<InboxEmail[]> {
     const dateProp = dateProperty(request.folder.rootId);
@@ -146,16 +165,8 @@ ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
     attachmentNames = @($attachmentNames)
 })
 `, 'quick');
-    const e = record(output);
-    return {
-        entryId: str(e.entryId) || email.entryId,
-        subject: str(e.subject),
-        senderName: str(e.senderName),
-        senderEmail: str(e.senderEmail),
-        receivedTime: str(e.receivedTime),
-        body: base64Text(e.body),
-        attachmentNames: toArray(e.attachmentNames).map(str),
-    };
+    const detail = emailRow(record(output));
+    return { ...detail, entryId: detail.entryId || email.entryId };
 }
 
 /**
@@ -288,20 +299,7 @@ ${SENDER_SMTP_PS}
 }
 ConvertTo-Json -Depth 4 -InputObject @($rows)
 `, 'scan');
-    return toArray(output).map(row => {
-        const e = record(row);
-        return {
-            entryId: str(e.entryId),
-            storeId: str(e.storeId),
-            subject: str(e.subject),
-            senderName: str(e.senderName),
-            senderEmail: str(e.senderEmail),
-            receivedTime: str(e.receivedTime),
-            body: base64Text(e.body),
-            attachmentNames: toArray(e.attachmentNames).map(str),
-            folderPath: str(e.folderPath),
-        };
-    });
+    return toArray(output).map(row => locatedEmailRow(record(row)));
 }
 
 /** The email currently selected — or open — in Outlook. */
@@ -347,19 +345,7 @@ ConvertTo-Json -Compress -Depth 3 -InputObject ([PSCustomObject]@{
     folderPath      = $folderPath
 })
 `, 'quick');
-    const e = record(output);
-    return {
-        entryId: str(e.entryId),
-        storeId: str(e.storeId),
-        subject: str(e.subject),
-        senderName: str(e.senderName),
-        senderEmail: str(e.senderEmail),
-        receivedTime: str(e.receivedTime),
-        body: base64Text(e.body),
-        // Unnamed attachments keep their place, as in every other reader here.
-        attachmentNames: toArray(e.attachmentNames).map(str),
-        folderPath: str(e.folderPath),
-    };
+    return locatedEmailRow(record(output));
 }
 
 /**
