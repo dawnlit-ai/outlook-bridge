@@ -14,7 +14,14 @@ cloud permissions: this automates the desktop client itself, the way a person wo
   (`openDraftWindow: false`) but not sent or shown as it is composed: Outlook offers no way to set the mailbox it sends
   from, so the draft is filed through its compose window, which opens for a moment, and only once that window names
   the mailbox. A reply to mail in the mailbox is from it; a new email is from Outlook's default mailbox, and from any
-  other it fails with `INVALID_REQUEST`, leaving nothing behind.
+  other it fails with `INVALID_REQUEST`, leaving nothing behind. Into such a mailbox's folders Outlook ignores a
+  scripted move, so `moveOutlookEmails` files each email it ignored through Outlook's own *Message → Move → Choose
+  Folder…* instead. Outlook comes to the front for a moment, and the app that was in front is put back. The email is
+  opened, and so marked read. The app running this package needs **Accessibility** access (*Device Control and Data
+  Access* on macOS 27) to use the menu: without it, that email fails, naming the setting. The dialog's search matches
+  folder names only and doesn't say which match it would file into. So the dialog is used only when its search finds
+  that one folder, and an email bound for a folder that shares a name with another (`Inbox` shares one with *On My
+  Computer*'s) fails, naming the folders it found.
 - **Anywhere else** — `capabilities()` reports nothing supported and every call rejects with `UNSUPPORTED_PLATFORM`.
 
 ## Install

@@ -362,7 +362,10 @@ test('searchInboxByFilter keeps the flags that decide how a pattern parses, and 
 
 test('searchInboxByFilter reads the Inbox root when it is one of the folders named, as on Windows', async () => {
     for (const filter of [{}, {includeFolders: ['Inbox']}, {includeFolders: ['Clients']}]) {
-        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.searchInboxByFilter(ACCOUNT, filter));
+        const {
+            scripts,
+            error
+        } = await captureScripts(macRun, ['runOsaScript'], () => outlook.searchInboxByFilter(ACCOUNT, filter));
         if (error) throw error;
         // Decided in the script, against the root's own name: only Outlook
         // knows what this mailbox calls its Inbox.
@@ -434,11 +437,11 @@ test('a batch reports the summary and the per-item failures apart', async () => 
     });
 });
 
-test('each move is confirmed on its own, so a silent no-op fails as that item', async () => {
+test('each move is confirmed on its own, and a silent no-op goes through the Move dialog as that item', async () => {
     let moved;
     const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], async () => {
         moved = await outlook.moveOutlookEmails(ACCOUNT, ['1263', '1264'], 'Archive');
-    }, [row('1', 'false') + row('1264', 'Stuck', "Outlook reported the move but 'Archive' did not grow - not filed")]);
+    }, [row('1', 'false') + row('1264', 'Stuck', "Outlook's Move dialog found no folder named 'Archive'.")]);
     if (error) throw error;
     const [script] = scripts;
     const start = script.indexOf('repeat with theId');
@@ -446,10 +449,61 @@ test('each move is confirmed on its own, so a silent no-op fails as that item', 
     const end = script.lastIndexOf('end repeat');
     const loop = script.slice(start, end);
     assert.match(loop, /if fromId is not scopeId then/, 'mail already in the folder is not moved again');
-    assert.match(loop, /set countBefore to count of messages of scopeFolder\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then error/);
+    assert.match(loop, /set countBefore to count of messages of scopeFolder\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then\s+my fileThroughMoveDialog\(\(contents of theId\), subj, scopeLeaf, scopeLabel, scopeId, countBefore, "someone@example\.com"\)/,
+        'the dialog only when the scripted move filed nothing, for that one item');
     assert.doesNotMatch(script.slice(end), /did not grow/, 'no batch-wide check is left to discard the per-item results');
     assert.equal(moved.moved, 1);
     assert.deepEqual(moved.failed.map(f => f.entryId), ['1264']);
+});
+
+test('the Move dialog is named the way it lists a folder: its name, then the mailbox and the folders above it', async () => {
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    if (error) throw error;
+    const [script] = scripts;
+    const label = script.slice(script.indexOf('set scopeId to id of scopeFolder'), script.indexOf('set movedCount to 0'));
+    assert.match(label, /set theFolder to scopeFolder/, 'the chain walked is the destination\'s');
+    assert.match(label, /set scopeLeaf to item 1 of chainNames\s+set scopeLabel to scopeLeaf & ", " & "someone@example\.com"/);
+    // Nearest first, so the folders above it are added from the top down:
+    // "Archive, someone@example.com/Inbox".
+    assert.match(label, /repeat with i from \(count of chainNames\) to 2 by -1\s+set scopeLabel to scopeLabel & "\/" & \(item i of chainNames\)/);
+});
+
+test('the Move dialog is pressed only when its search shows the one folder, and is left as it was found otherwise', async () => {
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    if (error) throw error;
+    const [script] = scripts;
+    const handler = script.slice(script.indexOf('on fileThroughMoveDialog('), script.indexOf('end fileThroughMoveDialog'));
+    assert.ok(handler.length > 0, 'the script carries the handler it calls');
+    assert.match(handler, /if \(id of folder of message id theId\) is scopeId then return/, 'mail the scripted move did file is not opened');
+    assert.match(handler, /nm ends with \(\(character id 8226\) & " " & acctAddr\) and \(subj is "" or nm starts with subj\)/, 'the email\'s own window, by its title');
+    assert.match(handler, /if \(\(name of window 1\) as string\) is not winTitle then error/, 'and still in front when the menu is used');
+    const guard = handler.indexOf('if shown is not {scopeLabel} then');
+    const press = handler.indexOf('click button "Move" of dlg');
+    assert.ok(guard > 0 && press > guard, 'Move is pressed only past the check that the search left that one row');
+    assert.ok(handler.slice(guard, press).includes('error "Outlook\'s Move dialog finds more than one folder for '), 'other rows are named, and nothing is pressed');
+    assert.match(handler.slice(press), /if \(count of messages of mail folder id scopeId\) > countBefore then set landed to true/);
+    assert.match(handler.slice(press), /if not landed then error/, 'a press that filed nothing fails as the scripted move would');
+    // Whatever fails, the dialog is cancelled, the email's window closed and
+    // the app that was in front put back.
+    assert.match(handler, /on error errText number errNum\s+my leaveMoveDialog\(dlg, winId, prevApp\)/);
+    const leave = script.slice(script.indexOf('on leaveMoveDialog('), script.indexOf('end leaveMoveDialog'));
+    assert.match(leave, /click button "Cancel" of dlg/);
+    assert.match(leave, /close window id winId/);
+    assert.match(leave, /set frontmost of application process prevApp to true/);
+});
+
+test('the Move dialog says which privacy setting macOS wants, in plain ASCII', async () => {
+    const {MOVE_DIALOG_REFUSALS} = require('../dist/mac/folders.js');
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    if (error) throw error;
+    const [script] = scripts;
+    assert.match(script, /if not \(UI elements enabled\) then error number -25211/, 'asked before Outlook is touched');
+    assert.match(script, new RegExp(String.raw`if errNum is -25211 or errNum is -1719 then error "${MOVE_DIALOG_REFUSALS.accessibility.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+    assert.match(script, /if errNum is -1743 then error "Outlook ignored the scripted move/);
+    for (const [name, text] of Object.entries(MOVE_DIALOG_REFUSALS)) {
+        assert.doesNotMatch(text, /[^\x20-\x7e]/, `${name}: plain ASCII, since it travels inside a script literal`);
+        assert.match(text, /System Settings > Privacy & Security > /, name);
+    }
 });
 
 test('an id macOS cannot use is reported beside the ids that worked', async () => {
@@ -485,11 +539,17 @@ test('a delete or a move refuses mail it cannot show to be the account\'s, befor
 test('a mailbox with no account object is vouched for by the root folder the profile names', async () => {
     const profiled = {emailAccount: ACCOUNT, folderIds: {'inbox': 148, 'sent items': 149, 'root folder': 142}};
     await withProfile([profiled], null, async () => {
-        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+        const {
+            scripts,
+            error
+        } = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
         if (error) throw error;
         assert.match(scripts[0], /if acctRootId is missing value then set acctRootId to 142/);
     });
-    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+    const {
+        scripts,
+        error
+    } = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
     if (error) throw error;
     assert.doesNotMatch(scripts[0], /set acctRootId to \d/, 'with no profile row, only the account object can name the root');
 });
@@ -578,7 +638,10 @@ test('the window-filed drafts compile', {skip: fs.existsSync('/Applications/Micr
 test('deleteOutlookEmails protects the roots Windows does, by the names this account gives them', async () => {
     const {PROTECTED_ROOTS} = require('../dist/mail.js');
     const {MAC_ROOT_TERMS} = require('../dist/mac/scripts.js');
-    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
+    const {
+        scripts,
+        error
+    } = await captureScripts(macRun, ['runOsaScript'], () => outlook.deleteOutlookEmails(ACCOUNT, ['1263']));
     if (error) throw error;
     for (const rootId of PROTECTED_ROOTS) {
         assert.ok(scripts[0].includes(`set protectedFolder to ${MAC_ROOT_TERMS[rootId]} of targetAcct`), MAC_ROOT_TERMS[rootId]);

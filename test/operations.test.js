@@ -385,7 +385,12 @@ test('a template with no signature placeholder is signed inside its document', a
         readTemplateEmails: templateFolder('<html><body><p>Hello</p></body></html>', []),
         readOutlookSignatureHtml: () => SIGNATURE_FILE,
     });
-    await outlook.sendOutlookEmail({emailAccount: ACCOUNT, subject: 's', templateSubject: 'Notice', signatureName: 'Work'});
+    await outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT,
+        subject: 's',
+        templateSubject: 'Notice',
+        signatureName: 'Work'
+    });
     assert.equal(last('sendOutlookEmail').args[0].htmlBody, '<html><body><p>Hello</p><br><b>Jo</b></body></html>');
 });
 

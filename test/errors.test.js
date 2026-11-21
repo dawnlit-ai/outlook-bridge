@@ -78,7 +78,14 @@ test('an error carries a cause or a line only when there is one', () => {
         assert.ok(!Object.hasOwn(error, 'line'), `${error.name} has no line to report`);
     }
     const root = new Error('root');
-    const failed = new ScriptError({runner: 'powershell', script: 's', stderr: 'boom', durationMs: 1, line: 4, cause: root});
+    const failed = new ScriptError({
+        runner: 'powershell',
+        script: 's',
+        stderr: 'boom',
+        durationMs: 1,
+        line: 4,
+        cause: root
+    });
     assert.equal(failed.cause, root);
     assert.equal(failed.line, 4);
     assert.ok(Object.keys(failed).includes('cause'), 'an own enumerable field, so a JSON dump of the error shows it');
