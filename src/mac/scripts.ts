@@ -48,9 +48,11 @@ export async function resolveMacAccount(emailAccount: string): Promise<MacAccoun
  *
  * A mailbox the dictionary publishes no account object for leaves `targetAcct`
  * as `missing value` rather than failing, provided the profile gave a folder id
- * to reach it by. `needsAccountObject` is for composing mail, which can't work
- * without the object: the account a message is sent from can only be set from
- * it, and a message composed without it goes out from the default mailbox.
+ * to reach it by. `needsAccountObject` is for mail sent or shown straight after
+ * it is composed, which can't work without the object: the account a message is
+ * sent from can only be set from it, and a message composed without it goes out
+ * from the default mailbox. A composed draft can do without it, since filing one
+ * checks which mailbox Outlook will send it from (see send.ts).
  */
 export function accountLookupSnippet(acct: MacAccount, needsAccountObject = false): string {
     const probe = `    set targetAcct to missing value
@@ -66,7 +68,7 @@ export function accountLookupSnippet(acct: MacAccount, needsAccountObject = fals
     let complaint: string;
     if (acct.folderIds) {
         complaint = `${failureTag('INVALID_REQUEST')}Outlook publishes no account object for '${acct.emailAccount}', `
-            + 'so the account a message is sent from cannot be set. Its folders can be read; mail cannot be composed from it.';
+            + 'so the account a message is sent from cannot be set. Mail from it can be filed as a draft, but not sent or shown as it is composed.';
     } else if (acct.profileRefusal) {
         complaint = `${failureTag('PERMISSION_DENIED')}Account '${acct.emailAccount}' is not one Outlook's scripting `
             + `can see. ${acct.profileRefusal}`;

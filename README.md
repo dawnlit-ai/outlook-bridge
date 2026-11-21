@@ -10,7 +10,11 @@ cloud permissions: this automates the desktop client itself, the way a person wo
   there rather than quietly doing the wrong thing. A Microsoft 365 mailbox Outlook syncs through Microsoft's cloud is
   listed only in Outlook's profile, which macOS lets an app read once it has **Full Disk Access** — the app running
   this package, or the terminal or editor it was started from. Without it, calls about such a mailbox fail with
-  `PERMISSION_DENIED`, naming the app to turn on.
+  `PERMISSION_DENIED`, naming the app to turn on. Mail from such a mailbox can be filed as a draft
+  (`openDraftWindow: false`) but not sent or shown as it is composed: Outlook offers no way to set the mailbox it sends
+  from, so the draft is filed through its compose window, which opens for a moment, and only once that window names
+  the mailbox. A reply to mail in the mailbox is from it; a new email is from Outlook's default mailbox, and from any
+  other it fails with `INVALID_REQUEST`, leaving nothing behind.
 - **Anywhere else** — `capabilities()` reports nothing supported and every call rejects with `UNSUPPORTED_PLATFORM`.
 
 ## Install

@@ -494,6 +494,87 @@ test('a mailbox with no account object is vouched for by the root folder the pro
     assert.doesNotMatch(scripts[0], /set acctRootId to \d/, 'with no profile row, only the account object can name the root');
 });
 
+// ── Composing from a mailbox with no account object ──────────────────────
+
+const PROFILED_MAILBOX = {
+    emailAccount: ACCOUNT,
+    folderIds: {'inbox': 148, 'sent items': 149, 'deleted items': 146, 'drafts': 147, 'junk mail': 150, 'root folder': 142},
+};
+
+/** The one script `operation` generates while the profile lists `accounts`. */
+async function composedScript(accounts, operation) {
+    let script;
+    await withProfile(accounts, null, async () => {
+        const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], operation);
+        if (error) throw error;
+        script = scripts[0];
+    });
+    return script;
+}
+
+const COMPOSERS = {
+    replyOutlookEmail: extra => outlook.replyOutlookEmail({emailAccount: ACCOUNT, entryId: '1263', htmlBody: '<p>ok</p>', ...extra}),
+    sendOutlookEmail: extra => outlook.sendOutlookEmail({
+        emailAccount: ACCOUNT, to: 'a@example.com', subject: 'Rates', htmlBody: '<p>x</p>', ...extra,
+    }),
+};
+
+test('a draft from a mailbox with no account object is filed through its window, once it is from that mailbox', async () => {
+    for (const [name, compose] of Object.entries(COMPOSERS)) {
+        const variable = name === 'replyOutlookEmail' ? 'theReply' : 'newMsg';
+        const script = await composedScript([PROFILED_MAILBOX], () => compose({openDraftWindow: false}));
+        assert.doesNotMatch(script, /INVALID_REQUEST\] Outlook publishes no account object/, `${name}: a draft is not refused`);
+        assert.match(script, /set draftsFolder to mail folder id 147/, `${name}: the mailbox's own Drafts, by id`);
+        assert.match(
+            script,
+            new RegExp(`if targetAcct is not missing value then\\s+set account of ${variable} to targetAcct`),
+            `${name}: bound only where there is an account object to bind`,
+        );
+        assert.match(script, new RegExp(`open ${variable}\\n`), `${name}: filed through its compose window`);
+        assert.match(script, /does not end with \(\(character id 8226\) & " " & "someone@example\.com"\)/, `${name}: the window names the sender`);
+        assert.ok(
+            script.indexOf('close window id draftWinId saving no') < script.indexOf('close window id draftWinId saving yes'),
+            `${name}: a draft from another mailbox is closed unsaved before any is saved`,
+        );
+        assert.match(script, /Outlook would send this draft from another mailbox than 'someone@example\.com'/, name);
+        assert.match(script, /if targetAcct is not missing value then\s+move/, `${name}: an account object still files by move`);
+    }
+});
+
+test('a mailbox with no account object still cannot send or show mail as it is composed', async () => {
+    for (const [name, compose] of Object.entries(COMPOSERS)) {
+        for (const extra of [{sendImmediately: true}, {openDraftWindow: true}]) {
+            const script = await composedScript([PROFILED_MAILBOX], () => compose(extra));
+            assert.match(script, /INVALID_REQUEST\] Outlook publishes no account object for 'someone@example\.com'/, `${name} ${JSON.stringify(extra)}`);
+        }
+    }
+});
+
+test('a draft from an account the profile does not list is filed by move, with no window', async () => {
+    for (const [name, compose] of Object.entries(COMPOSERS)) {
+        const script = await composedScript([], () => compose({openDraftWindow: false}));
+        assert.match(script, /set draftsFolder to drafts of targetAcct/, name);
+        assert.match(script, /^ {4}set account of (theReply|newMsg) to targetAcct$/m, `${name}: bound unconditionally`);
+        assert.doesNotMatch(script, /draftWinId/, `${name}: no window`);
+    }
+});
+
+test('the window-filed drafts compile', {skip: fs.existsSync('/Applications/Microsoft Outlook.app') ? false : 'needs Outlook installed'}, async () => {
+    for (const [name, compose] of Object.entries(COMPOSERS)) {
+        const script = await composedScript([PROFILED_MAILBOX], () => compose({openDraftWindow: false}));
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ob-osa-'));
+        try {
+            const input = path.join(dir, 'generated.applescript');
+            fs.writeFileSync(input, macRun.AS_HANDLERS + script, 'utf-8');
+            execFileSync('osacompile', ['-o', path.join(dir, 'generated.scpt'), input], {stdio: 'pipe'});
+        } catch (error) {
+            assert.fail(`${name}: ${error.stderr || error.message}`);
+        } finally {
+            fs.rmSync(dir, {recursive: true, force: true});
+        }
+    }
+});
+
 test('deleteOutlookEmails protects the roots Windows does, by the names this account gives them', async () => {
     const {PROTECTED_ROOTS} = require('../dist/mail.js');
     const {MAC_ROOT_TERMS} = require('../dist/mac/scripts.js');
