@@ -154,9 +154,17 @@ end tell`, 'standard');
 /**
  * Save a new template email into a folder, creating the folder at the mailbox
  * root when absent. Always adds a new item — never overwrites one.
+ *
+ * The template is made in the folder itself. Made without a place, a message
+ * goes to the default mailbox's Drafts — in new Outlook, which publishes no
+ * account object to set, that is On My Computer — and `move` from there into
+ * an account's folder silently does nothing. An Outlook that can't make one in
+ * place gets the old way: made, then moved. Either way a template that wasn't
+ * filed is deleted, not left behind as a stray draft, and reported unsaved.
  */
 export async function saveTemplateEmail(request: SaveTemplateRequest): Promise<SaveTemplateResult> {
     const acct = await resolveMacAccount(request.account);
+    const properties = `{subject:${asString(request.subject)}, content:${asString(request.htmlBody)}}`;
     const parts = summaryFields(await runOsaScript(`${FIND_FOLDER_HANDLER}
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
@@ -169,15 +177,38 @@ tell application "Microsoft Outlook"
         set theFolder to (make new mail folder at rootFolder with properties {name:${asString(request.folder)}})
         set wasCreated to true
     end if
+    set notFiled to "Outlook did not file the template in '" & (name of theFolder) & "'."
     set countBefore to count of messages of theFolder
-    set newMsg to make new outgoing message with properties {subject:${asString(request.subject)}, content:${asString(request.htmlBody)}}
+    set newMsg to missing value
     try
-        set account of newMsg to targetAcct
+        set newMsg to make new outgoing message at theFolder with properties ${properties}
     end try
-    -- 'move' reports success even where it silently does nothing, so a template
-    -- that was never filed must not be reported as saved.
-    move newMsg to theFolder
-    if (count of messages of theFolder) is not greater than countBefore then error "Outlook did not file the template in '" & (name of theFolder) & "'."
+    if newMsg is not missing value then
+        set filedIn to missing value
+        try
+            set filedIn to id of (folder of newMsg)
+        end try
+        if filedIn is not (id of theFolder) then
+            try
+                delete newMsg
+            end try
+            error notFiled
+        end if
+    else
+        set newMsg to make new outgoing message with properties ${properties}
+        try
+            set account of newMsg to targetAcct
+        end try
+        -- 'move' reports success even where it silently does nothing, so a
+        -- template that was never filed must not be reported as saved.
+        move newMsg to theFolder
+        if (count of messages of theFolder) is not greater than countBefore then
+            try
+                delete newMsg
+            end try
+            error notFiled
+        end if
+    end if
     return ${asRow(['(name of theFolder as string)', '(wasCreated as string)'])}
 end tell`, 'standard'));
     return {
