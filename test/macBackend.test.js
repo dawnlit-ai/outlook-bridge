@@ -927,3 +927,14 @@ test('profileRefusal tells macOS refusing the profile apart from there being non
         fs.readdirSync = real;
     }
 });
+
+test('a move beside the Inbox walks from the root folder the profile names, and reports that path', async () => {
+    let moved;
+    const script = await composedScript([PROFILED_MAILBOX], async () => {
+        moved = await outlook.moveOutlookEmails(ACCOUNT, ['1263'], '\\\\someone@example.com\\Processed');
+    });
+    assert.match(script, /set scopeFolder to mail folder id 142/, 'the top of the mailbox, by id');
+    assert.doesNotMatch(script, /mail folder id 148/, 'not the Inbox');
+    assert.match(script, /if \(name of sf as string\) is "Processed" then/);
+    assert.equal(moved.folderPath, '\\\\someone@example.com\\Processed');
+});

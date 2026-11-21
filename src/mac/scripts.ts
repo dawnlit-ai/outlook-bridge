@@ -2,7 +2,7 @@
 import { asInt, asString, field, splitPositionalList } from './run';
 import { profileRefusal, readProfileAccounts } from './profile';
 import { failureTag, InvalidRequestError, NotImplementedError } from '../errors';
-import { FolderId, isOutgoingRoot } from '../mail';
+import { FolderId, isOutgoingRoot, MAILBOX_ROOT } from '../mail';
 import type { InboxSearchMatch, ItemFailure, MailFolderRef } from '../types';
 
 /**
@@ -110,7 +110,9 @@ ${viaAccount}`;
  * Outlook for Mac's dictionary term for each well-known root, by olDefaultFolders
  * id. Verified against the running app: the terms are NOT what the Windows names
  * suggest — `sent mail` and `junk email` don't compile, `sent items` and `junk
- * mail` do — and one bad term fails the whole script at compile time.
+ * mail` do — and one bad term fails the whole script at compile time. The top
+ * of the mailbox, which has no such id, is the account's `root folder`, a term
+ * the profile database records an id for too.
  */
 export const MAC_ROOT_TERMS: Readonly<Record<number, string>> = {
     [FolderId.Inbox]: 'inbox',
@@ -119,6 +121,7 @@ export const MAC_ROOT_TERMS: Readonly<Record<number, string>> = {
     [FolderId.DeletedItems]: 'deleted items',
     [FolderId.Outbox]: 'outbox',
     [FolderId.Junk]: 'junk mail',
+    [MAILBOX_ROOT]: 'root folder',
 };
 
 /** The date property a root's items carry. */
@@ -133,6 +136,12 @@ export function dateProperty(rootId: number): string {
  */
 export function macFolderPath(emailAccount: string, rootLabel: string, segments: readonly string[]): string {
     return ['\\\\' + emailAccount, rootLabel, ...segments].join('\\');
+}
+
+/** The full path a folder reference leads to. A folder at the top of the mailbox has no root to name before it. */
+export function macRefPath(emailAccount: string, ref: MailFolderRef): string {
+    if (ref.rootId === MAILBOX_ROOT) return ['\\\\' + emailAccount, ...ref.segments].join('\\');
+    return macFolderPath(emailAccount, ref.rootLabel, ref.segments);
 }
 
 /**

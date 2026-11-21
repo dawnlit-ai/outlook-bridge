@@ -19,6 +19,7 @@ import {
     accountRootIdSnippet,
     folderChainSnippet,
     macFolderPath,
+    macRefPath,
     mailScopeSnippet,
     messageByIdSnippet,
     ownMailGuardSnippet,
@@ -93,7 +94,7 @@ return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
  * own item rather than being filed out of another mailbox.
  */
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
-    const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
+    const folderPath = macRefPath(request.account, request.folder);
     const { valid, invalid } = partitionMessageIds(request.entryIds);
     if (valid.length === 0) return { folderPath, folderCreated: false, moved: 0, failed: invalid };
     const acct = await resolveMacAccount(request.account);

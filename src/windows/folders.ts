@@ -41,8 +41,8 @@ ConvertTo-Json -Depth 3 -InputObject @($rows)
 }
 
 /**
- * File emails into a folder of the account: one under the Inbox, or a
- * well-known one by name. Moving to Deleted Items is how mail is deleted
+ * File emails into a folder of the account: one under the Inbox, a well-known
+ * one by name, or one beside the Inbox. Moving to Deleted Items is how mail is deleted
  * recoverably. Moving rewrites each item's entry id, so the ids passed in are
  * dead afterwards.
  */

@@ -342,8 +342,9 @@ export interface ReadInboxOptions {
     /**
      * Read this folder instead of the Inbox root: a folder under the Inbox by
      * name or path, a well-known folder ('Sent Items', 'Drafts', …), or a full
-     * folder path — see mailFolderRef. Only that folder is read, not its
-     * subfolders.
+     * folder path, which reaches a folder beside the Inbox too
+     * ('\\mailbox\Processed') — see mailFolderRef. Only that folder is read, not
+     * its subfolders.
      */
     folder?: string;
     /** Only mail from the last this-many days. Default 60. */
@@ -506,9 +507,12 @@ export interface EmailBodyResult {
 
 // ── Folders ──────────────────────────────────────────────────────────────
 export interface MailFolderRef {
-    /** olDefaultFolders id of the well-known root the path starts from. */
+    /**
+     * olDefaultFolders id of the well-known root the path starts from, or
+     * `MAILBOX_ROOT` (0) for the top of the mailbox, beside the Inbox.
+     */
     rootId: number;
-    /** That root as the caller spelled it, for messages. */
+    /** That root as the caller spelled it, for messages: the mailbox, for the top of one. */
     rootLabel: string;
     /** Path segments below the root. */
     segments: string[];
@@ -653,9 +657,11 @@ export interface OutlookBridge {
     listInboxFolders(emailAccount: string, options?: ListFoldersOptions): Promise<InboxFolderInfo[]>;
 
     /**
-     * File emails into a folder. Moving rewrites each email's entry id. Only the
-     * account's own mail is moved: an id that resolves in another mailbox fails
-     * as that item.
+     * File emails into a folder: one under the Inbox by name or path, a
+     * well-known folder, or a full folder path, which reaches a folder beside
+     * the Inbox too (`\\mailbox\Processed`) — see mailFolderRef. Moving rewrites
+     * each email's entry id. Only the account's own mail is moved: an id that
+     * resolves in another mailbox fails as that item.
      */
     moveOutlookEmails(
         emailAccount: string,

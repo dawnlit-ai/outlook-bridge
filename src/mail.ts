@@ -20,6 +20,15 @@ export const FolderId = Object.freeze({
 });
 
 /**
+ * The top of a mailbox as a folder reference's root: the folder the Inbox, Sent
+ * Items and any folder made beside them sit in. Outlook gives the top no
+ * olDefaultFolders role, so this is 0, which no role uses, and each platform
+ * reaches it its own way: Windows by `GetRootFolder()`, macOS by the account's
+ * `root folder`.
+ */
+export const MAILBOX_ROOT = 0;
+
+/**
  * The folders addressable by name rather than by walking from the Inbox, with
  * their olDefaultFolders id. A well-known name wins over a user folder of the
  * same name; reach the latter by qualifying it (`Inbox\Drafts`).
@@ -167,20 +176,27 @@ export function folderLeafName(entry: string): string {
 }
 
 /** A full Outlook folder path starts with the mailbox: `\\mailbox@example.com\…`. */
-const MAILBOX_PREFIX = /^\\\\[^\\/]+[\\/]/;
+const MAILBOX_PREFIX = /^\\\\([^\\/]+)[\\/]/;
 
 function folderSegments(folder: string): string[] {
     return folder.trim().replace(MAILBOX_PREFIX, '').split(/[\\/]+/).map(s => s.trim()).filter(Boolean);
 }
 
 /**
- * Resolve a folder string to a well-known root plus the segments below it.
+ * Resolve a folder string to a root plus the segments below it.
  *
  * Accepts every shape a person has to hand: a bare name ('Invoices'), a
  * relative path ('Invoices\Paid'), a well-known folder ('Sent Items'), a path
- * under one ('Deleted Items\2026'), and the full path listInboxFolders prints
- * ('\\team@example.com\Inbox\Invoices'). Anything not starting at a well-known
- * folder is taken as relative to the Inbox.
+ * under one ('Deleted Items\2026'), and a full path as Outlook writes it:
+ * '\\team@example.com\Inbox\Invoices', which listInboxFolders prints, or
+ * '\\team@example.com\Processed' for a folder beside the Inbox.
+ *
+ * A full path is read as Outlook reads it, from the top of the mailbox: the
+ * folder named after the mailbox sits there, unless it is a well-known one.
+ * Anything else not starting at a well-known folder is taken as relative to the
+ * Inbox. The mailbox a full path names does not pick the mailbox: the call's
+ * account does, as it always has, since a Windows store's name need not be its
+ * address.
  */
 export function mailFolderRef(folder: string): MailFolderRef {
     const segments = folderSegments(folder);
@@ -188,6 +204,8 @@ export function mailFolderRef(folder: string): MailFolderRef {
     if (head !== undefined && Object.prototype.hasOwnProperty.call(WELL_KNOWN_FOLDERS, head)) {
         return { rootId: WELL_KNOWN_FOLDERS[head], rootLabel: segments[0], segments: segments.slice(1) };
     }
+    const mailbox = MAILBOX_PREFIX.exec(folder.trim())?.[1]?.trim();
+    if (mailbox) return { rootId: MAILBOX_ROOT, rootLabel: mailbox, segments };
     return { rootId: FolderId.Inbox, rootLabel: 'Inbox', segments };
 }
 

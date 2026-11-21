@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const {
     folderOption,
     hasReplyPrefix,
+    MAILBOX_ROOT,
     mailFolderRef,
     REPLY_PREFIX,
     splitQuotedOriginal,
@@ -39,6 +40,24 @@ test('mailFolderRef: a full folder path drops the mailbox prefix', () => {
     });
 });
 
+test('mailFolderRef: a full path to a folder beside the Inbox starts at the top of the mailbox', () => {
+    assert.deepEqual(mailFolderRef('\\\\team@x.com\\Processed'), {
+        rootId: MAILBOX_ROOT,
+        rootLabel: 'team@x.com',
+        segments: ['Processed'],
+    });
+    assert.deepEqual(mailFolderRef(' \\\\team@x.com/Processed/2026 ').segments, ['Processed', '2026']);
+    // A well-known folder after the mailbox is still found by its role, not its name.
+    assert.deepEqual(mailFolderRef('\\\\team@x.com\\Sent Items\\Archive'), {
+        rootId: 5,
+        rootLabel: 'Sent Items',
+        segments: ['Archive'],
+    });
+    // Without the mailbox before it, a name is under the Inbox, as it always was.
+    assert.equal(mailFolderRef('\\Processed').rootId, 6);
+    assert.ok(!Object.values(WELL_KNOWN_FOLDERS).includes(MAILBOX_ROOT), 'the top is no role a name can reach');
+});
+
 test('mailFolderRef: forward slashes and stray separators are tolerated', () => {
     assert.deepEqual(mailFolderRef('Invoices/Paid').segments, ['Invoices', 'Paid']);
     assert.deepEqual(mailFolderRef('  Invoices \\\\ Paid  ').segments, ['Invoices', 'Paid']);
@@ -49,6 +68,7 @@ test('folderOption: nothing given is the Inbox root; only separators is refused'
     assert.deepEqual(folderOption('  ').ref.segments, []);
     assert.throws(() => folderOption('\\\\'), error => error.code === 'INVALID_REQUEST');
     assert.throws(() => folderOption(' / '), error => error.code === 'INVALID_REQUEST');
+    assert.throws(() => folderOption('\\\\team@x.com\\'), error => error.code === 'INVALID_REQUEST');
 });
 
 test('WELL_KNOWN_FOLDERS maps the roots both platforms agree on, and cannot be changed', () => {

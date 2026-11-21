@@ -279,3 +279,34 @@ test('the framing survives a body that contains the separators', () => {
     assert.deepEqual(fields.slice(0, 2), ['one', 'two']);
     assert.deepEqual(macRun.splitList(fields[2]), ['a', 'b']);
 });
+
+// ── A folder beside the Inbox ────────────────────────────────────────────
+
+test('a folder beside the Inbox is walked from the store root, with no search below it', () => {
+    const ref = mailFolderRef('\\\\a@x.com\\Processed');
+    for (const create of [false, true]) {
+        const script = mailScopeScript(ref, '\\\\a@x.com\\Processed', create);
+        assert.match(script, /\$scopeRoot = \$store\.GetRootFolder\(\)/);
+        assert.doesNotMatch(script, /GetDefaultFolder/);
+        // A search from the top would reach into Sent Items and Deleted Items.
+        assert.doesNotMatch(script, /Find-FolderByName/);
+        assert.match(script, /\$segments = @\('Processed'\)/);
+    }
+    assert.match(mailScopeScript(ref, 'x', true), /\$scope\.Folders\.Add\(\$seg\)/);
+    // Under the Inbox, a bare name still falls back to the search.
+    assert.match(mailScopeScript(mailFolderRef('Processed'), 'Processed'), /Find-FolderByName \$scopeRoot \$segments\[0\] 3/);
+});
+
+test('a macOS folder beside the Inbox is reported with no root before it', () => {
+    assert.equal(macScripts.macRefPath('a@x.com', mailFolderRef('\\\\a@x.com\\Processed')), '\\\\a@x.com\\Processed');
+    assert.equal(macScripts.macRefPath('a@x.com', mailFolderRef('Processed')), '\\\\a@x.com\\Inbox\\Processed');
+    assert.equal(macScripts.macRefPath('a@x.com', mailFolderRef('Sent Items\\2026')), '\\\\a@x.com\\Sent Items\\2026');
+});
+
+test('a macOS folder beside the Inbox starts at the root folder, by account or by profile id', () => {
+    const ref = mailFolderRef('\\\\someone@example.com\\Processed');
+    assert.match(macScripts.mailScopeSnippet(PROBED, ref), /set scopeFolder to root folder of targetAcct/);
+    const profiled = macScripts.mailScopeSnippet(PROFILED, ref);
+    assert.match(profiled, /if targetAcct is missing value then\s+set scopeFolder to mail folder id 142/);
+    assert.match(profiled, /Folder 'Processed' not found under 'someone@example\.com'\./);
+});

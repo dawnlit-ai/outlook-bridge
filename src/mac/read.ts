@@ -29,6 +29,7 @@ import {
     folderChainSnippet,
     MAC_ROOT_TERMS,
     macFolderPath,
+    macRefPath,
     macMessageId,
     mailScopeSnippet,
     messageByIdSnippet,
@@ -51,7 +52,7 @@ import type { EmailLocator, InboxEmail, InboxSearchMatch, SelectedEmail } from '
  */
 export async function readInboxEmails(request: ReadInboxRequest): Promise<InboxEmail[]> {
     const acct = await resolveMacAccount(request.account);
-    const folderPath = macFolderPath(request.account, request.folder.rootLabel, request.folder.segments);
+    const folderPath = macRefPath(request.account, request.folder);
     const outgoing = isOutgoingRoot(request.folder.rootId);
 
     // Pass 1 — index the folder. Its order isn't documented, so it is sorted here.

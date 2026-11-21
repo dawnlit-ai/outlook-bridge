@@ -6,6 +6,7 @@
 // only ever appears as a psString literal.
 import { psArray, psBool, psInt, psString } from './run';
 import { failureTag } from '../errors';
+import { MAILBOX_ROOT } from '../mail';
 import type { EmailLocator, MailFolderRef } from '../types';
 
 /**
@@ -178,20 +179,28 @@ try { $filtered = $${folderVariable}.Items.Restrict("[${property}] >= '$cutoffFi
 }
 
 /**
- * Resolve `$scope` from `$store`: a well-known root walked down through any
- * further segments. Also binds `$scopeCreated`.
+ * Resolve `$scope` from `$store`: a well-known root, or the top of the mailbox,
+ * walked down through any further segments. Also binds `$scopeCreated`.
  *
- * Segments match direct children; a bare name that isn't a direct child falls
- * back to a recursive search, so one folder string works across operations. A
- * missing folder fails as NOT_FOUND naming what the caller typed and what the
- * deepest folder reached does hold — never a silent fall back to the root. With
- * `createMissing`, the whole missing chain is created instead.
+ * Segments match direct children; under a well-known root, a bare name that
+ * isn't a direct child falls back to a recursive search, so one folder string
+ * works across operations. From the top of the mailbox it doesn't: the caller
+ * named the folder there, and a search from the top would reach into Sent Items
+ * and Deleted Items. A missing folder fails as NOT_FOUND naming what the caller
+ * typed and what the deepest folder reached does hold — never a silent fall
+ * back to the root. With `createMissing`, the whole missing chain is created
+ * instead.
  */
 export function mailScopeScript(ref: MailFolderRef, folderLabel: string, createMissing = false): string {
-    const root = `$store.GetDefaultFolder(${psInt(ref.rootId)})`;
+    const top = ref.rootId === MAILBOX_ROOT;
+    const root = top ? '$store.GetRootFolder()' : `$store.GetDefaultFolder(${psInt(ref.rootId)})`;
     if (ref.segments.length === 0) return `$scope = ${root}\n$scopeCreated = $false`;
+    const search = top ? '' : `
+if ($scope -eq $null -and $segments.Count -eq 1) {
+    $scope = Find-FolderByName $scopeRoot $segments[0] 3
+}`;
     return `
-${FIND_FOLDER_PS}
+${top ? '' : FIND_FOLDER_PS}
 $folderLabel = ${psString(folderLabel)}
 $segments = ${psArray(ref.segments)}
 $scopeRoot = ${root}
@@ -203,10 +212,7 @@ foreach ($seg in $segments) {
     foreach ($f in $scope.Folders) { if ($f.Name -ieq $seg) { $next = $f; break } }
     if ($next -eq $null) { $deepest = $scope; $scope = $null; break }
     $scope = $next
-}
-if ($scope -eq $null -and $segments.Count -eq 1) {
-    $scope = Find-FolderByName $scopeRoot $segments[0] 3
-}
+}${search}
 if ($scope -eq $null -and ${psBool(createMissing)}) {
     # Rebuild the chain from the root, creating only what is genuinely absent.
     $scope = $scopeRoot
