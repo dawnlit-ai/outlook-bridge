@@ -19,6 +19,7 @@ import {
     accountLookupSnippet,
     accountRootIdSnippet,
     folderChainSnippet,
+    MAC_ROOT_TERMS,
     macFolderPath,
     macRefPath,
     mailScopeSnippet,
@@ -28,15 +29,19 @@ import {
     resolveMacAccount,
     rootFolderSnippet,
 } from './scripts';
+import { MAILBOX_ROOT } from '../mail';
 import type { ListFoldersRequest, MoveRequest } from '../backend';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
 
 /**
- * The folders under an account's Inbox with their message counts. Path segments
- * travel joined by the LIST separator and are assembled into a folder path in
- * TypeScript, rather than pushed through two layers of backslash escaping.
+ * The folders under an account's Inbox, or from the top of its mailbox (its
+ * `root folder`, whose `mail folders` are mail folders alone), with their
+ * message counts. Path segments travel joined by the LIST separator and are
+ * assembled into a folder path in TypeScript, rather than pushed through two
+ * layers of backslash escaping.
  */
 export async function listInboxFolders(request: ListFoldersRequest): Promise<InboxFolderInfo[]> {
+    const top = request.from === 'mailbox';
     const acct = await resolveMacAccount(request.account);
     const raw = await runOsaScript(`on walkFolders(theFolder, level, maxLevel, prefix)
     set out to ""
@@ -65,14 +70,17 @@ end walkFolders
 
 tell application "Microsoft Outlook"
 ${accountLookupSnippet(acct)}
-${rootFolderSnippet(acct, 'inbox', 'inb')}
+${rootFolderSnippet(acct, top ? MAC_ROOT_TERMS[MAILBOX_ROOT] : 'inbox', 'inb')}
 end tell
 return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
     return splitRecords(raw).map(record => {
         const parts = splitFields(record);
+        const segments = splitList(field(parts, 1));
         return {
             name: field(parts, 0),
-            folderPath: macFolderPath(request.account, 'Inbox', splitList(field(parts, 1))),
+            folderPath: top
+                ? macRefPath(request.account, { rootId: MAILBOX_ROOT, rootLabel: request.account, segments })
+                : macFolderPath(request.account, 'Inbox', segments),
             itemCount: intField(parts, 2),
             depth: intField(parts, 3, 1),
         };

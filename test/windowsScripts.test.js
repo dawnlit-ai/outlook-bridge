@@ -70,6 +70,7 @@ function probeCases() {
         readEmailBody: () => outlook.readEmailBody(EMAIL),
         openOutlookEmail: () => outlook.openOutlookEmail(PROBE),
         listInboxFolders: () => outlook.listInboxFolders(PROBE, {maxDepth: 3}),
+        listMailboxFolders: () => outlook.listInboxFolders(PROBE, {maxDepth: 3, from: 'mailbox'}),
         moveOutlookEmails: () => outlook.moveOutlookEmails(PROBE, [PROBE, 'other'], `Clients\\${PROBE}`, {createIfMissing: true}),
         listOutlookDrafts: () => outlook.listOutlookDrafts(PROBE, {limit: 10, previewChars: 50}),
         sendDrafts: () => outlook.sendDrafts(PROBE, [PROBE]),

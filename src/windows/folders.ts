@@ -1,20 +1,35 @@
 // Listing the folders under an Inbox, and filing mail into one.
-import { psArray, psInt, runPowerShellJson } from './run';
+import { psArray, psBool, psInt, runPowerShellJson } from './run';
 import { accountScript, DELIVERY_STORE_PS, mailScopeScript } from './scripts';
 import { bool, itemFailurePs, itemFailures, num, record, str, toArray } from './json';
 import { FolderId } from '../mail';
 import type { ListFoldersRequest, MoveRequest } from '../backend';
 import type { InboxFolderInfo, MoveEmailsResult } from '../types';
 
-/** The folders under an account's Inbox, depth-first. */
+/**
+ * The folders under an account's Inbox, or from the top of its mailbox,
+ * depth-first. From the top, only the mail folders a person sees are listed:
+ * the store's root also holds calendars, contacts and tasks, and hidden folders
+ * Outlook keeps its own settings in.
+ */
 export async function listInboxFolders(request: ListFoldersRequest): Promise<InboxFolderInfo[]> {
+    const top = request.from === 'mailbox';
     const output = await runPowerShellJson(`${accountScript(request.account)}
 ${DELIVERY_STORE_PS}
-$inbox = $store.GetDefaultFolder(${psInt(FolderId.Inbox)})
+$start = ${top ? '$store.GetRootFolder()' : `$store.GetDefaultFolder(${psInt(FolderId.Inbox)})`}
+$mailOnly = ${psBool(top)}
 $maxDepth = ${psInt(request.maxDepth)}
 $rows = New-Object System.Collections.ArrayList
 function Add-Folders($folder, [int]$level) {
     foreach ($f in $folder.Folders) {
+        if ($mailOnly) {
+            $itemType = 0
+            try { $itemType = [int]$f.DefaultItemType } catch {}
+            if ($itemType -ne 0) { continue }
+            $hidden = $false
+            try { $hidden = [bool]$f.PropertyAccessor.GetProperty('http://schemas.microsoft.com/mapi/proptag/0x10F4000B') } catch {}
+            if ($hidden) { continue }
+        }
         $itemCount = 0
         try { $itemCount = [int]$f.Items.Count } catch {}
         [void]$rows.Add([PSCustomObject]@{
@@ -26,7 +41,7 @@ function Add-Folders($folder, [int]$level) {
         if ($level -lt $maxDepth) { Add-Folders $f ($level + 1) }
     }
 }
-Add-Folders $inbox 1
+Add-Folders $start 1
 ConvertTo-Json -Depth 3 -InputObject @($rows)
 `, 'standard');
     return toArray(output).map(row => {

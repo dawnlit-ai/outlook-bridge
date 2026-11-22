@@ -98,6 +98,8 @@ export interface RawEmail {
 
 export interface ListFoldersRequest extends AccountRequest {
     readonly maxDepth: number;
+    /** Below the Inbox, or from the top of the mailbox. */
+    readonly from: 'inbox' | 'mailbox';
 }
 
 export interface MoveRequest extends AccountRequest {

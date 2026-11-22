@@ -352,9 +352,14 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
         async listInboxFolders(emailAccount, options) {
             const platform = backend();
             const o = optionsObject(options);
+            const from = o.from ?? 'inbox';
+            if (from !== 'inbox' && from !== 'mailbox') {
+                throw new InvalidRequestError(`from must be 'inbox' or 'mailbox' (got ${JSON.stringify(from)}).`);
+            }
             return platform.listInboxFolders({
                 account: requiredText(emailAccount, 'emailAccount'),
                 maxDepth: count(o.maxDepth, 'maxDepth', DEFAULTS.folderDepth, 1, 10),
+                from,
             });
         },
 

@@ -519,8 +519,15 @@ export interface MailFolderRef {
 }
 
 export interface ListFoldersOptions {
-    /** How many levels below the Inbox to list, 1–10. Default 2. */
+    /** How many levels below where the listing starts to list, 1–10. Default 2. */
     maxDepth?: number;
+    /**
+     * Where the listing starts: `inbox` (the default) lists the folders under the
+     * Inbox; `mailbox` lists the mail folders at the top of the mailbox, the Inbox
+     * and Sent Items among them, and the folders under each. Hidden folders, and
+     * those that hold calendars, contacts or tasks rather than mail, are left out.
+     */
+    from?: 'inbox' | 'mailbox';
 }
 
 export interface InboxFolderInfo {
@@ -528,7 +535,7 @@ export interface InboxFolderInfo {
     /** Outlook folder path, e.g. `\\mailbox\Inbox\Invoices`. */
     folderPath: string;
     itemCount: number;
-    /** 1 = direct child of the Inbox, 2 = grandchild, … */
+    /** 1 = directly under where the listing starts (the Inbox, or the top of the mailbox), 2 = below that, … */
     depth: number;
 }
 
@@ -653,7 +660,7 @@ export interface OutlookBridge {
      */
     locateEmail(description: EmailDescription, options?: LocateEmailOptions): Promise<InboxSearchMatch | null>;
 
-    /** The folders under an account's Inbox. */
+    /** The folders under an account's Inbox, or with `from: 'mailbox'` every mail folder in its mailbox. */
     listInboxFolders(emailAccount: string, options?: ListFoldersOptions): Promise<InboxFolderInfo[]>;
 
     /**

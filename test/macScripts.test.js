@@ -108,6 +108,7 @@ const CASES = {
     },
     openOutlookEmail: {run: () => outlook.openOutlookEmail('1263')},
     listInboxFolders: {run: () => outlook.listInboxFolders(ACCOUNT, {maxDepth: 3})},
+    listMailboxFolders: {run: () => outlook.listInboxFolders(ACCOUNT, {maxDepth: 3, from: 'mailbox'})},
     moveOutlookEmails: {
         run: () => outlook.moveOutlookEmails(ACCOUNT, ['1263', '1264'], "Clients\\Bob's mail\\2026", {createIfMissing: true}),
         responses: [row('2', 'true')],

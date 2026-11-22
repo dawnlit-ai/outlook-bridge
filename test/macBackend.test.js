@@ -139,6 +139,7 @@ function probeCases() {
             responses: [row('INBOX', '1263', PROBE, '2026-08-01 09:30')],
         },
         listInboxFolders: {run: () => outlook.listInboxFolders(PROBE)},
+        listMailboxFolders: {run: () => outlook.listInboxFolders(PROBE, {from: 'mailbox'})},
         moveOutlookEmails: {
             run: () => outlook.moveOutlookEmails(PROBE, ['1263'], `Clients\\${PROBE}`, {createIfMissing: true}),
             responses: [row('1', 'true')],
@@ -457,7 +458,10 @@ test('each move is confirmed on its own, and a silent no-op goes through the Mov
 });
 
 test('the Move dialog is named the way it lists a folder: its name, then the mailbox and the folders above it', async () => {
-    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    const {
+        scripts,
+        error
+    } = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
     if (error) throw error;
     const [script] = scripts;
     const label = script.slice(script.indexOf('set scopeId to id of scopeFolder'), script.indexOf('set movedCount to 0'));
@@ -469,7 +473,10 @@ test('the Move dialog is named the way it lists a folder: its name, then the mai
 });
 
 test('the Move dialog is pressed only when its search shows the one folder, and is left as it was found otherwise', async () => {
-    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    const {
+        scripts,
+        error
+    } = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
     if (error) throw error;
     const [script] = scripts;
     const handler = script.slice(script.indexOf('on fileThroughMoveDialog('), script.indexOf('end fileThroughMoveDialog'));
@@ -494,7 +501,10 @@ test('the Move dialog is pressed only when its search shows the one folder, and 
 
 test('the Move dialog says which privacy setting macOS wants, in plain ASCII', async () => {
     const {MOVE_DIALOG_REFUSALS} = require('../dist/mac/folders.js');
-    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
+    const {
+        scripts,
+        error
+    } = await captureScripts(macRun, ['runOsaScript'], () => outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false')]);
     if (error) throw error;
     const [script] = scripts;
     assert.match(script, /if not \(UI elements enabled\) then error number -25211/, 'asked before Outlook is touched');
@@ -558,7 +568,14 @@ test('a mailbox with no account object is vouched for by the root folder the pro
 
 const PROFILED_MAILBOX = {
     emailAccount: ACCOUNT,
-    folderIds: {'inbox': 148, 'sent items': 149, 'deleted items': 146, 'drafts': 147, 'junk mail': 150, 'root folder': 142},
+    folderIds: {
+        'inbox': 148,
+        'sent items': 149,
+        'deleted items': 146,
+        'drafts': 147,
+        'junk mail': 150,
+        'root folder': 142
+    },
 };
 
 /** The one script `operation` generates while the profile lists `accounts`. */
@@ -573,7 +590,11 @@ async function composedScript(accounts, operation) {
 }
 
 const COMPOSERS = {
-    replyOutlookEmail: extra => outlook.replyOutlookEmail({emailAccount: ACCOUNT, entryId: '1263', htmlBody: '<p>ok</p>', ...extra}),
+    replyOutlookEmail: extra => outlook.replyOutlookEmail({
+        emailAccount: ACCOUNT,
+        entryId: '1263',
+        htmlBody: '<p>ok</p>', ...extra
+    }),
     sendOutlookEmail: extra => outlook.sendOutlookEmail({
         emailAccount: ACCOUNT, to: 'a@example.com', subject: 'Rates', htmlBody: '<p>x</p>', ...extra,
     }),

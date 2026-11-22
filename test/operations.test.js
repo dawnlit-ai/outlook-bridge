@@ -61,6 +61,17 @@ test('a full folder path to the Inbox itself names the Inbox root', async () => 
     assert.deepEqual(last('readInboxEmails').args[0].folder, {rootId: 6, rootLabel: 'Inbox', segments: []});
 });
 
+test('listInboxFolders starts at the Inbox unless asked for the top of the mailbox', async () => {
+    const {outlook, last, calls} = setup();
+    await outlook.listInboxFolders(ACCOUNT);
+    assert.deepEqual(last('listInboxFolders').args[0], {account: ACCOUNT, maxDepth: 2, from: 'inbox'});
+    await outlook.listInboxFolders(ACCOUNT, {maxDepth: 4, from: 'mailbox'});
+    assert.deepEqual(last('listInboxFolders').args[0], {account: ACCOUNT, maxDepth: 4, from: 'mailbox'});
+    const before = calls.length;
+    await rejectsWith(outlook.listInboxFolders(ACCOUNT, {from: 'root'}), 'INVALID_REQUEST');
+    assert.equal(calls.length, before);
+});
+
 test('arguments of the wrong type never reach the backend', async () => {
     const {outlook, calls} = setup();
     await rejectsWith(outlook.readInboxEmails(ACCOUNT, {daysBack: '7; Remove-Item x'}), 'INVALID_REQUEST');
