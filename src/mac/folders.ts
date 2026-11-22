@@ -82,7 +82,7 @@ return my walkFolders(inb, 1, ${asInt(request.maxDepth)}, "")`, 'standard');
 /** Why the Move dialog can't be reached, for each of the two refusals macOS gives. Plain ASCII: they travel in script literals. */
 export const MOVE_DIALOG_REFUSALS = {
     accessibility: "Outlook ignored the scripted move, and filing the email through Outlook's Move menu instead needs "
-        + 'Accessibility access: allow the app running this (Patchbay, or the terminal or editor it was started from) in '
+        + 'Accessibility access: allow the app this runs in (or the terminal or editor it was started from) in '
         + 'System Settings > Privacy & Security > Accessibility (Device Control and Data Access on macOS 27).',
     automation: "Outlook ignored the scripted move, and filing the email through Outlook's Move menu instead needs "
         + 'permission to control System Events: allow it in System Settings > Privacy & Security > Automation.',
