@@ -439,7 +439,7 @@ test('a batch reports the summary and the per-item failures apart', async () => 
     });
 });
 
-test('a moved message is followed to its new id: the one kept, else the one the folder gained', async () => {
+test('a moved message is followed to its new id: the one kept, else the one the folder gained with its subject', async () => {
     const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () =>
         outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false', '1263:1263')]);
     if (error) throw error;
@@ -451,8 +451,11 @@ test('a moved message is followed to its new id: the one kept, else the one the 
     assert.ok(kept > loop.indexOf('my fileThroughMoveDialog('), 'an id still in the folder after either way of filing is kept');
     assert.match(loop.slice(kept), /if not keptId then[^]*?set idsAfter to id of every message of scopeFolder[^]*?if idsBefore does not contain/,
         'otherwise the new id is the one the folder gained');
-    assert.match(loop, /if \(count of gainedIds\) is 1 then[^]*?is subj then set end of sameSubject/,
-        'two gained at once are told apart by subject, and left unnamed when that does not');
+    assert.match(loop, /if idsBefore does not contain \(contents of anId\) then\s+try\s+if \(\(subject of message id \(contents of anId\)\) as string\) is subj then set end of sameSubject/,
+        'a gained message is taken only with the email\'s subject');
+    assert.match(loop, /if \(count of sameSubject\) is 1 then set newId to \(item 1 of sameSubject\) as string\s+end if/,
+        'and only when one has it; otherwise the new id is left unnamed');
+    assert.doesNotMatch(loop, /gainedIds/, 'the one message gained is not taken for it on that alone: another may have landed meanwhile');
     assert.match(loop, /set end of movedIds to \(\(contents of theId\) as string\) & ":" & newId\s+on error/,
         'only an email that was filed is reported with an id');
 });

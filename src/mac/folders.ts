@@ -236,9 +236,10 @@ end leaveMoveDialog
 
 /**
  * File emails into a folder of the account. Moving rewrites each message's id,
- * so the folder's ids are read before each move: its new id is the one the
- * folder gained, or a tie between those broken by subject, and '' when that
- * leaves more than one. Filed through the Move dialog, it keeps its id.
+ * so the folder's ids are read before each move: its new id is that of the one
+ * message the folder gained with its subject, and '' when there is no such
+ * message or more than one, so another message landing there meanwhile is never
+ * taken for it. Filed through the Move dialog, it keeps its id.
  *
  * Outlook for Mac's `move` reports success even where it silently does nothing,
  * so each move is confirmed by the destination growing. One that didn't is
@@ -316,21 +317,17 @@ ${ownMailGuardSnippet(request.account, 'move', '            ')}
                     -- Bound before the loop, so it walks a local list rather than asking
                     -- Outlook for each item in turn.
                     set idsAfter to id of every message of scopeFolder
-                    set gainedIds to {}
+                    -- Gained, and with its subject, even when it is the only one gained:
+                    -- another message landing there meanwhile is never taken for it.
+                    set sameSubject to {}
                     repeat with anId in idsAfter
-                        if idsBefore does not contain (contents of anId) then set end of gainedIds to (contents of anId)
-                    end repeat
-                    if (count of gainedIds) is 1 then
-                        set newId to (item 1 of gainedIds) as string
-                    else
-                        set sameSubject to {}
-                        repeat with anId in gainedIds
+                        if idsBefore does not contain (contents of anId) then
                             try
                                 if ((subject of message id (contents of anId)) as string) is subj then set end of sameSubject to (contents of anId)
                             end try
-                        end repeat
-                        if (count of sameSubject) is 1 then set newId to (item 1 of sameSubject) as string
-                    end if
+                        end if
+                    end repeat
+                    if (count of sameSubject) is 1 then set newId to (item 1 of sameSubject) as string
                 end if
             end if
             set movedCount to movedCount + 1
