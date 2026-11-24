@@ -544,6 +544,7 @@ test('batch operations deduplicate ids and skip the backend for an empty batch',
         folderPath: '',
         folderCreated: false,
         moved: 0,
+        movedEmails: [],
         failed: []
     });
     assert.equal(calls.length, before);

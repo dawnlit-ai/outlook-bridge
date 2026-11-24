@@ -88,7 +88,7 @@ default one.
 message ids, and has no store id (it reports `''` and ignores one passed in). macOS refuses a Windows EntryID outright,
 with `INVALID_REQUEST`; on Windows a macOS id simply resolves to nothing and fails as `NOT_FOUND`. A batch reports
 either as that item's failure. **Moving an email rewrites its id** on both, so ids saved before a move are stale
-afterward. Keep the subject, sender and received time beside a saved id, and `locateEmail` finds the email again from
+afterward; `moveOutlookEmails` gives each email's new id in `movedEmails`. Keep the subject, sender and received time beside a saved id, and `locateEmail` finds the email again from
 them wherever it has moved under the Inbox, on either platform.
 
 Timestamps are local time as `yyyy-MM-dd HH:mm`, which sorts correctly as a string.

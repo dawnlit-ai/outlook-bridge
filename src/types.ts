@@ -544,10 +544,23 @@ export interface MoveEmailsOptions {
     createIfMissing?: boolean;
 }
 
+/** An email a move filed: the id it was asked for by, and the id that reaches it now. */
+export interface MovedEmail {
+    entryId: string;
+    /**
+     * Its id in the folder it was filed in. Moving rewrites an email's id, so
+     * this is what a caller following the email keeps. '' when Outlook did not
+     * say which message the email became.
+     */
+    newEntryId: string;
+}
+
 export interface MoveEmailsResult {
     folderPath: string;
     folderCreated: boolean;
     moved: number;
+    /** Each email counted in `moved`, with its new id. One already in the folder keeps its id. */
+    movedEmails: MovedEmail[];
     failed: ItemFailure[];
 }
 
@@ -667,7 +680,8 @@ export interface OutlookBridge {
      * File emails into a folder: one under the Inbox by name or path, a
      * well-known folder, or a full folder path, which reaches a folder beside
      * the Inbox too (`\\mailbox\Processed`) — see mailFolderRef. Moving rewrites
-     * each email's entry id. Only the account's own mail is moved: an id that
+     * each email's entry id; `movedEmails` gives each one's new id. Only the
+     * account's own mail is moved: an id that
      * resolves in another mailbox fails as that item.
      */
     moveOutlookEmails(

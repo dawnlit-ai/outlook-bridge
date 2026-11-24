@@ -99,6 +99,7 @@ export type {
     InboxFolderInfo,
     MoveEmailsOptions,
     MoveEmailsResult,
+    MovedEmail,
     ListDraftsOptions,
     ListDraftsResult,
     OutlookDraft,

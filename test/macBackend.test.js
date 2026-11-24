@@ -428,14 +428,33 @@ test('a batch reports the summary and the per-item failures apart', async () => 
     assert.deepEqual(sent.failed, [{entryId: '1264', subject: 'Stuck', error: 'draft is not bound to this account'}]);
 
     const moved = await decode(() => outlook.moveOutlookEmails(ACCOUNT, ['1263', '1264'], 'Archive'), [
-        row('2', 'true'),
+        row('2', 'true', ['1263:1300', '1264:'].join(LS)),
     ]);
     assert.deepEqual(moved, {
         folderPath: '\\\\someone@example.com\\Inbox\\Archive',
         folderCreated: true,
         moved: 2,
+        movedEmails: [{entryId: '1263', newEntryId: '1300'}, {entryId: '1264', newEntryId: ''}],
         failed: [],
     });
+});
+
+test('a moved message is followed to its new id: the one kept, else the one the folder gained', async () => {
+    const {scripts, error} = await captureScripts(macRun, ['runOsaScript'], () =>
+        outlook.moveOutlookEmails(ACCOUNT, ['1263'], 'Archive'), [row('1', 'false', '1263:1263')]);
+    if (error) throw error;
+    const [script] = scripts;
+    const loop = script.slice(script.indexOf('repeat with theId'), script.lastIndexOf('end repeat'));
+    const snapshot = loop.indexOf('set idsBefore to id of every message of scopeFolder');
+    assert.ok(snapshot > 0 && snapshot < loop.indexOf('move theMsg to scopeFolder'), 'the folder\'s ids are read before the move');
+    const kept = loop.indexOf('if (id of folder of message id (contents of theId)) is scopeId then set keptId to true');
+    assert.ok(kept > loop.indexOf('my fileThroughMoveDialog('), 'an id still in the folder after either way of filing is kept');
+    assert.match(loop.slice(kept), /if not keptId then[^]*?set idsAfter to id of every message of scopeFolder[^]*?if idsBefore does not contain/,
+        'otherwise the new id is the one the folder gained');
+    assert.match(loop, /if \(count of gainedIds\) is 1 then[^]*?is subj then set end of sameSubject/,
+        'two gained at once are told apart by subject, and left unnamed when that does not');
+    assert.match(loop, /set end of movedIds to \(\(contents of theId\) as string\) & ":" & newId\s+on error/,
+        'only an email that was filed is reported with an id');
 });
 
 test('each move is confirmed on its own, and a silent no-op goes through the Move dialog as that item', async () => {
@@ -450,7 +469,7 @@ test('each move is confirmed on its own, and a silent no-op goes through the Mov
     const end = script.lastIndexOf('end repeat');
     const loop = script.slice(start, end);
     assert.match(loop, /if fromId is not scopeId then/, 'mail already in the folder is not moved again');
-    assert.match(loop, /set countBefore to count of messages of scopeFolder\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then\s+my fileThroughMoveDialog\(\(contents of theId\), subj, scopeLeaf, scopeLabel, scopeId, countBefore, "someone@example\.com"\)/,
+    assert.match(loop, /set countBefore to count of idsBefore\s+move theMsg to scopeFolder\s+if \(count of messages of scopeFolder\) is not greater than countBefore then\s+my fileThroughMoveDialog\(\(contents of theId\), subj, scopeLeaf, scopeLabel, scopeId, countBefore, "someone@example\.com"\)/,
         'the dialog only when the scripted move filed nothing, for that one item');
     assert.doesNotMatch(script.slice(end), /did not grow/, 'no batch-wide check is left to discard the per-item results');
     assert.equal(moved.moved, 1);

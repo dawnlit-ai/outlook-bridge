@@ -369,7 +369,7 @@ export function createOperations(backendOrNull: Backend | null): OutlookBridge {
             const ids = entryIdList(entryIds);
             const { ref, label } = folderOption(requiredText(folder, 'folder'));
             const createIfMissing = flag(optionsObject(options).createIfMissing, 'createIfMissing', false);
-            if (ids.length === 0) return { folderPath: '', folderCreated: false, moved: 0, failed: [] };
+            if (ids.length === 0) return { folderPath: '', folderCreated: false, moved: 0, movedEmails: [], failed: [] };
             return platform.moveOutlookEmails({
                 account,
                 entryIds: ids,

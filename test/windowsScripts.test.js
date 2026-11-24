@@ -202,6 +202,30 @@ test('a filed draft reports the EntryID Save() gave it; a sent or shown email re
     }
 });
 
+test('a move reports each email\'s new EntryID, read off the item Move() returns', async () => {
+    const outlook = createOperations(windowsBackend);
+    let result;
+    const moved = await captureScripts(run, ['runPowerShellJson'], async () => {
+        result = await outlook.moveOutlookEmails('someone@example.com', ['OLD1', 'GONE'], 'Archive');
+    }, [{
+        folderPath: '\\\\someone@example.com\\Inbox\\Archive',
+        folderCreated: false,
+        moved: 1,
+        movedEmails: [{entryId: 'OLD1', newEntryId: 'NEW1'}],
+        failed: [{entryId: 'GONE', subject: '', error: 'not found'}],
+    }]);
+    if (moved.error) throw moved.error;
+    assert.deepEqual(result.movedEmails, [{entryId: 'OLD1', newEntryId: 'NEW1'}]);
+    assert.deepEqual(result.failed.map(f => f.entryId), ['GONE']);
+    const [script] = moved.scripts;
+    assert.match(script, /\$filed = \$it\.Move\(\$scope\)/, 'the moved item is kept, not discarded');
+    assert.ok(
+        script.indexOf('$filed = $it.Move($scope)') < script.indexOf('[string]$filed.EntryID'),
+        'the new id is read off the item Move() returned',
+    );
+    assert.doesNotMatch(script, /\$it\.EntryID/, 'not off the item it was asked for by, whose id is stale');
+});
+
 test('a draft batch reads back the count its script reports, for either verb', async () => {
     const outlook = createOperations(windowsBackend);
     const failed = [{entryId: 'E2', subject: 'Stuck', error: 'draft is not bound to someone@example.com'}];

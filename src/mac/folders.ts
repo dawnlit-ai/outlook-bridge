@@ -235,7 +235,10 @@ end leaveMoveDialog
 `;
 
 /**
- * File emails into a folder of the account. Moving rewrites each message's id.
+ * File emails into a folder of the account. Moving rewrites each message's id,
+ * so the folder's ids are read before each move: its new id is the one the
+ * folder gained, or a tie between those broken by subject, and '' when that
+ * leaves more than one. Filed through the Move dialog, it keeps its id.
  *
  * Outlook for Mac's `move` reports success even where it silently does nothing,
  * so each move is confirmed by the destination growing. One that didn't is
@@ -258,7 +261,7 @@ end leaveMoveDialog
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
     const folderPath = macRefPath(request.account, request.folder);
     const { valid, invalid } = partitionMessageIds(request.entryIds);
-    if (valid.length === 0) return { folderPath, folderCreated: false, moved: 0, failed: invalid };
+    if (valid.length === 0) return { folderPath, folderCreated: false, moved: 0, movedEmails: [], failed: invalid };
     const acct = await resolveMacAccount(request.account);
     const raw = await runOsaScript(`${MOVE_DIALOG_HANDLER}
 tell application "Microsoft Outlook"
@@ -274,6 +277,7 @@ ${folderChainSnippet('    ')}
         set scopeLabel to scopeLabel & "/" & (item i of chainNames)
     end repeat
     set movedCount to 0
+    set movedIds to {}
     set out to ""
     repeat with theId in ${asIdList(valid)}
         set subj to ""
@@ -293,25 +297,59 @@ ${ownMailGuardSnippet(request.account, 'move', '            ')}
             try
                 set fromId to id of theFolder
             end try
+            set newId to (contents of theId) as string
             if fromId is not scopeId then
-                set countBefore to count of messages of scopeFolder
+                set idsBefore to id of every message of scopeFolder
+                set countBefore to count of idsBefore
                 move theMsg to scopeFolder
                 if (count of messages of scopeFolder) is not greater than countBefore then
                     my fileThroughMoveDialog((contents of theId), subj, scopeLeaf, scopeLabel, scopeId, countBefore, ${asString(request.account)})
                 end if
+                -- The dialog keeps the message's id; a scripted move rewrites it, and
+                -- then its id is the one the folder gained.
+                set keptId to false
+                try
+                    if (id of folder of message id (contents of theId)) is scopeId then set keptId to true
+                end try
+                if not keptId then
+                    set newId to ""
+                    -- Bound before the loop, so it walks a local list rather than asking
+                    -- Outlook for each item in turn.
+                    set idsAfter to id of every message of scopeFolder
+                    set gainedIds to {}
+                    repeat with anId in idsAfter
+                        if idsBefore does not contain (contents of anId) then set end of gainedIds to (contents of anId)
+                    end repeat
+                    if (count of gainedIds) is 1 then
+                        set newId to (item 1 of gainedIds) as string
+                    else
+                        set sameSubject to {}
+                        repeat with anId in gainedIds
+                            try
+                                if ((subject of message id (contents of anId)) as string) is subj then set end of sameSubject to (contents of anId)
+                            end try
+                        end repeat
+                        if (count of sameSubject) is 1 then set newId to (item 1 of sameSubject) as string
+                    end if
+                end if
             end if
             set movedCount to movedCount + 1
+            set end of movedIds to ((contents of theId) as string) & ":" & newId
         on error errText
             set out to out & ${ITEM_FAILURE_ROW}
         end try
     end repeat
-    return ${asRow(['(movedCount as string)', '(scopeCreated as string)'])} & out
+    return ${asRow(['(movedCount as string)', '(scopeCreated as string)', `(my joinList(movedIds, ${AS_LIST_SEP}))`])} & out
 end tell`, 'scan');
     const { summary, failed } = splitBatch(raw);
     return {
         folderPath,
         folderCreated: boolField(summary, 1),
         moved: intField(summary, 0),
+        movedEmails: splitList(field(summary, 2)).map(pair => {
+            const at = pair.indexOf(':');
+            return { entryId: pair.slice(0, at), newEntryId: pair.slice(at + 1) };
+        }),
         failed: [...invalid, ...failed],
     };
 }

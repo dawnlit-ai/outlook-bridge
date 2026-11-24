@@ -31,7 +31,7 @@ const BACKEND_DEFAULTS = {
     }),
     openOutlookEmail: () => undefined,
     listInboxFolders: () => [],
-    moveOutlookEmails: () => ({folderPath: '', folderCreated: false, moved: 0, failed: []}),
+    moveOutlookEmails: () => ({folderPath: '', folderCreated: false, moved: 0, movedEmails: [], failed: []}),
     listOutlookDrafts: () => ({account: '', foldersScanned: [], count: 0, truncated: false, drafts: []}),
     sendDrafts: () => ({sent: 0, failed: []}),
     sendAllDrafts: () => ({sent: 0, failed: []}),

@@ -59,21 +59,25 @@ ConvertTo-Json -Depth 3 -InputObject @($rows)
  * File emails into a folder of the account: one under the Inbox, a well-known
  * one by name, or one beside the Inbox. Moving to Deleted Items is how mail is deleted
  * recoverably. Moving rewrites each item's entry id, so the ids passed in are
- * dead afterwards.
+ * dead afterwards: each one's new id is the EntryID of the item Move() returns.
  */
 export async function moveOutlookEmails(request: MoveRequest): Promise<MoveEmailsResult> {
     const output = await runPowerShellJson(`${accountScript(request.account)}
 ${DELIVERY_STORE_PS}
 ${mailScopeScript(request.folder, request.folderLabel, request.createIfMissing)}
 $moved = 0
+$movedEmails = @()
 $failed = @()
 foreach ($id in ${psArray(request.entryIds)}) {
     $subject = ''
     try {
         $it = $ns.GetItemFromID($id, $store.StoreID)
         try { $subject = [string]$it.Subject } catch {}
-        [void]$it.Move($scope)
+        $filed = $it.Move($scope)
         $moved++
+        $newId = ''
+        try { $newId = [string]$filed.EntryID } catch {}
+        $movedEmails += [PSCustomObject]@{ entryId = $id; newEntryId = $newId }
     } catch {
         ${itemFailurePs('$id')}
     }
@@ -82,6 +86,7 @@ ConvertTo-Json -Depth 3 -InputObject ([PSCustomObject]@{
     folderPath    = [string]$scope.FolderPath
     folderCreated = $scopeCreated
     moved         = $moved
+    movedEmails   = @($movedEmails)
     failed        = @($failed)
 })
 `, 'scan');
@@ -90,6 +95,10 @@ ConvertTo-Json -Depth 3 -InputObject ([PSCustomObject]@{
         folderPath: str(e.folderPath),
         folderCreated: bool(e.folderCreated),
         moved: num(e.moved),
+        movedEmails: toArray(e.movedEmails).map(row => {
+            const m = record(row);
+            return { entryId: str(m.entryId), newEntryId: str(m.newEntryId) };
+        }),
         failed: itemFailures(e.failed),
     };
 }
